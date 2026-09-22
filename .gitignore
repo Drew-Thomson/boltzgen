@@ -210,3 +210,9 @@ data/test_set
 visualization_data_designed_only
 visualization_results_designed_only
 similarity.ipynb
+
+# Material Builder Outputs
+material_out/
+test_out*/
+*material_spec.yaml
+test_material.yaml

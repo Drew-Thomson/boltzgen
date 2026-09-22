@@ -598,6 +598,71 @@ class AtomDiffusion(Module):
                     ),
                 )
 
+            import os
+            topology = os.environ.get("MAT_TOPOLOGY", "floating")
+            if topology == "linear_tape":
+                guidance_scale = float(os.environ.get("MAT_GUIDANCE_SCALE", "1.0"))
+                min_end_dist = float(os.environ.get("MAT_MIN_END_DIST", "20.0"))
+                feats = network_condition_kwargs["feats"]
+                
+                # Only apply guidance during the design phase. If design_mask is empty, we are in the evaluation/refolding phase!
+                is_designing = "design_mask" in feats and feats["design_mask"].sum() > 0
+                
+                if is_designing and "asym_id" in feats and "atom_to_token" in feats and guidance_scale > 0:
+                    asym_id = feats["asym_id"] 
+                    atom_to_token = feats["atom_to_token"]
+                    b, m, _ = atom_coords_denoised.shape
+                    
+                    if asym_id.dim() == 1:
+                        asym_id = asym_id.unsqueeze(0)
+                    asym_id = asym_id.expand(b, -1)
+                        
+                    if atom_to_token.dim() == 2:
+                        atom_to_token = atom_to_token.unsqueeze(0)
+                    atom_to_token = atom_to_token.expand(b, -1, -1)
+                    
+                    token_indices = atom_to_token.long().argmax(dim=-1) # [b, n_atoms]
+                        
+                    grad_tensor = torch.zeros_like(atom_coords_denoised)
+                    apply_grad = False
+                    
+                    for batch_idx in range(b):
+                        atom_asym_id = asym_id[batch_idx, token_indices[batch_idx]] # [n_atoms]
+                        chain_ids = torch.unique(atom_asym_id)
+                        
+                        if len(chain_ids) >= 2:
+                            first_chain = chain_ids[0]
+                            last_chain = chain_ids[-1]
+                            
+                            mask_first = (atom_asym_id == first_chain) & atom_mask[batch_idx].bool()
+                            mask_last = (atom_asym_id == last_chain) & atom_mask[batch_idx].bool()
+                            
+                            n_first = mask_first.sum()
+                            n_last = mask_last.sum()
+                            
+                            if n_first > 0 and n_last > 0:
+                                com_first = atom_coords_denoised[batch_idx, mask_first].mean(dim=0)
+                                com_last = atom_coords_denoised[batch_idx, mask_last].mean(dim=0)
+                                
+                                dist = torch.norm(com_first - com_last)
+                                if dist < min_end_dist:
+                                    # Analytical gradient of ReLU(min_end_dist - dist)^2
+                                    # P = (min_end_dist - D)^2
+                                    # dP/dD = -2 * (min_end_dist - D)
+                                    # dD/dC1 = (C1 - C2) / D
+                                    diff = com_first - com_last
+                                    unit_vec = diff / (dist + 1e-8)
+                                    
+                                    grad_com1 = -2.0 * (min_end_dist - dist) * unit_vec
+                                    grad_com2 = 2.0 * (min_end_dist - dist) * unit_vec
+                                    
+                                    grad_tensor[batch_idx, mask_first] += grad_com1 / n_first
+                                    grad_tensor[batch_idx, mask_last] += grad_com2 / n_last
+                                    apply_grad = True
+
+                    if apply_grad:
+                        atom_coords_denoised = atom_coords_denoised - guidance_scale * grad_tensor * (sigma_t / t_hat)
+
             if self.alignment_reverse_diff:
                 with torch.autocast("cuda", enabled=False):
                     atom_coords_noisy = weighted_rigid_align(
