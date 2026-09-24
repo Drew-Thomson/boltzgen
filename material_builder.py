@@ -71,6 +71,7 @@ def main():
     parser.add_argument("--target_dz", type=float, default=5.0, help="Target axial translation per chain for helical (A)")
     parser.add_argument("--target_angle", type=float, default=30.0, help="Target rotation angle per chain for helical (degrees)")
     parser.add_argument("--arc_radius", type=float, default=100.0, help="Target radius of curvature for open_arc (A)")
+    parser.add_argument("--target_arc_spacing", type=float, default=10.0, help="Target spacing between adjacent chains along the arc (A)")
     parser.add_argument("--run", action="store_true", help="Execute BoltzGen after generating YAML")
     
     args = parser.parse_args()
@@ -87,6 +88,7 @@ def main():
     os.environ["MAT_TARGET_DZ"] = str(args.target_dz)
     os.environ["MAT_TARGET_ANGLE"] = str(args.target_angle)
     os.environ["MAT_ARC_RADIUS"] = str(args.arc_radius)
+    os.environ["MAT_TARGET_ARC_SPACING"] = str(args.target_arc_spacing)
     
     yaml_file = generate_yaml(args.copies, args.length)
     

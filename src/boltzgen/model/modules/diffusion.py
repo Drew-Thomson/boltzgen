@@ -752,9 +752,11 @@ class AtomDiffusion(Module):
                                         grad_com += (r - arc_radius) * r_dir
                                         
                                         # Angular spacing gradient (repulsion between adjacent)
-                                        # Assuming we want to space them out evenly on a circle, but not closed
-                                        # For an open arc, we can use the same angle as if they were cyclic, or just rely on them pushing each other apart
-                                        target_angle = 2 * math.pi / (N_chains * 2) # Use a generic target angle or spacing
+                                        target_arc_spacing = float(os.environ.get("MAT_TARGET_ARC_SPACING", "10.0"))
+                                        # Use chord length formula: d = 2 * R * sin(theta/2) => theta = 2 * arcsin(d / (2R))
+                                        # Clamp to avoid domain errors if target_arc_spacing > 2*arc_radius
+                                        ratio = min(target_arc_spacing / (2.0 * arc_radius + 1e-8), 1.0)
+                                        target_angle = 2.0 * math.asin(ratio)
                                         target_dot = arc_radius**2 * math.cos(target_angle)
                                         
                                         if i > 0:
