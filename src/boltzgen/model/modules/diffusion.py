@@ -751,20 +751,28 @@ class AtomDiffusion(Module):
                                             r_dir = U[:, 0]
                                         grad_com += (r - arc_radius) * r_dir
                                         
-                                        # Angular spacing gradient (repulsion between adjacent)
+                                        # Angular spacing gradient (chord pull)
                                         target_arc_spacing = float(os.environ.get("MAT_TARGET_ARC_SPACING", "10.0"))
-                                        # Use chord length formula: d = 2 * R * sin(theta/2) => theta = 2 * arcsin(d / (2R))
-                                        # Clamp to avoid domain errors if target_arc_spacing > 2*arc_radius
                                         ratio = min(target_arc_spacing / (2.0 * arc_radius + 1e-8), 1.0)
                                         target_angle = 2.0 * math.asin(ratio)
-                                        target_dot = arc_radius**2 * math.cos(target_angle)
                                         
-                                        if i > 0:
-                                            prev_p = centered_coms[i-1] - torch.dot(centered_coms[i-1], plane_normal) * plane_normal
-                                            grad_com += (torch.dot(c_proj, prev_p) - target_dot) * prev_p / (arc_radius**2 + 1e-8)
-                                        if i < N_chains - 1:
-                                            next_p = centered_coms[i+1] - torch.dot(centered_coms[i+1], plane_normal) * plane_normal
-                                            grad_com += (torch.dot(c_proj, next_p) - target_dot) * next_p / (arc_radius**2 + 1e-8)
+                                        if r > 1e-3:
+                                            if i > 0:
+                                                prev_p = centered_coms[i-1] - torch.dot(centered_coms[i-1], plane_normal) * plane_normal
+                                                prev_r = torch.norm(prev_p)
+                                                if prev_r > 1e-3:
+                                                    prev_dir = prev_p / prev_r
+                                                    target_dir = prev_dir * math.cos(target_angle) + torch.linalg.cross(plane_normal, prev_dir) * math.sin(target_angle)
+                                                    target_p = target_dir * r
+                                                    grad_com += (c_proj - target_p)
+                                            if i < N_chains - 1:
+                                                next_p = centered_coms[i+1] - torch.dot(centered_coms[i+1], plane_normal) * plane_normal
+                                                next_r = torch.norm(next_p)
+                                                if next_r > 1e-3:
+                                                    next_dir = next_p / next_r
+                                                    target_dir = next_dir * math.cos(-target_angle) + torch.linalg.cross(plane_normal, next_dir) * math.sin(-target_angle)
+                                                    target_p = target_dir * r
+                                                    grad_com += (c_proj - target_p)
                                             
                                         grad_com = torch.clamp(grad_com, min=-5.0, max=5.0)
                                         grad_tensor[batch_idx, chain_masks[i]] += grad_com
