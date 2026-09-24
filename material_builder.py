@@ -3,6 +3,7 @@ import os
 import subprocess
 import yaml
 import glob
+import datetime
 from pathlib import Path
 try:
     import biotite.structure as struc
@@ -64,16 +65,22 @@ def main():
     parser.add_argument("--output_dir", type=str, default="material_out", help="Directory for BoltzGen outputs")
     parser.add_argument("--num_designs", type=int, default=1, help="Number of design candidates to generate")
     parser.add_argument("--topology", type=str, choices=["floating", "cyclic", "linear_tape"], default="floating", help="Topology constraint during diffusion")
-    parser.add_argument("--guidance_scale", type=float, default=1.0, help="Strength of the shape guidance (for linear_tape)")
-    parser.add_argument("--min_end_dist", type=float, default=20.0, help="Minimum distance (A) between ends of a linear tape")
+    parser.add_argument("--guidance_scale", type=float, default=1.0, help="Strength of the shape guidance")
+    parser.add_argument("--target_pitch", type=float, default=10.0, help="Target spacing between adjacent chains for linear_tape (A)")
+    parser.add_argument("--target_radius", type=float, default=30.0, help="Target radius for cyclic (A)")
     parser.add_argument("--run", action="store_true", help="Execute BoltzGen after generating YAML")
     
     args = parser.parse_args()
     
+    if args.output_dir == "material_out":
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        args.output_dir = f"{args.output_dir}_{timestamp}"
+        
     # Set environment variables for the modified diffusion loop
     os.environ["MAT_TOPOLOGY"] = args.topology
     os.environ["MAT_GUIDANCE_SCALE"] = str(args.guidance_scale)
-    os.environ["MAT_MIN_END_DIST"] = str(args.min_end_dist)
+    os.environ["MAT_TARGET_PITCH"] = str(args.target_pitch)
+    os.environ["MAT_TARGET_RADIUS"] = str(args.target_radius)
     
     yaml_file = generate_yaml(args.copies, args.length)
     

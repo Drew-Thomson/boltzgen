@@ -599,69 +599,140 @@ class AtomDiffusion(Module):
                 )
 
             import os
+            import math
             topology = os.environ.get("MAT_TOPOLOGY", "floating")
-            if topology == "linear_tape":
+            if topology in ["linear_tape", "cyclic"]:
                 guidance_scale = float(os.environ.get("MAT_GUIDANCE_SCALE", "1.0"))
-                min_end_dist = float(os.environ.get("MAT_MIN_END_DIST", "20.0"))
-                feats = network_condition_kwargs["feats"]
+                target_pitch = float(os.environ.get("MAT_TARGET_PITCH", "10.0"))
+                target_radius = float(os.environ.get("MAT_TARGET_RADIUS", "30.0"))
                 
-                # Only apply guidance during the design phase. If design_mask is empty, we are in the evaluation/refolding phase!
+                feats = network_condition_kwargs["feats"]
+                import sys
+                is_folding = any("folding" in arg for arg in sys.argv)
                 is_designing = "design_mask" in feats and feats["design_mask"].sum() > 0
                 
-                if is_designing and "asym_id" in feats and "atom_to_token" in feats and guidance_scale > 0:
+                if not is_folding and is_designing and "asym_id" in feats and "atom_to_token" in feats and guidance_scale > 0:
                     asym_id = feats["asym_id"] 
                     atom_to_token = feats["atom_to_token"]
                     b, m, _ = atom_coords_denoised.shape
                     
-                    if asym_id.dim() == 1:
-                        asym_id = asym_id.unsqueeze(0)
-                    asym_id = asym_id.expand(b, -1)
+                    if asym_id.dim() == 1: asym_id = asym_id.unsqueeze(0)
+                    if asym_id.shape[0] == 1 and b > 1: asym_id = asym_id.expand(b, -1)
                         
-                    if atom_to_token.dim() == 2:
-                        atom_to_token = atom_to_token.unsqueeze(0)
-                    atom_to_token = atom_to_token.expand(b, -1, -1)
+                    if atom_to_token.dim() == 2: atom_to_token = atom_to_token.unsqueeze(0)
+                    if atom_to_token.shape[0] == 1 and b > 1: atom_to_token = atom_to_token.expand(b, -1, -1)
                     
-                    token_indices = atom_to_token.long().argmax(dim=-1) # [b, n_atoms]
-                        
+                    token_indices = atom_to_token.long().argmax(dim=-1)
+                    
                     grad_tensor = torch.zeros_like(atom_coords_denoised)
                     apply_grad = False
                     
                     for batch_idx in range(b):
-                        atom_asym_id = asym_id[batch_idx, token_indices[batch_idx]] # [n_atoms]
+                        atom_asym_id = asym_id[batch_idx, token_indices[batch_idx]]
                         chain_ids = torch.unique(atom_asym_id)
                         
                         if len(chain_ids) >= 2:
-                            first_chain = chain_ids[0]
-                            last_chain = chain_ids[-1]
+                            N_chains = len(chain_ids)
+                            chain_masks = [(atom_asym_id == c_id) & atom_mask[batch_idx].bool() for c_id in chain_ids]
                             
-                            mask_first = (atom_asym_id == first_chain) & atom_mask[batch_idx].bool()
-                            mask_last = (atom_asym_id == last_chain) & atom_mask[batch_idx].bool()
+                            # Calculate COMs
+                            coms = []
+                            for mask_c in chain_masks:
+                                if mask_c.sum() > 0:
+                                    coms.append(atom_coords_denoised[batch_idx, mask_c].mean(dim=0))
                             
-                            n_first = mask_first.sum()
-                            n_last = mask_last.sum()
-                            
-                            if n_first > 0 and n_last > 0:
-                                com_first = atom_coords_denoised[batch_idx, mask_first].mean(dim=0)
-                                com_last = atom_coords_denoised[batch_idx, mask_last].mean(dim=0)
+                            if len(coms) == N_chains:
+                                coms = torch.stack(coms) # [N, 3]
+                                overall_com = coms.mean(dim=0)
+                                centered_coms = coms - overall_com
                                 
-                                dist = torch.norm(com_first - com_last)
-                                if dist < min_end_dist:
-                                    # Analytical gradient of ReLU(min_end_dist - dist)^2
-                                    # P = (min_end_dist - D)^2
-                                    # dP/dD = -2 * (min_end_dist - D)
-                                    # dD/dC1 = (C1 - C2) / D
-                                    diff = com_first - com_last
-                                    unit_vec = diff / (dist + 1e-8)
+                                # SVD for principal axes
+                                cov = centered_coms.T @ centered_coms
+                                U, S, Vh = torch.linalg.svd(cov.to(torch.float32))
+                                U = U.to(coms.dtype)
+                                
+                                if topology == "linear_tape":
+                                    # Principal axis is the line
+                                    line_axis = U[:, 0]
+                                    if torch.dot(line_axis, coms[-1] - coms[0]) < 0:
+                                        line_axis = -line_axis
+                                        
+                                    for i in range(N_chains):
+                                        c = centered_coms[i]
+                                        z = torch.dot(c, line_axis)
+                                        c_perp = c - z * line_axis
+                                        
+                                        # Linearity gradient: pull towards axis
+                                        grad_com = c_perp # pulling c towards z*line_axis means c_new = c - c_perp
+                                        
+                                        # Spacing gradient: pull adjacent chains to target_pitch
+                                        if i > 0:
+                                            prev_c = centered_coms[i-1]
+                                            diff = c - prev_c
+                                            dist = torch.dot(diff, line_axis)
+                                            # We want dist = target_pitch. If dist < target_pitch, we push c forward (gradient is negative along line_axis)
+                                            grad_com += (dist - target_pitch) * line_axis
+                                        if i < N_chains - 1:
+                                            next_c = centered_coms[i+1]
+                                            diff = next_c - c
+                                            dist = torch.dot(diff, line_axis)
+                                            # We want dist = target_pitch. If dist < target_pitch, we push c backward
+                                            grad_com -= (dist - target_pitch) * line_axis
+                                            
+                                        num_atoms = chain_masks[i].sum().item()
+                                        grad_tensor[batch_idx, chain_masks[i]] += grad_com / num_atoms
+                                        apply_grad = True
+                                        
+                                elif topology == "cyclic":
+                                    # Normal to the plane is the smallest eigenvector
+                                    plane_normal = U[:, 2]
                                     
-                                    grad_com1 = -2.0 * (min_end_dist - dist) * unit_vec
-                                    grad_com2 = 2.0 * (min_end_dist - dist) * unit_vec
-                                    
-                                    grad_tensor[batch_idx, mask_first] += grad_com1 / n_first
-                                    grad_tensor[batch_idx, mask_last] += grad_com2 / n_last
-                                    apply_grad = True
+                                    for i in range(N_chains):
+                                        c = centered_coms[i]
+                                        z = torch.dot(c, plane_normal)
+                                        c_proj = c - z * plane_normal
+                                        r = torch.norm(c_proj)
+                                        
+                                        # Planarity gradient
+                                        grad_com = z * plane_normal
+                                        
+                                        # Radial gradient
+                                        if r > 1e-3:
+                                            r_dir = c_proj / r
+                                        else:
+                                            r_dir = U[:, 0]
+                                        grad_com += (r - target_radius) * r_dir
+                                        
+                                        # Angular spacing gradient (repulsion between adjacent)
+                                        target_angle = 2 * math.pi / N_chains
+                                        target_dot = target_radius**2 * math.cos(target_angle)
+                                        
+                                        if i > 0:
+                                            prev_p = centered_coms[i-1] - torch.dot(centered_coms[i-1], plane_normal) * plane_normal
+                                            # We want dot(c_proj, prev_p) ~ target_dot
+                                            # If dot > target_dot (angle too small), repel. 
+                                            grad_com += (torch.dot(c_proj, prev_p) - target_dot) * prev_p / (target_radius**2 + 1e-8)
+                                        if i < N_chains - 1:
+                                            next_p = centered_coms[i+1] - torch.dot(centered_coms[i+1], plane_normal) * plane_normal
+                                            grad_com += (torch.dot(c_proj, next_p) - target_dot) * next_p / (target_radius**2 + 1e-8)
+                                            
+                                        # Connect ends for cyclic
+                                        if i == 0:
+                                            last_p = centered_coms[-1] - torch.dot(centered_coms[-1], plane_normal) * plane_normal
+                                            grad_com += (torch.dot(c_proj, last_p) - target_dot) * last_p / (target_radius**2 + 1e-8)
+                                        if i == N_chains - 1:
+                                            first_p = centered_coms[0] - torch.dot(centered_coms[0], plane_normal) * plane_normal
+                                            grad_com += (torch.dot(c_proj, first_p) - target_dot) * first_p / (target_radius**2 + 1e-8)
+                                            
+                                        num_atoms = chain_masks[i].sum().item()
+                                        grad_tensor[batch_idx, chain_masks[i]] += grad_com / num_atoms
+                                        apply_grad = True
 
                     if apply_grad:
-                        atom_coords_denoised = atom_coords_denoised - guidance_scale * grad_tensor * (sigma_t / t_hat)
+                        # scale gracefully over timesteps. current_t usually 0->1.
+                        current_t = float(t_hat.max().item()) if hasattr(t_hat, "max") else float(t_hat)
+                        scale = guidance_scale * current_t * 0.5
+                        atom_coords_denoised = atom_coords_denoised - scale * grad_tensor
 
             if self.alignment_reverse_diff:
                 with torch.autocast("cuda", enabled=False):
