@@ -732,9 +732,28 @@ class AtomDiffusion(Module):
                                 
                                 elif topology == "open_arc":
                                     arc_radius = float(os.environ.get("MAT_ARC_RADIUS", "100.0"))
+                                    target_arc_spacing = float(os.environ.get("MAT_TARGET_ARC_SPACING", "10.0"))
+                                    ratio = min(target_arc_spacing / (2.0 * arc_radius + 1e-8), 1.0)
+                                    target_angle = 2.0 * math.asin(ratio)
+                                    
                                     # Normal to the plane is the smallest eigenvector
                                     plane_normal = U[:, 2]
                                     
+                                    # 1. Calculate the center direction of the current arc
+                                    dir_sum = torch.zeros_like(plane_normal)
+                                    for j in range(N_chains):
+                                        p_j = centered_coms[j] - torch.dot(centered_coms[j], plane_normal) * plane_normal
+                                        n_j = torch.norm(p_j)
+                                        if n_j > 1e-3:
+                                            dir_sum += p_j / n_j
+                                            
+                                    dir_sum_norm = torch.norm(dir_sum)
+                                    if dir_sum_norm > 1e-3:
+                                        arc_center_dir = dir_sum / dir_sum_norm
+                                    else:
+                                        # Fallback if chains form a perfect closed ring (dir_sum cancels to 0)
+                                        arc_center_dir = U[:, 0]
+                                        
                                     for i in range(N_chains):
                                         c = centered_coms[i]
                                         z = torch.dot(c, plane_normal)
@@ -748,31 +767,20 @@ class AtomDiffusion(Module):
                                         if r > 1e-3:
                                             r_dir = c_proj / r
                                         else:
-                                            r_dir = U[:, 0]
+                                            r_dir = arc_center_dir
                                         grad_com += (r - arc_radius) * r_dir
                                         
-                                        # Angular spacing gradient (chord pull)
-                                        target_arc_spacing = float(os.environ.get("MAT_TARGET_ARC_SPACING", "10.0"))
-                                        ratio = min(target_arc_spacing / (2.0 * arc_radius + 1e-8), 1.0)
-                                        target_angle = 2.0 * math.asin(ratio)
-                                        
+                                        # Angular spacing gradient (Absolute Global Template)
                                         if r > 1e-3:
-                                            if i > 0:
-                                                prev_p = centered_coms[i-1] - torch.dot(centered_coms[i-1], plane_normal) * plane_normal
-                                                prev_r = torch.norm(prev_p)
-                                                if prev_r > 1e-3:
-                                                    prev_dir = prev_p / prev_r
-                                                    target_dir = prev_dir * math.cos(target_angle) + torch.linalg.cross(plane_normal, prev_dir) * math.sin(target_angle)
-                                                    target_p = target_dir * r
-                                                    grad_com += (c_proj - target_p)
-                                            if i < N_chains - 1:
-                                                next_p = centered_coms[i+1] - torch.dot(centered_coms[i+1], plane_normal) * plane_normal
-                                                next_r = torch.norm(next_p)
-                                                if next_r > 1e-3:
-                                                    next_dir = next_p / next_r
-                                                    target_dir = next_dir * math.cos(-target_angle) + torch.linalg.cross(plane_normal, next_dir) * math.sin(-target_angle)
-                                                    target_p = target_dir * r
-                                                    grad_com += (c_proj - target_p)
+                                            # Chain i should be at angle theta_i relative to arc_center_dir
+                                            theta_i = (i - (N_chains - 1) / 2.0) * target_angle
+                                            
+                                            # Compute the ideal direction for this chain
+                                            target_dir = arc_center_dir * math.cos(theta_i) + torch.linalg.cross(plane_normal, arc_center_dir) * math.sin(theta_i)
+                                            
+                                            # Scale target_dir by current radius r so the angular pull is purely tangential
+                                            target_p = target_dir * r
+                                            grad_com += (c_proj - target_p)
                                             
                                         grad_com = torch.clamp(grad_com, min=-5.0, max=5.0)
                                         grad_tensor[batch_idx, chain_masks[i]] += grad_com
