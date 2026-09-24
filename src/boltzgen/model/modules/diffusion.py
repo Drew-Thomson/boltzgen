@@ -739,6 +739,13 @@ class AtomDiffusion(Module):
                                     # Normal to the plane is the smallest eigenvector
                                     plane_normal = U[:, 2]
                                     
+                                    # Fix Chirality: Align plane_normal with the sequence's natural rotation
+                                    seq_normal_sum = torch.zeros_like(plane_normal)
+                                    for j in range(N_chains - 1):
+                                        seq_normal_sum += torch.linalg.cross(centered_coms[j], centered_coms[j+1])
+                                    if torch.dot(seq_normal_sum, plane_normal) < 0:
+                                        plane_normal = -plane_normal
+                                    
                                     # 1. Calculate the center direction of the current arc
                                     dir_sum = torch.zeros_like(plane_normal)
                                     for j in range(N_chains):
@@ -770,17 +777,27 @@ class AtomDiffusion(Module):
                                             r_dir = arc_center_dir
                                         grad_com += (r - arc_radius) * r_dir
                                         
-                                        # Angular spacing gradient (Absolute Global Template)
+                                        # Angular spacing gradient (Strictly Tangential)
                                         if r > 1e-3:
-                                            # Chain i should be at angle theta_i relative to arc_center_dir
-                                            theta_i = (i - (N_chains - 1) / 2.0) * target_angle
+                                            # Ideal angle for this chain relative to arc_center_dir
+                                            theta_target = (i - (N_chains - 1) / 2.0) * target_angle
                                             
-                                            # Compute the ideal direction for this chain
-                                            target_dir = arc_center_dir * math.cos(theta_i) + torch.linalg.cross(plane_normal, arc_center_dir) * math.sin(theta_i)
+                                            # Target direction on the plane
+                                            target_dir = arc_center_dir * math.cos(theta_target) + torch.linalg.cross(plane_normal, arc_center_dir) * math.sin(theta_target)
                                             
-                                            # Scale target_dir by current radius r so the angular pull is purely tangential
-                                            target_p = target_dir * r
-                                            grad_com += (c_proj - target_p)
+                                            # Current direction on the plane
+                                            c_dir = c_proj / r
+                                            
+                                            # Signed angle from c_dir to target_dir around plane_normal
+                                            sin_diff = torch.dot(torch.linalg.cross(c_dir, target_dir), plane_normal)
+                                            cos_diff = torch.dot(c_dir, target_dir)
+                                            delta_theta = torch.atan2(sin_diff, cos_diff)
+                                            
+                                            # Purely tangential vector pointing counter-clockwise
+                                            tangent_dir = torch.linalg.cross(plane_normal, c_dir)
+                                            
+                                            # We subtract from grad_com so that c_new = c + (delta_theta * r * tangent_dir)
+                                            grad_com -= delta_theta * r * tangent_dir
                                             
                                         grad_com = torch.clamp(grad_com, min=-5.0, max=5.0)
                                         grad_tensor[batch_idx, chain_masks[i]] += grad_com
@@ -820,24 +837,35 @@ class AtomDiffusion(Module):
                                             dist = torch.dot(next_c - c, line_axis)
                                             grad_com -= (dist - target_dz) * line_axis
                                             
-                                        # 3. Twist gradient (angle)
+                                        # 3. Twist gradient (angle) - Strictly Tangential
                                         if r > 1e-3:
+                                            c_dir = p / r
+                                            tangent_dir = torch.linalg.cross(line_axis, c_dir)
+                                            angular_pull = 0.0
+                                            
                                             if i > 0:
                                                 prev_p = centered_coms[i-1] - torch.dot(centered_coms[i-1], line_axis) * line_axis
                                                 prev_r = torch.norm(prev_p)
                                                 if prev_r > 1e-3:
                                                     prev_dir = prev_p / prev_r
                                                     target_dir = prev_dir * math.cos(target_angle) + torch.linalg.cross(line_axis, prev_dir) * math.sin(target_angle)
-                                                    target_p = target_dir * r
-                                                    grad_com += (p - target_p)
+                                                    
+                                                    sin_diff = torch.dot(torch.linalg.cross(c_dir, target_dir), line_axis)
+                                                    cos_diff = torch.dot(c_dir, target_dir)
+                                                    angular_pull += torch.atan2(sin_diff, cos_diff) * r
+                                                    
                                             if i < N_chains - 1:
                                                 next_p = centered_coms[i+1] - torch.dot(centered_coms[i+1], line_axis) * line_axis
                                                 next_r = torch.norm(next_p)
                                                 if next_r > 1e-3:
                                                     next_dir = next_p / next_r
                                                     target_dir = next_dir * math.cos(-target_angle) + torch.linalg.cross(line_axis, next_dir) * math.sin(-target_angle)
-                                                    target_p = target_dir * r
-                                                    grad_com += (p - target_p)
+                                                    
+                                                    sin_diff = torch.dot(torch.linalg.cross(c_dir, target_dir), line_axis)
+                                                    cos_diff = torch.dot(c_dir, target_dir)
+                                                    angular_pull += torch.atan2(sin_diff, cos_diff) * r
+                                                    
+                                            grad_com -= angular_pull * tangent_dir
                                             
                                         grad_com = torch.clamp(grad_com, min=-5.0, max=5.0)
                                         grad_tensor[batch_idx, chain_masks[i]] += grad_com
