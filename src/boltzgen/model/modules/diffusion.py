@@ -624,9 +624,6 @@ class AtomDiffusion(Module):
                     
                     token_indices = atom_to_token.long().argmax(dim=-1)
                     
-                    grad_tensor = torch.zeros_like(atom_coords_denoised)
-                    apply_grad = False
-                    
                     for batch_idx in range(b):
                         atom_asym_id = asym_id[batch_idx, token_indices[batch_idx]]
                         chain_ids = torch.unique(atom_asym_id)
@@ -635,249 +632,155 @@ class AtomDiffusion(Module):
                             N_chains = len(chain_ids)
                             chain_masks = [(atom_asym_id == c_id) & atom_mask[batch_idx].bool() for c_id in chain_ids]
                             
+                            # Filter empty masks
+                            chain_masks = [m for m in chain_masks if m.sum() > 0]
+                            N_chains = len(chain_masks)
+                            if N_chains < 2:
+                                continue
+                                
                             # Calculate COMs
                             coms = []
                             for mask_c in chain_masks:
-                                if mask_c.sum() > 0:
-                                    coms.append(atom_coords_denoised[batch_idx, mask_c].mean(dim=0))
+                                coms.append(atom_coords_denoised[batch_idx, mask_c].mean(dim=0))
+                            coms = torch.stack(coms)
                             
-                            if len(coms) == N_chains:
-                                coms = torch.stack(coms) # [N, 3]
-                                overall_com = coms.mean(dim=0)
-                                centered_coms = coms - overall_com
+                            overall_com = coms.mean(dim=0)
+                            centered_coms = coms - overall_com
+                            
+                            # SVD for principal axes
+                            cov = centered_coms.T @ centered_coms
+                            U, S, Vh = torch.linalg.svd(cov.to(torch.float32))
+                            U = U.to(coms.dtype)
+                            
+                            # Determine Z-axis based on topology
+                            if topology in ["linear_tape", "helical"]:
+                                z_axis = U[:, 0]
+                                if torch.dot(z_axis, coms[-1] - coms[0]) < 0:
+                                    z_axis = -z_axis
+                            else: # cyclic, open_arc
+                                z_axis = U[:, 2]
+                                seq_normal_sum = torch.zeros_like(z_axis)
+                                for j in range(N_chains - 1):
+                                    seq_normal_sum += torch.linalg.cross(centered_coms[j], centered_coms[j+1])
+                                if torch.dot(seq_normal_sum, z_axis) < 0:
+                                    z_axis = -z_axis
+                                    
+                            # Determine X-axis
+                            x_axis = centered_coms[0] - torch.dot(centered_coms[0], z_axis) * z_axis
+                            x_norm = torch.norm(x_axis)
+                            if x_norm > 1e-3:
+                                x_axis = x_axis / x_norm
+                            else:
+                                temp = torch.tensor([1.0, 0.0, 0.0], device=z_axis.device, dtype=z_axis.dtype)
+                                if abs(torch.dot(temp, z_axis)) > 0.99:
+                                    temp = torch.tensor([0.0, 1.0, 0.0], device=z_axis.device, dtype=z_axis.dtype)
+                                x_axis = temp - torch.dot(temp, z_axis) * z_axis
+                                x_axis = x_axis / torch.norm(x_axis)
                                 
-                                # SVD for principal axes
-                                cov = centered_coms.T @ centered_coms
-                                U, S, Vh = torch.linalg.svd(cov.to(torch.float32))
-                                U = U.to(coms.dtype)
+                            # Y-axis
+                            y_axis = torch.linalg.cross(z_axis, x_axis)
+                            
+                            # Basis matrix
+                            B = torch.stack([x_axis, y_axis, z_axis], dim=1)
+                            
+                            # Extract local coordinates
+                            local_coords = []
+                            for mask in chain_masks:
+                                coords = atom_coords_denoised[batch_idx, mask]
+                                coords_centered = coords - overall_com
+                                coords_local = torch.matmul(coords_centered, B)
+                                local_coords.append(coords_local)
+                                
+                            # Map to reference and average
+                            ref_coords_acc = torch.zeros_like(local_coords[0])
+                            
+                            for i in range(N_chains):
+                                i_centered = i - (N_chains - 1) / 2.0
+                                coords = local_coords[i]
                                 
                                 if topology == "linear_tape":
-                                    # Principal axis is the line
-                                    line_axis = U[:, 0]
-                                    if torch.dot(line_axis, coms[-1] - coms[0]) < 0:
-                                        line_axis = -line_axis
-                                        
-                                    for i in range(N_chains):
-                                        c = centered_coms[i]
-                                        z = torch.dot(c, line_axis)
-                                        c_perp = c - z * line_axis
-                                        
-                                        # Linearity gradient: pull towards axis
-                                        grad_com = c_perp # pulling c towards z*line_axis means c_new = c - c_perp
-                                        
-                                        # Spacing gradient: pull adjacent chains to target_pitch
-                                        if i > 0:
-                                            prev_c = centered_coms[i-1]
-                                            diff = c - prev_c
-                                            dist = torch.dot(diff, line_axis)
-                                            # We want dist = target_pitch. If dist < target_pitch, we push c forward (gradient is negative along line_axis)
-                                            grad_com += (dist - target_pitch) * line_axis
-                                        if i < N_chains - 1:
-                                            next_c = centered_coms[i+1]
-                                            diff = next_c - c
-                                            dist = torch.dot(diff, line_axis)
-                                            # We want dist = target_pitch. If dist < target_pitch, we push c backward
-                                            grad_com -= (dist - target_pitch) * line_axis
-                                            
-                                        num_atoms = chain_masks[i].sum().item()
-                                        grad_com = torch.clamp(grad_com, min=-5.0, max=5.0)
-                                        grad_tensor[batch_idx, chain_masks[i]] += grad_com
-                                        apply_grad = True
-                                        
-                                elif topology == "cyclic":
-                                    # Normal to the plane is the smallest eigenvector
-                                    plane_normal = U[:, 2]
+                                    z_shift = i_centered * target_pitch
+                                    coords_ref = coords - torch.tensor([0, 0, z_shift], device=coords.device)
                                     
-                                    for i in range(N_chains):
-                                        c = centered_coms[i]
-                                        z = torch.dot(c, plane_normal)
-                                        c_proj = c - z * plane_normal
-                                        r = torch.norm(c_proj)
-                                        
-                                        # Planarity gradient
-                                        grad_com = z * plane_normal
-                                        
-                                        # Radial gradient
-                                        if r > 1e-3:
-                                            r_dir = c_proj / r
-                                        else:
-                                            r_dir = U[:, 0]
-                                        grad_com += (r - target_radius) * r_dir
-                                        
-                                        # Angular spacing gradient (repulsion between adjacent)
-                                        target_angle = 2 * math.pi / N_chains
-                                        target_dot = target_radius**2 * math.cos(target_angle)
-                                        
-                                        if i > 0:
-                                            prev_p = centered_coms[i-1] - torch.dot(centered_coms[i-1], plane_normal) * plane_normal
-                                            # We want dot(c_proj, prev_p) ~ target_dot
-                                            # If dot > target_dot (angle too small), repel. 
-                                            grad_com += (torch.dot(c_proj, prev_p) - target_dot) * prev_p / (target_radius**2 + 1e-8)
-                                        if i < N_chains - 1:
-                                            next_p = centered_coms[i+1] - torch.dot(centered_coms[i+1], plane_normal) * plane_normal
-                                            grad_com += (torch.dot(c_proj, next_p) - target_dot) * next_p / (target_radius**2 + 1e-8)
-                                            
-                                        # Connect ends for cyclic
-                                        if i == 0:
-                                            last_p = centered_coms[-1] - torch.dot(centered_coms[-1], plane_normal) * plane_normal
-                                            grad_com += (torch.dot(c_proj, last_p) - target_dot) * last_p / (target_radius**2 + 1e-8)
-                                        if i == N_chains - 1:
-                                            first_p = centered_coms[0] - torch.dot(centered_coms[0], plane_normal) * plane_normal
-                                            grad_com += (torch.dot(c_proj, first_p) - target_dot) * first_p / (target_radius**2 + 1e-8)
-                                            
-                                        num_atoms = chain_masks[i].sum().item()
-                                        grad_com = torch.clamp(grad_com, min=-5.0, max=5.0)
-                                        grad_tensor[batch_idx, chain_masks[i]] += grad_com
-                                        apply_grad = True
-                                
+                                elif topology == "cyclic":
+                                    theta = i * 2 * math.pi / N_chains
+                                    cos_t, sin_t = math.cos(-theta), math.sin(-theta)
+                                    R_inv = torch.tensor([[cos_t, -sin_t, 0], [sin_t, cos_t, 0], [0, 0, 1]], device=coords.device, dtype=coords.dtype)
+                                    coords_ref = torch.matmul(coords, R_inv.T)
+                                    
+                                elif topology == "helical":
+                                    target_angle = float(os.environ.get("MAT_TARGET_ANGLE", "30.0")) * math.pi / 180.0
+                                    target_dz = float(os.environ.get("MAT_TARGET_DZ", "5.0"))
+                                    theta = i_centered * target_angle
+                                    z_shift = i_centered * target_dz
+                                    
+                                    cos_t, sin_t = math.cos(-theta), math.sin(-theta)
+                                    R_inv = torch.tensor([[cos_t, -sin_t, 0], [sin_t, cos_t, 0], [0, 0, 1]], device=coords.device, dtype=coords.dtype)
+                                    shifted = coords - torch.tensor([0, 0, z_shift], device=coords.device)
+                                    coords_ref = torch.matmul(shifted, R_inv.T)
+                                    
                                 elif topology == "open_arc":
                                     arc_radius = float(os.environ.get("MAT_ARC_RADIUS", "100.0"))
                                     target_arc_spacing = float(os.environ.get("MAT_TARGET_ARC_SPACING", "10.0"))
                                     ratio = min(target_arc_spacing / (2.0 * arc_radius + 1e-8), 1.0)
                                     target_angle = 2.0 * math.asin(ratio)
                                     
-                                    # Normal to the plane is the smallest eigenvector
-                                    plane_normal = U[:, 2]
+                                    theta = i_centered * target_angle
+                                    cos_t, sin_t = math.cos(-theta), math.sin(-theta)
+                                    R_inv = torch.tensor([[cos_t, -sin_t, 0], [sin_t, cos_t, 0], [0, 0, 1]], device=coords.device, dtype=coords.dtype)
+                                    coords_ref = torch.matmul(coords, R_inv.T)
                                     
-                                    # Fix Chirality: Align plane_normal with the sequence's natural rotation
-                                    seq_normal_sum = torch.zeros_like(plane_normal)
-                                    for j in range(N_chains - 1):
-                                        seq_normal_sum += torch.linalg.cross(centered_coms[j], centered_coms[j+1])
-                                    if torch.dot(seq_normal_sum, plane_normal) < 0:
-                                        plane_normal = -plane_normal
+                                ref_coords_acc += coords_ref
+                                
+                            ref_coords = ref_coords_acc / N_chains
+                            
+                            # Enforce Radius for curved topologies
+                            if topology in ["cyclic", "helical", "open_arc"]:
+                                target_r = float(os.environ.get("MAT_TARGET_RADIUS", "30.0")) if topology != "open_arc" else float(os.environ.get("MAT_ARC_RADIUS", "100.0"))
+                                ref_com = ref_coords.mean(dim=0)
+                                current_r = math.sqrt(ref_com[0]**2 + ref_com[1]**2)
+                                if current_r > 1e-3:
+                                    dr = target_r - current_r
+                                    shift = torch.tensor([dr * ref_com[0]/current_r, dr * ref_com[1]/current_r, 0], device=ref_coords.device, dtype=ref_coords.dtype)
+                                    ref_coords += shift
                                     
-                                    # 1. Calculate the center direction of the current arc
-                                    dir_sum = torch.zeros_like(plane_normal)
-                                    for j in range(N_chains):
-                                        p_j = centered_coms[j] - torch.dot(centered_coms[j], plane_normal) * plane_normal
-                                        n_j = torch.norm(p_j)
-                                        if n_j > 1e-3:
-                                            dir_sum += p_j / n_j
-                                            
-                                    dir_sum_norm = torch.norm(dir_sum)
-                                    if dir_sum_norm > 1e-3:
-                                        arc_center_dir = dir_sum / dir_sum_norm
-                                    else:
-                                        # Fallback if chains form a perfect closed ring (dir_sum cancels to 0)
-                                        arc_center_dir = U[:, 0]
-                                        
-                                    for i in range(N_chains):
-                                        c = centered_coms[i]
-                                        z = torch.dot(c, plane_normal)
-                                        c_proj = c - z * plane_normal
-                                        r = torch.norm(c_proj)
-                                        
-                                        # Planarity gradient
-                                        grad_com = z * plane_normal
-                                        
-                                        # Radial gradient
-                                        if r > 1e-3:
-                                            r_dir = c_proj / r
-                                        else:
-                                            r_dir = arc_center_dir
-                                        grad_com += (r - arc_radius) * r_dir
-                                        
-                                        # Angular spacing gradient (Strictly Tangential)
-                                        if r > 1e-3:
-                                            # Ideal angle for this chain relative to arc_center_dir
-                                            theta_target = (i - (N_chains - 1) / 2.0) * target_angle
-                                            
-                                            # Target direction on the plane
-                                            target_dir = arc_center_dir * math.cos(theta_target) + torch.linalg.cross(plane_normal, arc_center_dir) * math.sin(theta_target)
-                                            
-                                            # Current direction on the plane
-                                            c_dir = c_proj / r
-                                            
-                                            # Signed angle from c_dir to target_dir around plane_normal
-                                            sin_diff = torch.dot(torch.linalg.cross(c_dir, target_dir), plane_normal)
-                                            cos_diff = torch.dot(c_dir, target_dir)
-                                            delta_theta = torch.atan2(sin_diff, cos_diff)
-                                            
-                                            # Purely tangential vector pointing counter-clockwise
-                                            tangent_dir = torch.linalg.cross(plane_normal, c_dir)
-                                            
-                                            # We subtract from grad_com so that c_new = c + (delta_theta * r * tangent_dir)
-                                            grad_com -= delta_theta * r * tangent_dir
-                                            
-                                        grad_com = torch.clamp(grad_com, min=-5.0, max=5.0)
-                                        grad_tensor[batch_idx, chain_masks[i]] += grad_com
-                                        apply_grad = True
+                            # Unfold and overwrite
+                            for i in range(N_chains):
+                                i_centered = i - (N_chains - 1) / 2.0
+                                
+                                if topology == "linear_tape":
+                                    z_shift = i_centered * target_pitch
+                                    coords_new_local = ref_coords + torch.tensor([0, 0, z_shift], device=ref_coords.device)
+                                    
+                                elif topology == "cyclic":
+                                    theta = i * 2 * math.pi / N_chains
+                                    cos_t, sin_t = math.cos(theta), math.sin(theta)
+                                    R_fwd = torch.tensor([[cos_t, -sin_t, 0], [sin_t, cos_t, 0], [0, 0, 1]], device=ref_coords.device, dtype=ref_coords.dtype)
+                                    coords_new_local = torch.matmul(ref_coords, R_fwd.T)
+                                    
                                 elif topology == "helical":
+                                    target_angle = float(os.environ.get("MAT_TARGET_ANGLE", "30.0")) * math.pi / 180.0
                                     target_dz = float(os.environ.get("MAT_TARGET_DZ", "5.0"))
-                                    target_angle_deg = float(os.environ.get("MAT_TARGET_ANGLE", "30.0"))
-                                    target_angle = target_angle_deg * math.pi / 180.0
+                                    theta = i_centered * target_angle
+                                    z_shift = i_centered * target_dz
                                     
-                                    # Principal axis
-                                    line_axis = U[:, 0]
-                                    if torch.dot(line_axis, coms[-1] - coms[0]) < 0:
-                                        line_axis = -line_axis
-                                        
-                                    for i in range(N_chains):
-                                        c = centered_coms[i]
-                                        z = torch.dot(c, line_axis)
-                                        p = c - z * line_axis
-                                        r = torch.norm(p)
-                                        
-                                        grad_com = torch.zeros_like(c)
-                                        
-                                        # 1. Radial gradient
-                                        if r > 1e-3:
-                                            r_dir = p / r
-                                        else:
-                                            r_dir = U[:, 1]
-                                        grad_com += (r - target_radius) * r_dir
-                                        
-                                        # 2. Spacing gradient (pitch)
-                                        if i > 0:
-                                            prev_c = centered_coms[i-1]
-                                            dist = torch.dot(c - prev_c, line_axis)
-                                            grad_com += (dist - target_dz) * line_axis
-                                        if i < N_chains - 1:
-                                            next_c = centered_coms[i+1]
-                                            dist = torch.dot(next_c - c, line_axis)
-                                            grad_com -= (dist - target_dz) * line_axis
-                                            
-                                        # 3. Twist gradient (angle) - Strictly Tangential
-                                        if r > 1e-3:
-                                            c_dir = p / r
-                                            tangent_dir = torch.linalg.cross(line_axis, c_dir)
-                                            angular_pull = 0.0
-                                            
-                                            if i > 0:
-                                                prev_p = centered_coms[i-1] - torch.dot(centered_coms[i-1], line_axis) * line_axis
-                                                prev_r = torch.norm(prev_p)
-                                                if prev_r > 1e-3:
-                                                    prev_dir = prev_p / prev_r
-                                                    target_dir = prev_dir * math.cos(target_angle) + torch.linalg.cross(line_axis, prev_dir) * math.sin(target_angle)
-                                                    
-                                                    sin_diff = torch.dot(torch.linalg.cross(c_dir, target_dir), line_axis)
-                                                    cos_diff = torch.dot(c_dir, target_dir)
-                                                    angular_pull += torch.atan2(sin_diff, cos_diff) * r
-                                                    
-                                            if i < N_chains - 1:
-                                                next_p = centered_coms[i+1] - torch.dot(centered_coms[i+1], line_axis) * line_axis
-                                                next_r = torch.norm(next_p)
-                                                if next_r > 1e-3:
-                                                    next_dir = next_p / next_r
-                                                    target_dir = next_dir * math.cos(-target_angle) + torch.linalg.cross(line_axis, next_dir) * math.sin(-target_angle)
-                                                    
-                                                    sin_diff = torch.dot(torch.linalg.cross(c_dir, target_dir), line_axis)
-                                                    cos_diff = torch.dot(c_dir, target_dir)
-                                                    angular_pull += torch.atan2(sin_diff, cos_diff) * r
-                                                    
-                                            grad_com -= angular_pull * tangent_dir
-                                            
-                                        grad_com = torch.clamp(grad_com, min=-5.0, max=5.0)
-                                        grad_tensor[batch_idx, chain_masks[i]] += grad_com
-                                        apply_grad = True
-
-
-                    if apply_grad:
-                        # scale gracefully over timesteps. current_t usually 0->1.
-                        current_t = float(t_hat.max().item()) if hasattr(t_hat, "max") else float(t_hat)
-                        scale = guidance_scale * current_t * 0.5
-                        atom_coords_denoised = atom_coords_denoised - scale * grad_tensor
-
+                                    cos_t, sin_t = math.cos(theta), math.sin(theta)
+                                    R_fwd = torch.tensor([[cos_t, -sin_t, 0], [sin_t, cos_t, 0], [0, 0, 1]], device=ref_coords.device, dtype=ref_coords.dtype)
+                                    coords_new_local = torch.matmul(ref_coords, R_fwd.T) + torch.tensor([0, 0, z_shift], device=ref_coords.device)
+                                    
+                                elif topology == "open_arc":
+                                    arc_radius = float(os.environ.get("MAT_ARC_RADIUS", "100.0"))
+                                    target_arc_spacing = float(os.environ.get("MAT_TARGET_ARC_SPACING", "10.0"))
+                                    ratio = min(target_arc_spacing / (2.0 * arc_radius + 1e-8), 1.0)
+                                    target_angle = 2.0 * math.asin(ratio)
+                                    
+                                    theta = i_centered * target_angle
+                                    cos_t, sin_t = math.cos(theta), math.sin(theta)
+                                    R_fwd = torch.tensor([[cos_t, -sin_t, 0], [sin_t, cos_t, 0], [0, 0, 1]], device=ref_coords.device, dtype=ref_coords.dtype)
+                                    coords_new_local = torch.matmul(ref_coords, R_fwd.T)
+                                    
+                                coords_new_global = torch.matmul(coords_new_local, B.T) + overall_com
+                                atom_coords_denoised[batch_idx, chain_masks[i]] = coords_new_global
             if self.alignment_reverse_diff:
                 with torch.autocast("cuda", enabled=False):
                     atom_coords_noisy = weighted_rigid_align(
