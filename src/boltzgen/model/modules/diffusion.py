@@ -638,149 +638,111 @@ class AtomDiffusion(Module):
                             if N_chains < 2:
                                 continue
                                 
-                            # Calculate COMs
+                            # 1. Calculate current COMs
                             coms = []
                             for mask_c in chain_masks:
                                 coms.append(atom_coords_denoised[batch_idx, mask_c].mean(dim=0))
                             coms = torch.stack(coms)
                             
-                            overall_com = coms.mean(dim=0)
-                            centered_coms = coms - overall_com
-                            
-                            # SVD for principal axes
-                            cov = centered_coms.T @ centered_coms
-                            U, S, Vh = torch.linalg.svd(cov.to(torch.float32))
-                            U = U.to(coms.dtype)
-                            
-                            # Determine Z-axis based on topology
-                            if topology in ["linear_tape", "helical"]:
-                                z_axis = U[:, 0]
-                                if torch.dot(z_axis, coms[-1] - coms[0]) < 0:
-                                    z_axis = -z_axis
-                            else: # cyclic, open_arc
-                                z_axis = U[:, 2]
-                                seq_normal_sum = torch.zeros_like(z_axis)
-                                for j in range(N_chains - 1):
-                                    seq_normal_sum += torch.linalg.cross(centered_coms[j], centered_coms[j+1])
-                                if torch.dot(seq_normal_sum, z_axis) < 0:
-                                    z_axis = -z_axis
-                                    
-                            # Determine X-axis
-                            x_axis = centered_coms[0] - torch.dot(centered_coms[0], z_axis) * z_axis
-                            x_norm = torch.norm(x_axis)
-                            if x_norm > 1e-3:
-                                x_axis = x_axis / x_norm
-                            else:
-                                temp = torch.tensor([1.0, 0.0, 0.0], device=z_axis.device, dtype=z_axis.dtype)
-                                if abs(torch.dot(temp, z_axis)) > 0.99:
-                                    temp = torch.tensor([0.0, 1.0, 0.0], device=z_axis.device, dtype=z_axis.dtype)
-                                x_axis = temp - torch.dot(temp, z_axis) * z_axis
-                                x_axis = x_axis / torch.norm(x_axis)
-                                
-                            # Y-axis
-                            y_axis = torch.linalg.cross(z_axis, x_axis)
-                            
-                            # Basis matrix
-                            B = torch.stack([x_axis, y_axis, z_axis], dim=1)
-                            
-                            # Extract local coordinates
-                            local_coords = []
-                            for mask in chain_masks:
-                                coords = atom_coords_denoised[batch_idx, mask]
-                                coords_centered = coords - overall_com
-                                coords_local = torch.matmul(coords_centered, B)
-                                local_coords.append(coords_local)
-                                
-                            # Map to reference and average
-                            ref_coords_acc = torch.zeros_like(local_coords[0])
+                            # 2. Generate Ideal COMs
+                            ideal_coms = torch.zeros_like(coms)
+                            target_angles = torch.zeros(N_chains, device=coms.device, dtype=coms.dtype)
                             
                             for i in range(N_chains):
                                 i_centered = i - (N_chains - 1) / 2.0
-                                coords = local_coords[i]
                                 
                                 if topology == "linear_tape":
+                                    target_pitch = float(os.environ.get("MAT_TARGET_PITCH", "10.0"))
                                     z_shift = i_centered * target_pitch
-                                    coords_ref = coords - torch.tensor([0, 0, z_shift], device=coords.device)
+                                    ideal_coms[i, 2] = z_shift
                                     
                                 elif topology == "cyclic":
-                                    theta = i * 2 * math.pi / N_chains
-                                    cos_t, sin_t = math.cos(-theta), math.sin(-theta)
-                                    R_inv = torch.tensor([[cos_t, -sin_t, 0], [sin_t, cos_t, 0], [0, 0, 1]], device=coords.device, dtype=coords.dtype)
-                                    coords_ref = torch.matmul(coords, R_inv.T)
+                                    target_r = float(os.environ.get("MAT_TARGET_RADIUS", "30.0"))
+                                    theta = i * (2 * math.pi / N_chains)
+                                    target_angles[i] = theta
+                                    ideal_coms[i, 0] = target_r * math.cos(theta)
+                                    ideal_coms[i, 1] = target_r * math.sin(theta)
                                     
                                 elif topology == "helical":
+                                    target_r = float(os.environ.get("MAT_TARGET_RADIUS", "30.0"))
                                     target_angle = float(os.environ.get("MAT_TARGET_ANGLE", "30.0")) * math.pi / 180.0
                                     target_dz = float(os.environ.get("MAT_TARGET_DZ", "5.0"))
-                                    theta = i_centered * target_angle
-                                    z_shift = i_centered * target_dz
-                                    
-                                    cos_t, sin_t = math.cos(-theta), math.sin(-theta)
-                                    R_inv = torch.tensor([[cos_t, -sin_t, 0], [sin_t, cos_t, 0], [0, 0, 1]], device=coords.device, dtype=coords.dtype)
-                                    shifted = coords - torch.tensor([0, 0, z_shift], device=coords.device)
-                                    coords_ref = torch.matmul(shifted, R_inv.T)
+                                    theta = i * target_angle
+                                    target_angles[i] = theta
+                                    ideal_coms[i, 0] = target_r * math.cos(theta)
+                                    ideal_coms[i, 1] = target_r * math.sin(theta)
+                                    ideal_coms[i, 2] = i_centered * target_dz
                                     
                                 elif topology == "open_arc":
                                     arc_radius = float(os.environ.get("MAT_ARC_RADIUS", "100.0"))
                                     target_arc_spacing = float(os.environ.get("MAT_TARGET_ARC_SPACING", "10.0"))
                                     ratio = min(target_arc_spacing / (2.0 * arc_radius + 1e-8), 1.0)
                                     target_angle = 2.0 * math.asin(ratio)
-                                    
                                     theta = i_centered * target_angle
-                                    cos_t, sin_t = math.cos(-theta), math.sin(-theta)
-                                    R_inv = torch.tensor([[cos_t, -sin_t, 0], [sin_t, cos_t, 0], [0, 0, 1]], device=coords.device, dtype=coords.dtype)
-                                    coords_ref = torch.matmul(coords, R_inv.T)
-                                    
-                                ref_coords_acc += coords_ref
+                                    target_angles[i] = theta
+                                    ideal_coms[i, 0] = arc_radius * math.cos(theta)
+                                    ideal_coms[i, 1] = arc_radius * math.sin(theta)
+
+                            # 3. Kabsch Alignment (Find R and t to map current coms to ideal_coms)
+                            P = coms
+                            Q = ideal_coms
+                            P_mean = P.mean(dim=0)
+                            Q_mean = Q.mean(dim=0)
+                            P_centered = P - P_mean
+                            Q_centered = Q - Q_mean
+                            
+                            H = P_centered.T @ Q_centered
+                            U, S, Vh = torch.linalg.svd(H)
+                            
+                            d = torch.sign(torch.det(U @ Vh))
+                            D = torch.eye(3, device=P.device, dtype=P.dtype)
+                            D[2, 2] = d
+                            
+                            R_kabsch = U @ D @ Vh # R_kabsch maps P to Q
+                            
+                            # 4. Map to Local Frame, Fold, and Average
+                            ref_coords_acc = None
+                            
+                            for i, mask in enumerate(chain_masks):
+                                coords = atom_coords_denoised[batch_idx, mask]
+                                # Transform to ideal local frame
+                                coords_local = torch.matmul(coords - P_mean, R_kabsch) + Q_mean
                                 
+                                # Fold (Inverse Transform)
+                                theta = target_angles[i]
+                                cos_t, sin_t = math.cos(theta), math.sin(theta)
+                                R_z_inv = torch.tensor([
+                                    [cos_t, -sin_t, 0], 
+                                    [sin_t, cos_t, 0], 
+                                    [0, 0, 1]
+                                ], device=coords.device, dtype=coords.dtype)
+                                
+                                coords_folded = torch.matmul(coords_local - ideal_coms[i], R_z_inv)
+                                
+                                if ref_coords_acc is None:
+                                    ref_coords_acc = coords_folded
+                                else:
+                                    ref_coords_acc += coords_folded
+                                    
                             ref_coords = ref_coords_acc / N_chains
                             
-                            # Enforce Radius for curved topologies
-                            if topology in ["cyclic", "helical", "open_arc"]:
-                                target_r = float(os.environ.get("MAT_TARGET_RADIUS", "30.0")) if topology != "open_arc" else float(os.environ.get("MAT_ARC_RADIUS", "100.0"))
-                                ref_com = ref_coords.mean(dim=0)
-                                current_r = math.sqrt(ref_com[0]**2 + ref_com[1]**2)
-                                if current_r > 1e-3:
-                                    dr = target_r - current_r
-                                    shift = torch.tensor([dr * ref_com[0]/current_r, dr * ref_com[1]/current_r, 0], device=ref_coords.device, dtype=ref_coords.dtype)
-                                    ref_coords += shift
-                                    
-                            # Unfold and overwrite
-                            for i in range(N_chains):
-                                i_centered = i - (N_chains - 1) / 2.0
+                            # 5. Unfold and Map back to Global Frame
+                            for i, mask in enumerate(chain_masks):
+                                theta = target_angles[i]
+                                cos_t, sin_t = math.cos(theta), math.sin(theta)
+                                R_z_fwd = torch.tensor([
+                                    [cos_t, sin_t, 0], 
+                                    [-sin_t, cos_t, 0], 
+                                    [0, 0, 1]
+                                ], device=ref_coords.device, dtype=ref_coords.dtype)
                                 
-                                if topology == "linear_tape":
-                                    z_shift = i_centered * target_pitch
-                                    coords_new_local = ref_coords + torch.tensor([0, 0, z_shift], device=ref_coords.device)
-                                    
-                                elif topology == "cyclic":
-                                    theta = i * 2 * math.pi / N_chains
-                                    cos_t, sin_t = math.cos(theta), math.sin(theta)
-                                    R_fwd = torch.tensor([[cos_t, -sin_t, 0], [sin_t, cos_t, 0], [0, 0, 1]], device=ref_coords.device, dtype=ref_coords.dtype)
-                                    coords_new_local = torch.matmul(ref_coords, R_fwd.T)
-                                    
-                                elif topology == "helical":
-                                    target_angle = float(os.environ.get("MAT_TARGET_ANGLE", "30.0")) * math.pi / 180.0
-                                    target_dz = float(os.environ.get("MAT_TARGET_DZ", "5.0"))
-                                    theta = i_centered * target_angle
-                                    z_shift = i_centered * target_dz
-                                    
-                                    cos_t, sin_t = math.cos(theta), math.sin(theta)
-                                    R_fwd = torch.tensor([[cos_t, -sin_t, 0], [sin_t, cos_t, 0], [0, 0, 1]], device=ref_coords.device, dtype=ref_coords.dtype)
-                                    coords_new_local = torch.matmul(ref_coords, R_fwd.T) + torch.tensor([0, 0, z_shift], device=ref_coords.device)
-                                    
-                                elif topology == "open_arc":
-                                    arc_radius = float(os.environ.get("MAT_ARC_RADIUS", "100.0"))
-                                    target_arc_spacing = float(os.environ.get("MAT_TARGET_ARC_SPACING", "10.0"))
-                                    ratio = min(target_arc_spacing / (2.0 * arc_radius + 1e-8), 1.0)
-                                    target_angle = 2.0 * math.asin(ratio)
-                                    
-                                    theta = i_centered * target_angle
-                                    cos_t, sin_t = math.cos(theta), math.sin(theta)
-                                    R_fwd = torch.tensor([[cos_t, -sin_t, 0], [sin_t, cos_t, 0], [0, 0, 1]], device=ref_coords.device, dtype=ref_coords.dtype)
-                                    coords_new_local = torch.matmul(ref_coords, R_fwd.T)
-                                    
-                                coords_new_global = torch.matmul(coords_new_local, B.T) + overall_com
-                                atom_coords_denoised[batch_idx, chain_masks[i]] = coords_new_global
+                                # Unfold
+                                coords_unfolded = torch.matmul(ref_coords, R_z_fwd) + ideal_coms[i]
+                                
+                                # Transform back to global
+                                coords_global = torch.matmul(coords_unfolded - Q_mean, R_kabsch.T) + P_mean
+                                
+                                atom_coords_denoised[batch_idx, mask] = coords_global
             if self.alignment_reverse_diff:
                 with torch.autocast("cuda", enabled=False):
                     atom_coords_noisy = weighted_rigid_align(
