@@ -84,6 +84,9 @@ def main():
     parser.add_argument("--spacing_noise", type=float, default=0.0, help="Standard deviation of noise to add to the spacing target (A)")
     parser.add_argument("--antiparallel_prob", type=float, default=0.0, help="Probability (0.0-1.0) of generating an antiparallel arrangement")
     parser.add_argument("--secondary_structure", type=str, default=None, help="Secondary structure constraint (H, S, L, or a full string)")
+    parser.add_argument("--inverse_temp", type=float, default=0.1, help="Sampling temperature for inverse folding (higher = more diverse)")
+    parser.add_argument("--seqs_per_backbone", type=int, default=1, help="Number of sequences to generate per structural backbone")
+    parser.add_argument("--avoid_aa", type=str, default="", help="String of amino acids to completely avoid (e.g. 'CWP')")
     parser.add_argument("--run", action="store_true", help="Execute BoltzGen after generating YAML")
     
     args = parser.parse_args()
@@ -115,8 +118,13 @@ def main():
             "boltzgen", "run", yaml_file,
             "--output", args.output_dir,
             "--protocol", "peptide-anything",
-            "--num_designs", str(args.num_designs)
+            "--num_designs", str(args.num_designs),
+            "--inverse_fold_num_sequences", str(args.seqs_per_backbone),
+            "--config", "inverse_folding", f"override.inverse_fold_args.sampling_temperature={args.inverse_temp}"
         ]
+        
+        if args.avoid_aa:
+            cmd.extend(["--inverse_fold_avoid", args.avoid_aa])
         
         try:
             subprocess.run(cmd, check=True)
