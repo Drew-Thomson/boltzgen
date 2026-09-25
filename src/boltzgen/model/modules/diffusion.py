@@ -555,6 +555,23 @@ class AtomDiffusion(Module):
         atom_coords = init_sigma * torch.randn(shape, device=self.device)
         feats = network_condition_kwargs["feats"]
 
+        import os
+        topology = os.environ.get("MAT_TOPOLOGY", "floating")
+        spacing_noise = float(os.environ.get("MAT_SPACING_NOISE", "0.0"))
+        if topology in ["linear_tape", "double_tape", "helical", "open_arc"] and spacing_noise > 0:
+            pitch_offsets = torch.randn(shape[0], device=self.device) * spacing_noise
+        else:
+            pitch_offsets = None
+            
+        if topology == "double_tape" and spacing_noise > 0:
+            feats["layer_offset_x"] = torch.randn(shape[0], device=self.device) * spacing_noise
+            feats["layer_offset_y"] = torch.randn(shape[0], device=self.device) * spacing_noise
+            feats["layer_offset_z"] = torch.randn(shape[0], device=self.device) * spacing_noise
+
+        antiparallel_prob = float(os.environ.get("MAT_ANTIPARALLEL_PROB", "0.0"))
+        if antiparallel_prob > 0:
+            feats["is_antiparallel"] = torch.rand(shape[0], device=self.device) < antiparallel_prob
+
         # gradually denoise
         coords_traj = [atom_coords]
         x0_coords_traj = []
@@ -601,10 +618,10 @@ class AtomDiffusion(Module):
             import os
             import math
             topology = os.environ.get("MAT_TOPOLOGY", "floating")
-            if topology in ["linear_tape", "cyclic", "helical", "open_arc"]:
+            if topology in ["linear_tape", "double_tape", "cyclic", "helical", "open_arc"]:
                 guidance_scale = float(os.environ.get("MAT_GUIDANCE_SCALE", "1.0"))
                 target_pitch = float(os.environ.get("MAT_TARGET_PITCH", "10.0"))
-                target_radius = float(os.environ.get("MAT_TARGET_RADIUS", "30.0"))
+                target_radius = float(os.environ.get("MAT_TARGET_RADIUS", "15.0"))
                 
                 feats = network_condition_kwargs["feats"]
                 import sys
@@ -653,20 +670,43 @@ class AtomDiffusion(Module):
                                 
                                 if topology == "linear_tape":
                                     target_pitch = float(os.environ.get("MAT_TARGET_PITCH", "10.0"))
+                                    if pitch_offsets is not None:
+                                        target_pitch = max(4.8, target_pitch + pitch_offsets[batch_idx].item())
                                     z_shift = i_centered * target_pitch
                                     ideal_coms[i, 2] = z_shift
                                     
+                                elif topology == "double_tape":
+                                    target_pitch = float(os.environ.get("MAT_TARGET_PITCH", "4.8"))
+                                    layer_dist = float(os.environ.get("MAT_LAYER_DIST", "10.0"))
+                                    if pitch_offsets is not None:
+                                        target_pitch = max(4.8, target_pitch + pitch_offsets[batch_idx].item())
+                                    
+                                    layer_idx = i % 2
+                                    z_idx = i // 2
+                                    num_in_layer = N_chains / 2.0
+                                    z_centered = z_idx - (num_in_layer - 1) / 2.0
+                                    
+                                    offset_x = feats.get("layer_offset_x", torch.zeros(shape[0], device=ideal_coms.device))[batch_idx].item() if layer_idx == 1 else 0.0
+                                    offset_y = feats.get("layer_offset_y", torch.zeros(shape[0], device=ideal_coms.device))[batch_idx].item() if layer_idx == 1 else 0.0
+                                    offset_z = feats.get("layer_offset_z", torch.zeros(shape[0], device=ideal_coms.device))[batch_idx].item() if layer_idx == 1 else 0.0
+                                    
+                                    ideal_coms[i, 0] = (layer_idx - 0.5) * layer_dist + offset_x
+                                    ideal_coms[i, 1] = offset_y
+                                    ideal_coms[i, 2] = z_centered * target_pitch + offset_z
+                                    
                                 elif topology == "cyclic":
-                                    target_r = float(os.environ.get("MAT_TARGET_RADIUS", "30.0"))
+                                    target_r = float(os.environ.get("MAT_TARGET_RADIUS", "15.0"))
                                     theta = i * (2 * math.pi / N_chains)
                                     target_angles[i] = theta
                                     ideal_coms[i, 0] = target_r * math.cos(theta)
                                     ideal_coms[i, 1] = target_r * math.sin(theta)
                                     
                                 elif topology == "helical":
-                                    target_r = float(os.environ.get("MAT_TARGET_RADIUS", "30.0"))
+                                    target_r = float(os.environ.get("MAT_TARGET_RADIUS", "15.0"))
                                     target_angle = float(os.environ.get("MAT_TARGET_ANGLE", "30.0")) * math.pi / 180.0
                                     target_dz = float(os.environ.get("MAT_TARGET_DZ", "5.0"))
+                                    if pitch_offsets is not None:
+                                        target_dz = max(4.8, target_dz + pitch_offsets[batch_idx].item())
                                     theta = i * target_angle
                                     target_angles[i] = theta
                                     ideal_coms[i, 0] = target_r * math.cos(theta)
@@ -676,6 +716,8 @@ class AtomDiffusion(Module):
                                 elif topology == "open_arc":
                                     arc_radius = float(os.environ.get("MAT_ARC_RADIUS", "100.0"))
                                     target_arc_spacing = float(os.environ.get("MAT_TARGET_ARC_SPACING", "10.0"))
+                                    if pitch_offsets is not None:
+                                        target_arc_spacing = max(4.8, target_arc_spacing + pitch_offsets[batch_idx].item())
                                     ratio = min(target_arc_spacing / (2.0 * arc_radius + 1e-8), 1.0)
                                     target_angle = 2.0 * math.asin(ratio)
                                     theta = i_centered * target_angle
@@ -719,6 +761,15 @@ class AtomDiffusion(Module):
                                 
                                 coords_folded = torch.matmul(coords_local - ideal_coms[i], R_z_inv)
                                 
+                                is_anti = False
+                                if "is_antiparallel" in feats:
+                                    is_anti = feats["is_antiparallel"][batch_idx].item()
+                                
+                                flip_condition = ((i % 2) + (i // 2)) % 2 == 1 if topology == "double_tape" else i % 2 == 1
+                                if is_anti and flip_condition:
+                                    R_flip = torch.tensor([[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]], device=coords_folded.device, dtype=coords_folded.dtype)
+                                    coords_folded = torch.matmul(coords_folded, R_flip)
+                                
                                 if ref_coords_acc is None:
                                     ref_coords_acc = coords_folded
                                 else:
@@ -737,7 +788,17 @@ class AtomDiffusion(Module):
                                 ], device=ref_coords.device, dtype=ref_coords.dtype)
                                 
                                 # Unfold
-                                coords_unfolded = torch.matmul(ref_coords, R_z_fwd) + ideal_coms[i]
+                                coords_to_unfold = ref_coords
+                                is_anti = False
+                                if "is_antiparallel" in feats:
+                                    is_anti = feats["is_antiparallel"][batch_idx].item()
+                                
+                                flip_condition = ((i % 2) + (i // 2)) % 2 == 1 if topology == "double_tape" else i % 2 == 1
+                                if is_anti and flip_condition:
+                                    R_flip = torch.tensor([[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]], device=ref_coords.device, dtype=ref_coords.dtype)
+                                    coords_to_unfold = torch.matmul(coords_to_unfold, R_flip)
+                                
+                                coords_unfolded = torch.matmul(coords_to_unfold, R_z_fwd) + ideal_coms[i]
                                 
                                 # Transform back to global
                                 coords_global = torch.matmul(coords_unfolded - Q_mean, R_kabsch.T) + P_mean
