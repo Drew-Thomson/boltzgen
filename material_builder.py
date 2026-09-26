@@ -12,18 +12,26 @@ try:
 except ImportError:
     print("Biotite not found. Please ensure it's installed (pip install biotite).")
 
-def generate_yaml(num_chains, length, output_file="material_spec.yaml"):
+def generate_yaml(num_chains, length, secondary_structure=None, output_file="material_spec.yaml"):
     entities = []
     # Letters for chains A, B, C, D...
     chain_ids = [chr(65 + i) for i in range(num_chains)]
     
     for c_id in chain_ids:
+        protein_dict = {
+            "id": c_id,
+            "sequence": str(length),
+            "symmetric_group": 1
+        }
+        
+        if secondary_structure:
+            if len(secondary_structure) == 1:
+                protein_dict["secondary_structure"] = secondary_structure * length
+            else:
+                protein_dict["secondary_structure"] = secondary_structure
+                
         entities.append({
-            "protein": {
-                "id": c_id,
-                "sequence": str(length),
-                "symmetric_group": 1
-            }
+            "protein": protein_dict
         })
         
     spec = {"entities": entities}
@@ -64,15 +72,21 @@ def main():
     parser.add_argument("--length", type=int, default=15, help="Length of the peptide")
     parser.add_argument("--output_dir", type=str, default="material_out", help="Directory for BoltzGen outputs")
     parser.add_argument("--num_designs", type=int, default=1, help="Number of design candidates to generate")
-    parser.add_argument("--topology", type=str, choices=["floating", "cyclic", "linear_tape", "helical", "open_arc"], default="floating", help="Topology constraint during diffusion")
+    parser.add_argument("--topology", type=str, choices=["floating", "cyclic", "linear_tape", "double_tape", "helical", "open_arc"], default="floating", help="Topology constraint during diffusion")
     parser.add_argument("--guidance_scale", type=float, default=1.0, help="Strength of the shape guidance")
-    parser.add_argument("--asym_unit_size", type=int, default=1, help="Number of chains forming a single asymmetric repeating unit (e.g. 2 for a two-layer fibre)")
-    parser.add_argument("--target_pitch", type=float, default=10.0, help="Target spacing between adjacent chains for linear_tape (A)")
-    parser.add_argument("--target_radius", type=float, default=30.0, help="Target radius for cyclic (A)")
+    parser.add_argument("--target_pitch", type=float, default=10.0, help="Target spacing between adjacent chains for tapes (A)")
+    parser.add_argument("--layer_dist", type=float, default=10.0, help="Target distance between the two layers in double_tape (A)")
+    parser.add_argument("--target_radius", type=float, default=15.0, help="Target radius for cyclic/helical (A)")
     parser.add_argument("--target_dz", type=float, default=5.0, help="Target axial translation per chain for helical (A)")
     parser.add_argument("--target_angle", type=float, default=30.0, help="Target rotation angle per chain for helical (degrees)")
     parser.add_argument("--arc_radius", type=float, default=100.0, help="Target radius of curvature for open_arc (A)")
     parser.add_argument("--target_arc_spacing", type=float, default=10.0, help="Target spacing between adjacent chains along the arc (A)")
+    parser.add_argument("--spacing_noise", type=float, default=0.0, help="Standard deviation of noise to add to the spacing target (A)")
+    parser.add_argument("--antiparallel_prob", type=float, default=0.0, help="Probability (0.0-1.0) of generating an antiparallel arrangement")
+    parser.add_argument("--secondary_structure", type=str, default=None, help="Secondary structure constraint (H, S, L, or a full string)")
+    parser.add_argument("--inverse_temp", type=float, default=0.1, help="Sampling temperature for inverse folding (higher = more diverse)")
+    parser.add_argument("--seqs_per_backbone", type=int, default=1, help="Number of sequences to generate per structural backbone")
+    parser.add_argument("--avoid_aa", type=str, default="", help="String of amino acids to completely avoid (e.g. 'CWP')")
     parser.add_argument("--run", action="store_true", help="Execute BoltzGen after generating YAML")
     
     args = parser.parse_args()
@@ -91,8 +105,11 @@ def main():
     os.environ["MAT_TARGET_ANGLE"] = str(args.target_angle)
     os.environ["MAT_ARC_RADIUS"] = str(args.arc_radius)
     os.environ["MAT_TARGET_ARC_SPACING"] = str(args.target_arc_spacing)
+    os.environ["MAT_SPACING_NOISE"] = str(args.spacing_noise)
+    os.environ["MAT_ANTIPARALLEL_PROB"] = str(args.antiparallel_prob)
+    os.environ["MAT_LAYER_DIST"] = str(args.layer_dist)
     
-    yaml_file = generate_yaml(args.copies, args.length)
+    yaml_file = generate_yaml(args.copies, args.length, secondary_structure=args.secondary_structure)
     
     if args.run:
         print(f"Running BoltzGen with {args.copies} copies of length {args.length}...")
@@ -101,8 +118,14 @@ def main():
         cmd = [
             "boltzgen", "run", yaml_file,
             "--output", args.output_dir,
-            "--num_designs", str(args.num_designs)
+            "--protocol", "peptide-anything",
+            "--num_designs", str(args.num_designs),
+            "--inverse_fold_num_sequences", str(args.seqs_per_backbone),
+            "--config", "inverse_folding", f"override.inverse_fold_args.sampling_temperature={args.inverse_temp}"
         ]
+        
+        if args.avoid_aa:
+            cmd.extend(["--inverse_fold_avoid", args.avoid_aa])
         
         try:
             subprocess.run(cmd, check=True)
