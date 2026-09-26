@@ -1955,8 +1955,9 @@ class DesignInfo(NumpySerializable):
             raise ValueError(msg)
 
         if any(~info.res_design_mask.astype(bool) & (info.res_ss_types != 0)):
-            msg = "Misspecified design info. There were residues that have a secondary structure type specified but are not set to be designed."
-            raise ValueError(msg)
+            import warnings
+            warnings.warn("Secondary structure specified for non-designed residues. It will be ignored and set to UNSPECIFIED.", UserWarning)
+            info.res_ss_types[~info.res_design_mask.astype(bool)] = 0
 
         # Validate residue constraints
         has_constraints = info.res_aa_constraint_mask.any(axis=1)
