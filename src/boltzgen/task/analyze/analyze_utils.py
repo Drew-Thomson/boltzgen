@@ -612,7 +612,7 @@ def compute_sasa(structure_path):
         ],
         dtype=float,
     )
-    atom_sasa = sasa(atoms, probe_radius=1.4, point_number=960, vdw_radii=radii)
+    atom_sasa = sasa(atoms, probe_radius=1.4, point_number=960, vdw_radii=radii, ignore_ions=False)
     mask = (
         np.array([rn.strip() in HYDROPHOBIC_RESIDUES for rn in res_names])
         & np.char.startswith(atom_names, "C")
@@ -676,6 +676,7 @@ def get_delta_sasa(
         probe_radius=1.4,
         point_number=960,
         vdw_radii=radii_bound,
+        ignore_ions=False
     )
     
     target_in_bound = atom_target_mask[bound_mask]
@@ -697,6 +698,7 @@ def get_delta_sasa(
         probe_radius=1.4,
         point_number=960,
         vdw_radii=radii_lig,
+        ignore_ions=False
     )
     delta = target_area.sum() - target_bound
     return delta, target_area.sum(), target_bound

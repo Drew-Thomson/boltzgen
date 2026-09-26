@@ -1,0 +1,12 @@
+copies: 6
+topology: "double_tape"
+layer_dist: 12.0
+target_pitch: 4.8
+antiparallel_prob: 0.0
+asym_unit:
+  - type: "protein"
+    length: 15
+    secondary_structure: "S"
+    symmetric_group: 1
+  - type: "ligand"
+    ccd: "ZN"

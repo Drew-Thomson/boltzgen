@@ -622,6 +622,7 @@ class AtomDiffusion(Module):
                 guidance_scale = float(os.environ.get("MAT_GUIDANCE_SCALE", "1.0"))
                 target_pitch = float(os.environ.get("MAT_TARGET_PITCH", "10.0"))
                 target_radius = float(os.environ.get("MAT_TARGET_RADIUS", "15.0"))
+                asym_unit_size = int(os.environ.get("MAT_ASYM_UNIT_SIZE", "1"))
                 
                 feats = network_condition_kwargs["feats"]
                 import sys
@@ -648,6 +649,13 @@ class AtomDiffusion(Module):
                         if len(chain_ids) >= 2 * asym_unit_size:
                             N_chains = len(chain_ids)
                             N_units = N_chains // asym_unit_size
+                            
+                            chain_masks = []
+                            for i in range(N_units):
+                                mask = torch.zeros_like(atom_asym_id, dtype=torch.bool)
+                                for j in range(asym_unit_size):
+                                    mask = mask | (atom_asym_id == chain_ids[i * asym_unit_size + j])
+                                chain_masks.append(mask)
                             
                             # Filter empty masks
                             chain_masks = [m for m in chain_masks if m.sum() > 0]
@@ -745,8 +753,11 @@ class AtomDiffusion(Module):
                             # 4. Map to Local Frame, Fold, and Average
                             ref_coords_acc = None
                             
+                            min_atoms = min(mask.sum().item() for mask in chain_masks)
+                            
                             for i, mask in enumerate(chain_masks):
-                                coords = atom_coords_denoised[batch_idx, mask]
+                                mask_indices = mask.nonzero(as_tuple=True)[0][:min_atoms]
+                                coords = atom_coords_denoised[batch_idx, mask_indices]
                                 # Transform to ideal local frame
                                 coords_local = torch.matmul(coords - P_mean, R_kabsch) + Q_mean
                                 
@@ -779,6 +790,7 @@ class AtomDiffusion(Module):
                             
                             # 5. Unfold and Map back to Global Frame
                             for i, mask in enumerate(chain_masks):
+                                mask_indices = mask.nonzero(as_tuple=True)[0][:min_atoms]
                                 theta = target_angles[i]
                                 cos_t, sin_t = math.cos(theta), math.sin(theta)
                                 R_z_fwd = torch.tensor([
@@ -800,18 +812,14 @@ class AtomDiffusion(Module):
                                 
                                 coords_unfolded = torch.matmul(coords_to_unfold, R_z_fwd) + ideal_coms[i]
                                 
-                                # Transform back to global
+                                # Transform back to global frame
                                 coords_global = torch.matmul(coords_unfolded - Q_mean, R_kabsch.T) + P_mean
                                 
-                                atom_coords_denoised[batch_idx, mask] = coords_global
-            if self.alignment_reverse_diff:
-                with torch.autocast("cuda", enabled=False):
-                    atom_coords_noisy = weighted_rigid_align(
-                        atom_coords_noisy.float(),
-                        atom_coords_denoised.float(),
-                        atom_mask.float(),
-                        atom_mask.float(),
-                    )
+                                # Assign to updated coordinates
+                                atom_coords_denoised[batch_idx, mask_indices] = (
+                                    (1 - guidance_scale) * atom_coords_denoised[batch_idx, mask_indices] +
+                                    guidance_scale * coords_global
+                                )
 
                 atom_coords_noisy = atom_coords_noisy.to(atom_coords_denoised)
 

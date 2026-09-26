@@ -12,28 +12,52 @@ try:
 except ImportError:
     print("Biotite not found. Please ensure it's installed (pip install biotite).")
 
-def generate_yaml(num_chains, length, secondary_structure=None, output_file="material_spec.yaml"):
+def get_chain_id(idx):
+    res = ""
+    while idx >= 0:
+        res = chr(65 + (idx % 26)) + res
+        idx = idx // 26 - 1
+    return res
+
+def generate_yaml_from_spec(num_copies, asym_unit_def, output_file="material_spec.yaml"):
     entities = []
-    # Letters for chains A, B, C, D...
-    chain_ids = [chr(65 + i) for i in range(num_chains)]
+    asym_unit_size = len(asym_unit_def)
+    total_chains = num_copies * asym_unit_size
     
-    for c_id in chain_ids:
-        protein_dict = {
-            "id": c_id,
-            "sequence": str(length),
-            "symmetric_group": 1
-        }
-        
-        if secondary_structure:
-            if len(secondary_structure) == 1:
-                protein_dict["secondary_structure"] = secondary_structure * length
-            else:
-                protein_dict["secondary_structure"] = secondary_structure
+    chain_ids = [get_chain_id(i) for i in range(total_chains)]
+    
+    for copy_idx in range(num_copies):
+        for chain_idx_in_unit, chain_def in enumerate(asym_unit_def):
+            global_chain_idx = copy_idx * asym_unit_size + chain_idx_in_unit
+            c_id = chain_ids[global_chain_idx]
+            
+            ent_type = chain_def.get("type", "protein")
+            ent_dict = {"id": c_id}
+            
+            if ent_type == "protein":
+                ent_dict["sequence"] = str(chain_def.get("length", 15))
+                ent_dict["symmetric_group"] = chain_def.get("symmetric_group", chain_idx_in_unit + 1)
                 
-        entities.append({
-            "protein": protein_dict
-        })
-        
+                sec_struct = chain_def.get("secondary_structure")
+                if sec_struct:
+                    length = chain_def.get("length", 15)
+                    if len(sec_struct) == 1:
+                        ent_dict["secondary_structure"] = sec_struct * length
+                    else:
+                        ent_dict["secondary_structure"] = sec_struct
+            elif ent_type == "ligand":
+                if "ccd" in chain_def:
+                    ent_dict["ccd"] = chain_def["ccd"]
+                if "smiles" in chain_def:
+                    ent_dict["smiles"] = chain_def["smiles"]
+            
+            # Carry over any other keys natively to BoltzGen (like residue_constraints)
+            for k, v in chain_def.items():
+                if k not in ["type", "length", "secondary_structure", "symmetric_group", "ccd", "smiles"]:
+                    ent_dict[k] = v
+                    
+            entities.append({ent_type: ent_dict})
+            
     spec = {"entities": entities}
     with open(output_file, "w") as f:
         yaml.dump(spec, f, sort_keys=False)
@@ -68,10 +92,12 @@ def calculate_bsa(structure_file):
 
 def main():
     parser = argparse.ArgumentParser(description="Build peptide materials using BoltzGen")
+    parser.add_argument("--config", type=str, default=None, help="YAML configuration file for the material")
     parser.add_argument("--copies", type=int, default=4, help="Number of identical peptide chains")
     parser.add_argument("--length", type=int, default=15, help="Length of the peptide")
     parser.add_argument("--output_dir", type=str, default="material_out", help="Directory for BoltzGen outputs")
     parser.add_argument("--num_designs", type=int, default=1, help="Number of design candidates to generate")
+    parser.add_argument("--asym_unit_size", type=int, default=1, help="Number of chains in the asymmetric unit")
     parser.add_argument("--topology", type=str, choices=["floating", "cyclic", "linear_tape", "double_tape", "helical", "open_arc"], default="floating", help="Topology constraint during diffusion")
     parser.add_argument("--guidance_scale", type=float, default=1.0, help="Strength of the shape guidance")
     parser.add_argument("--target_pitch", type=float, default=10.0, help="Target spacing between adjacent chains for tapes (A)")
@@ -91,6 +117,21 @@ def main():
     
     args = parser.parse_args()
     
+    config = {}
+    if args.config:
+        with open(args.config, 'r') as f:
+            config = yaml.safe_load(f)
+            
+        for k, v in config.items():
+            if hasattr(args, k) and k != "asym_unit":
+                setattr(args, k, v)
+                
+    if "asym_unit" in config:
+        asym_unit_def = config["asym_unit"]
+        args.asym_unit_size = len(asym_unit_def)
+    else:
+        asym_unit_def = [{"type": "protein", "length": args.length, "secondary_structure": args.secondary_structure} for _ in range(args.asym_unit_size)]
+    
     if args.output_dir == "material_out":
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         args.output_dir = f"{args.output_dir}_{timestamp}"
@@ -109,10 +150,13 @@ def main():
     os.environ["MAT_ANTIPARALLEL_PROB"] = str(args.antiparallel_prob)
     os.environ["MAT_LAYER_DIST"] = str(args.layer_dist)
     
-    yaml_file = generate_yaml(args.copies, args.length, secondary_structure=args.secondary_structure)
+    yaml_file = generate_yaml_from_spec(args.copies, asym_unit_def, output_file="material_spec.yaml")
     
     if args.run:
-        print(f"Running BoltzGen with {args.copies} copies of length {args.length}...")
+        if "asym_unit" in config:
+            print(f"Running BoltzGen with {args.copies} copies of an asymmetric unit of size {args.asym_unit_size}...")
+        else:
+            print(f"Running BoltzGen with {args.copies} copies of length {args.length}...")
         print(f"Topology constraint: {args.topology} (Asym Unit Size: {args.asym_unit_size})")
         
         cmd = [

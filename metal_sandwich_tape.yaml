@@ -1,0 +1,12 @@
+num_designs: 20
+copies: 10
+topology: "linear_tape"
+target_pitch: 4.8
+antiparallel_prob: 0.0
+asym_unit:
+  - type: "protein"
+    length: 15
+    secondary_structure: "S"
+    symmetric_group: 1
+  - type: "ligand"
+    ccd: "ZN"
