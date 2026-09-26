@@ -394,6 +394,9 @@ class DesignWriter(BasePredictionWriter):
                     "binding_type": binding_type[token_mask].cpu().numpy(),
                 }
 
+                if "symmetric_group" in sample:
+                    metadata_dict["symmetric_group"] = sample["symmetric_group"][token_mask].cpu().numpy()
+
                 # Add optional fields only if they have valid values (avoid None -> object array)
                 if "inverse_fold_design_mask" in sample:
                     metadata_dict["inverse_fold_design_mask"] = (

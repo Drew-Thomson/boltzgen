@@ -341,7 +341,8 @@ class FromGeneratedDataset(torch.utils.data.Dataset):
                 )
 
         # Get features
-        feat = self.get_feat(generated_path, design_mask, ss_type, binding_type, aa_constraint_mask)
+        symmetric_group = metadata.get("symmetric_group") if "symmetric_group" in metadata else None
+        feat = self.get_feat(generated_path, design_mask, ss_type, binding_type, aa_constraint_mask, symmetric_group)
 
         # Get native features
         if self.return_native:
@@ -355,7 +356,7 @@ class FromGeneratedDataset(torch.utils.data.Dataset):
 
         return feat
 
-    def get_feat(self, path, design_mask, ss_type=None, binding_type=None, aa_constraint_mask=None):
+    def get_feat(self, path, design_mask, ss_type=None, binding_type=None, aa_constraint_mask=None, symmetric_group=None):
         # Load design
         if self.extra_mol_dir is not None:
             mols = {
@@ -444,6 +445,9 @@ class FromGeneratedDataset(torch.utils.data.Dataset):
         # Set design mask for tokens. This will impact the featurization and add the atom14 features
         if self.design:
             tokenized.tokens["design_mask"] = torch.from_numpy(design_mask).bool()
+        
+        if symmetric_group is not None:
+            tokenized.tokens["symmetric_group"] = symmetric_group
 
         # Finalize input data
         input_data = Input(
