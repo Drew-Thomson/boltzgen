@@ -66,6 +66,7 @@ def main():
     parser.add_argument("--num_designs", type=int, default=1, help="Number of design candidates to generate")
     parser.add_argument("--topology", type=str, choices=["floating", "cyclic", "linear_tape", "helical", "open_arc"], default="floating", help="Topology constraint during diffusion")
     parser.add_argument("--guidance_scale", type=float, default=1.0, help="Strength of the shape guidance")
+    parser.add_argument("--asym_unit_size", type=int, default=1, help="Number of chains forming a single asymmetric repeating unit (e.g. 2 for a two-layer fibre)")
     parser.add_argument("--target_pitch", type=float, default=10.0, help="Target spacing between adjacent chains for linear_tape (A)")
     parser.add_argument("--target_radius", type=float, default=30.0, help="Target radius for cyclic (A)")
     parser.add_argument("--target_dz", type=float, default=5.0, help="Target axial translation per chain for helical (A)")
@@ -83,6 +84,7 @@ def main():
     # Set environment variables for the modified diffusion loop
     os.environ["MAT_TOPOLOGY"] = args.topology
     os.environ["MAT_GUIDANCE_SCALE"] = str(args.guidance_scale)
+    os.environ["MAT_ASYM_UNIT_SIZE"] = str(args.asym_unit_size)
     os.environ["MAT_TARGET_PITCH"] = str(args.target_pitch)
     os.environ["MAT_TARGET_RADIUS"] = str(args.target_radius)
     os.environ["MAT_TARGET_DZ"] = str(args.target_dz)
@@ -94,7 +96,7 @@ def main():
     
     if args.run:
         print(f"Running BoltzGen with {args.copies} copies of length {args.length}...")
-        print(f"Topology constraint: {args.topology}")
+        print(f"Topology constraint: {args.topology} (Asym Unit Size: {args.asym_unit_size})")
         
         cmd = [
             "boltzgen", "run", yaml_file,
