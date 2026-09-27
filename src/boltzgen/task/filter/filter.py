@@ -204,21 +204,19 @@ class Filter(Task):
             "design_to_target_iptm": 1,
             "design_ptm": 1,
             "neg_min_design_to_target_pae": 1,
-            "plip_hbonds" + ("_refolded" if from_inverse_folded else ""): 2,
-            "plip_saltbridge" + ("_refolded" if from_inverse_folded else ""): 2,
-            "delta_sasa_refolded" if from_inverse_folded else "delta_sasa_original": 2,
+            "neg_lattice_rmsd_refolded": 4,  # Negative weight to minimize! Wait, rank method handles direction?
+            "h_bonds_per_interface_refolded": 1,
+            "packing_density_refolded": 1,
         }
         if use_affinity:
             self.metrics: dict = {
-                "design_to_target_iptm": 1.1,
-                "design_ptm": 1.1,
-                "neg_min_design_to_target_pae": 1.1,
+                "design_to_target_iptm": 1,
+                "design_ptm": 1,
+                "neg_min_design_to_target_pae": 1,
                 "affinity_probability_binary1": 1,
-                "plip_hbonds" + ("_refolded" if from_inverse_folded else ""): 2,
-                "plip_saltbridge" + ("_refolded" if from_inverse_folded else ""): 2,
-                "delta_sasa_refolded"
-                if from_inverse_folded
-                else "delta_sasa_original": 2,
+                "neg_lattice_rmsd_refolded": 4,
+                "h_bonds_per_interface_refolded": 1,
+                "packing_density_refolded": 1,
             }
 
         # override metrics

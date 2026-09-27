@@ -1316,6 +1316,8 @@ class Boltz(LightningModule):
             pred_dict["atom_to_token"] = batch["atom_to_token"]
             pred_dict["mol_type"] = batch["mol_type"]
             pred_dict["backbone_mask"] = batch["backbone_mask"]
+            if "aa_constraint_mask" in batch:
+                pred_dict["aa_constraint_mask"] = batch["aa_constraint_mask"]
 
             pred_dict["coords"] = out["sample_atom_coords"]
             if not self.inverse_fold:

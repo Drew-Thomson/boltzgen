@@ -648,14 +648,18 @@ class AtomDiffusion(Module):
                         
                         if len(chain_ids) >= 2 * asym_unit_size:
                             N_chains = len(chain_ids)
-                            N_units = N_chains // asym_unit_size
                             
                             chain_masks = []
-                            for i in range(N_units):
-                                mask = torch.zeros_like(atom_asym_id, dtype=torch.bool)
-                                for j in range(asym_unit_size):
-                                    mask = mask | (atom_asym_id == chain_ids[i * asym_unit_size + j])
-                                chain_masks.append(mask)
+                            if topology == "double_tape":
+                                for c_id in chain_ids:
+                                    chain_masks.append(atom_asym_id == c_id)
+                            else:
+                                N_units = N_chains // asym_unit_size
+                                for i in range(N_units):
+                                    mask = torch.zeros_like(atom_asym_id, dtype=torch.bool)
+                                    for j in range(asym_unit_size):
+                                        mask = mask | (atom_asym_id == chain_ids[i * asym_unit_size + j])
+                                    chain_masks.append(mask)
                             
                             # Filter empty masks
                             chain_masks = [m for m in chain_masks if m.sum() > 0]
@@ -689,8 +693,11 @@ class AtomDiffusion(Module):
                                     if pitch_offsets is not None:
                                         target_pitch = max(4.8, target_pitch + pitch_offsets[batch_idx].item())
                                     
-                                    layer_idx = i % 2
-                                    z_idx = i // 2
+                                    unit_idx = i // 2
+                                    chain_in_unit = i % 2
+                                    layer_idx = (chain_in_unit + unit_idx) % 2
+                                    z_idx = unit_idx
+                                    
                                     num_in_layer = N_chains / 2.0
                                     z_centered = z_idx - (num_in_layer - 1) / 2.0
                                     
@@ -751,7 +758,11 @@ class AtomDiffusion(Module):
                             R_kabsch = U @ D @ Vh # R_kabsch maps P to Q
                             
                             # 4. Map to Local Frame, Fold, and Average
-                            ref_coords_acc = None
+                            if topology == "double_tape":
+                                ref_coords_accs = [None] * asym_unit_size
+                                counts = [0] * asym_unit_size
+                            else:
+                                ref_coords_acc = None
                             
                             min_atoms = min(mask.sum().item() for mask in chain_masks)
                             
@@ -776,18 +787,70 @@ class AtomDiffusion(Module):
                                 if "is_antiparallel" in feats:
                                     is_anti = feats["is_antiparallel"][batch_idx].item()
                                 
-                                flip_condition = ((i % 2) + (i // 2)) % 2 == 1 if topology == "double_tape" else i % 2 == 1
-                                if is_anti and flip_condition:
-                                    R_flip = torch.tensor([[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]], device=coords_folded.device, dtype=coords_folded.dtype)
-                                    coords_folded = torch.matmul(coords_folded, R_flip)
+                                if is_anti:
+                                    if topology == "double_tape":
+                                        unit_idx = i // 2
+                                        chain_in_unit = i % 2
+                                        layer_idx = (chain_in_unit + unit_idx) % 2
+                                        z_idx = unit_idx
+                                        if layer_idx == 0:
+                                            if z_idx % 2 == 1:
+                                                R_rot = torch.tensor([[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]], device=coords_folded.device, dtype=coords_folded.dtype)
+                                                coords_folded = torch.matmul(coords_folded, R_rot)
+                                        else:
+                                            if z_idx % 2 == 0:
+                                                R_rot = torch.tensor([[-1., 0., 0.], [0., 1., 0.], [0., 0., -1.]], device=coords_folded.device, dtype=coords_folded.dtype)
+                                            else:
+                                                R_rot = torch.tensor([[-1., 0., 0.], [0., -1., 0.], [0., 0., 1.]], device=coords_folded.device, dtype=coords_folded.dtype)
+                                            coords_folded = torch.matmul(coords_folded, R_rot)
+                                    else:
+                                        if i % 2 == 1:
+                                            R_flip = torch.tensor([[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]], device=coords_folded.device, dtype=coords_folded.dtype)
+                                            coords_folded = torch.matmul(coords_folded, R_flip)
                                 
-                                if ref_coords_acc is None:
-                                    ref_coords_acc = coords_folded
+                                if topology == "double_tape":
+                                    c_idx = i % asym_unit_size
+                                    if ref_coords_accs[c_idx] is None:
+                                        ref_coords_accs[c_idx] = coords_folded
+                                    else:
+                                        ref_coords_accs[c_idx] += coords_folded
+                                    counts[c_idx] += 1
                                 else:
-                                    ref_coords_acc += coords_folded
+                                    if ref_coords_acc is None:
+                                        ref_coords_acc = coords_folded
+                                    else:
+                                        ref_coords_acc += coords_folded
                                     
-                            ref_coords = ref_coords_acc / N_chains
-                            
+                            if topology == "double_tape":
+                                aligned_ref_coords_list = []
+                                for acc, count in zip(ref_coords_accs, counts):
+                                    ref_coords = acc / count
+                                    cov_ref = ref_coords.T @ ref_coords
+                                    U_ref, _, _ = torch.linalg.svd(cov_ref)
+                                    
+                                    primary_idx = 0
+                                    
+                                    if torch.abs(U_ref[0, 1]) > torch.abs(U_ref[0, 2]):
+                                        secondary_idx = 1
+                                        tertiary_idx = 2
+                                    else:
+                                        secondary_idx = 2
+                                        tertiary_idx = 1
+                                        
+                                    target_y = torch.tensor([0., 1., 0.], device=U_ref.device, dtype=U_ref.dtype) * torch.sign(U_ref[1, primary_idx] + 1e-6)
+                                    target_x = torch.tensor([1., 0., 0.], device=U_ref.device, dtype=U_ref.dtype) * torch.sign(U_ref[0, secondary_idx] + 1e-6)
+                                    target_z = torch.linalg.cross(target_x, target_y)
+                                    
+                                    current_U = torch.stack([U_ref[:, secondary_idx], U_ref[:, primary_idx], U_ref[:, tertiary_idx]], dim=1)
+                                    if torch.det(current_U) < 0:
+                                        current_U[:, 2] = -current_U[:, 2]
+                                        
+                                    target_U = torch.stack([target_x, target_y, target_z], dim=1)
+                                    R_tilt = target_U @ current_U.T
+                                    aligned_ref_coords_list.append(torch.matmul(ref_coords, R_tilt.T))
+                            else:
+                                ref_coords = ref_coords_acc / N_chains
+                                
                             # 5. Unfold and Map back to Global Frame
                             for i, mask in enumerate(chain_masks):
                                 mask_indices = mask.nonzero(as_tuple=True)[0][:min_atoms]
@@ -800,15 +863,35 @@ class AtomDiffusion(Module):
                                 ], device=ref_coords.device, dtype=ref_coords.dtype)
                                 
                                 # Unfold
-                                coords_to_unfold = ref_coords
+                                if topology == "double_tape":
+                                    c_idx = i % asym_unit_size
+                                    coords_to_unfold = aligned_ref_coords_list[c_idx]
+                                else:
+                                    coords_to_unfold = ref_coords
                                 is_anti = False
                                 if "is_antiparallel" in feats:
                                     is_anti = feats["is_antiparallel"][batch_idx].item()
                                 
-                                flip_condition = ((i % 2) + (i // 2)) % 2 == 1 if topology == "double_tape" else i % 2 == 1
-                                if is_anti and flip_condition:
-                                    R_flip = torch.tensor([[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]], device=ref_coords.device, dtype=ref_coords.dtype)
-                                    coords_to_unfold = torch.matmul(coords_to_unfold, R_flip)
+                                if is_anti:
+                                    if topology == "double_tape":
+                                        unit_idx = i // 2
+                                        chain_in_unit = i % 2
+                                        layer_idx = (chain_in_unit + unit_idx) % 2
+                                        z_idx = unit_idx
+                                        if layer_idx == 0:
+                                            if z_idx % 2 == 1:
+                                                R_rot = torch.tensor([[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]], device=ref_coords.device, dtype=ref_coords.dtype)
+                                                coords_to_unfold = torch.matmul(coords_to_unfold, R_rot)
+                                        else:
+                                            if z_idx % 2 == 0:
+                                                R_rot = torch.tensor([[-1., 0., 0.], [0., 1., 0.], [0., 0., -1.]], device=ref_coords.device, dtype=ref_coords.dtype)
+                                            else:
+                                                R_rot = torch.tensor([[-1., 0., 0.], [0., -1., 0.], [0., 0., 1.]], device=ref_coords.device, dtype=ref_coords.dtype)
+                                            coords_to_unfold = torch.matmul(coords_to_unfold, R_rot)
+                                    else:
+                                        if i % 2 == 1:
+                                            R_flip = torch.tensor([[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]], device=ref_coords.device, dtype=ref_coords.dtype)
+                                            coords_to_unfold = torch.matmul(coords_to_unfold, R_flip)
                                 
                                 coords_unfolded = torch.matmul(coords_to_unfold, R_z_fwd) + ideal_coms[i]
                                 

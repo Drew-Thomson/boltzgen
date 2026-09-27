@@ -342,6 +342,7 @@ yaml_keys = [
     "position",
     "allowed",
     "disallowed",
+    "weights",
 ]
 
 
@@ -820,16 +821,13 @@ def parse_residue_constraints(
         # Parse amino acid specification
         allowed = constraint.get("allowed", None)
         disallowed = constraint.get("disallowed", None)
+        weights = constraint.get("weights", None)
 
-        # Validate: cannot have both allowed and disallowed
-        if allowed is not None and disallowed is not None:
+        # Validate: exactly one
+        num_spec = sum([allowed is not None, disallowed is not None, weights is not None])
+        if num_spec != 1:
             raise ValueError(
-                f"Position {position_spec}: cannot specify both 'allowed' and 'disallowed'"
-            )
-
-        if allowed is None and disallowed is None:
-            raise ValueError(
-                f"Position {position_spec}: must specify either 'allowed' or 'disallowed'"
+                f"Position {position_spec}: must specify exactly one of 'allowed', 'disallowed', or 'weights'"
             )
 
         if allowed is not None:
@@ -1341,9 +1339,10 @@ class YamlDesignParser:
         def recursive_check(data):
             if isinstance(data, dict):
                 for key, value in data.items():
-                    if key not in yaml_keys:
+                    if key not in yaml_keys and key != "weights":
                         invalid_keys.add(key)
-                    recursive_check(value)
+                    if key != "weights":
+                        recursive_check(value)
             elif isinstance(data, list):
                 for item in data:
                     recursive_check(item)

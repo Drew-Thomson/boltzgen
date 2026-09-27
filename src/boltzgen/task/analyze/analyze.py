@@ -1150,6 +1150,88 @@ class Analyze(Task):
                 elif isinstance(feat[key], (float, int)):
                     metrics[key] = feat[key]
 
+        # --- CUSTOM MATERIAL METRICS ---
+        try:
+            if self.fold_metrics and "coords" in feat and feat_out is not None and "coords" in feat_out:
+                import scipy.optimize
+                
+                coords_ideal = feat["coords"][0] if feat["coords"].dim() == 3 else feat["coords"]
+                coords_refold = feat_out["coords"][0] if feat_out["coords"].dim() == 3 else feat_out["coords"]
+                
+                bb_mask_ideal = feat["backbone_mask"].bool()
+                if bb_mask_ideal.dim() == 2: bb_mask_ideal = bb_mask_ideal[0]
+                bb_mask_refold = feat_out["backbone_mask"].bool()
+                if bb_mask_refold.dim() == 2: bb_mask_refold = bb_mask_refold[0]
+                
+                c_id_ideal = feat["asym_id"]
+                if c_id_ideal.dim() == 2: c_id_ideal = c_id_ideal[0]
+                t_idx = feat["token_index"].long()
+                if t_idx.dim() == 2: t_idx = t_idx[0]
+                atom_asym_id_ideal = c_id_ideal[t_idx]
+                
+                c_id_refold = feat_out["asym_id"]
+                if c_id_refold.dim() == 2: c_id_refold = c_id_refold[0]
+                t_idx_r = feat_out["token_index"].long()
+                if t_idx_r.dim() == 2: t_idx_r = t_idx_r[0]
+                atom_asym_id_refold = c_id_refold[t_idx_r]
+                
+                def get_coms(coords, chain_ids, bb_mask):
+                    chains = torch.unique(chain_ids[bb_mask])
+                    coms = []
+                    masks = []
+                    for c in chains:
+                        m = (chain_ids == c) & bb_mask
+                        coms.append(coords[m].mean(dim=0))
+                        masks.append(m)
+                    return torch.stack(coms), chains, masks
+                    
+                coms_ideal, chains_ideal, masks_ideal = get_coms(coords_ideal, atom_asym_id_ideal, bb_mask_ideal)
+                coms_refold, chains_refold, masks_refold = get_coms(coords_refold, atom_asym_id_refold, bb_mask_refold)
+                
+                num_chains = len(chains_ideal)
+                
+                if num_chains > 0 and len(chains_refold) == num_chains:
+                    dist_matrix = torch.cdist(coms_refold, coms_ideal).cpu().numpy()
+                    row_ind, col_ind = scipy.optimize.linear_sum_assignment(dist_matrix)
+                    
+                    aligned_r = []
+                    aligned_i = []
+                    for r_idx, i_idx in zip(row_ind, col_ind):
+                        m_r = masks_refold[r_idx]
+                        m_i = masks_ideal[i_idx]
+                        if m_r.sum() == m_i.sum():
+                            aligned_r.append(coords_refold[m_r])
+                            aligned_i.append(coords_ideal[m_i])
+                            
+                    if len(aligned_r) > 0:
+                        c_r = torch.cat(aligned_r)
+                        c_i = torch.cat(aligned_i)
+                        
+                        P = c_r - c_r.mean(dim=0)
+                        Q = c_i - c_i.mean(dim=0)
+                        H = P.T @ Q
+                        U, S, Vh = torch.linalg.svd(H)
+                        d = torch.sign(torch.det(U @ Vh))
+                        D = torch.eye(3, device=P.device, dtype=P.dtype)
+                        D[2, 2] = d
+                        R = U @ D @ Vh
+                        c_r_aligned = P @ R
+                        
+                        rmsd = torch.sqrt(torch.mean((c_r_aligned - Q)**2)).item()
+                        metrics["neg_lattice_rmsd_refolded"] = -rmsd
+                        
+                        # Twist angle roughly estimated by the angle of rotation matrix relative to identity 
+                        # after aligning the primary axes. For simplicity, just use lattice_rmsd as primary geometry proxy.
+                        
+                    # H-bonds per interface
+                    hbonds = metrics.get("plip_hbonds_refolded", 0)
+                    metrics["h_bonds_per_interface_refolded"] = hbonds / max(1, num_chains - 1)
+                    
+                    packing = metrics.get("delta_sasa_refolded", 0)
+                    metrics["packing_density_refolded"] = packing / max(1, num_chains)
+        except Exception as e:
+            print("Error computing material metrics:", e)
+
         # Write outputs to files and return sample_id for conformation of successful processing
         data = {
             "target_id": target_id,

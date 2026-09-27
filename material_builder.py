@@ -181,24 +181,19 @@ def main():
             if not output_cifs:
                 output_cifs = glob.glob(os.path.join(args.output_dir, "intermediate_designs_inverse_folded", "refold_cif", "*.cif"))
             
-            if output_cifs:
-                results = []
-                print(f"\nAnalyzing {len(output_cifs)} generated structures...")
-                for struct_file in output_cifs:
-                    bsa, sasa = calculate_bsa(struct_file)
-                    ratio = bsa/sasa if sasa > 0 else 0
-                    results.append({"file": os.path.basename(struct_file), "bsa": bsa, "sasa": sasa, "ratio": ratio})
+            import pandas as pd
+            metrics_csvs = glob.glob(os.path.join(args.output_dir, "final_ranked_designs", "metrics_*.csv"))
+            if metrics_csvs:
+                df = pd.read_csv(metrics_csvs[0])
+                df = df.sort_values("max_rank")
+                print("\n--- TOP RESULTS BY COMPOSITE METRICS ---")
+                cols_to_print = ["id", "max_rank", "neg_lattice_rmsd_refolded", "h_bonds_per_interface_refolded", "packing_density_refolded", "design_to_target_iptm"]
+                available_cols = [c for c in cols_to_print if c in df.columns]
                 
-                # Sort by BSA descending (highest BSA first)
-                results.sort(key=lambda x: x["bsa"], reverse=True)
-                
-                print("\n--- RESULTS RANKED BY BURIED SURFACE AREA ---")
-                print(f"{'Filename':<35} | {'BSA (A^2)':<10} | {'SASA (A^2)':<10} | {'BSA/SASA'}")
-                print("-" * 75)
-                for res in results:
-                    print(f"{res['file']:<35} | {res['bsa']:<10.2f} | {res['sasa']:<10.2f} | {res['ratio']:.3f}")
+                # Format to nice strings
+                print(df[available_cols].head(10).to_string(index=False))
             else:
-                print("No output CIF files found to calculate BSA.")
+                print("No output metrics CSV found.")
                 
         except subprocess.CalledProcessError as e:
             print(f"Error running BoltzGen: {e}")
