@@ -564,9 +564,20 @@ class AtomDiffusion(Module):
             pitch_offsets = None
             
         if topology == "double_tape" and spacing_noise > 0:
-            feats["layer_offset_x"] = torch.randn(shape[0], device=self.device) * spacing_noise
-            feats["layer_offset_y"] = torch.randn(shape[0], device=self.device) * spacing_noise
-            feats["layer_offset_z"] = torch.randn(shape[0], device=self.device) * spacing_noise
+            # Symmetric noise for the double_tape lattice:
+            # - layer_dist_noise perturbs the inter-sheet distance (applied equally to both
+            #   sheets via the existing (layer_idx - 0.5) * layer_dist formula), encouraging
+            #   sampling of different hydrophobic core packing distances.
+            # - layer_offset_y/z_noise perturb the *relative* in-plane registry between the two
+            #   sheets, split symmetrically (+/- half) so the lattice stays centered and neither
+            #   sheet is treated as a fixed reference.
+            layer_dist_noise = torch.randn(shape[0], device=self.device) * spacing_noise
+            layer_offset_y_noise = torch.randn(shape[0], device=self.device) * spacing_noise
+            layer_offset_z_noise = torch.randn(shape[0], device=self.device) * spacing_noise
+        else:
+            layer_dist_noise = None
+            layer_offset_y_noise = None
+            layer_offset_z_noise = None
 
         antiparallel_prob = float(os.environ.get("MAT_ANTIPARALLEL_PROB", "0.0"))
         if antiparallel_prob > 0:
@@ -693,6 +704,12 @@ class AtomDiffusion(Module):
                                     if pitch_offsets is not None:
                                         target_pitch = max(4.8, target_pitch + pitch_offsets[batch_idx].item())
                                     
+                                    # Inter-sheet distance noise: perturb layer_dist itself (shared
+                                    # by both sheets via the symmetric (layer_idx - 0.5) formula
+                                    # below), with a physical floor to avoid sheet collision.
+                                    if layer_dist_noise is not None:
+                                        layer_dist = max(6.0, layer_dist + layer_dist_noise[batch_idx].item())
+                                    
                                     unit_idx = i // 2
                                     chain_in_unit = i % 2
                                     layer_idx = (chain_in_unit + unit_idx) % 2
@@ -701,11 +718,14 @@ class AtomDiffusion(Module):
                                     num_in_layer = N_chains / 2.0
                                     z_centered = z_idx - (num_in_layer - 1) / 2.0
                                     
-                                    offset_x = feats.get("layer_offset_x", torch.zeros(shape[0], device=ideal_coms.device))[batch_idx].item() if layer_idx == 1 else 0.0
-                                    offset_y = feats.get("layer_offset_y", torch.zeros(shape[0], device=ideal_coms.device))[batch_idx].item() if layer_idx == 1 else 0.0
-                                    offset_z = feats.get("layer_offset_z", torch.zeros(shape[0], device=ideal_coms.device))[batch_idx].item() if layer_idx == 1 else 0.0
+                                    # In-plane registry noise between sheets: split symmetrically
+                                    # (+/- half) between layer_idx 0 and 1 so the lattice stays
+                                    # centered and neither sheet is a fixed, noise-free reference.
+                                    layer_sign = 1.0 if layer_idx == 1 else -1.0
+                                    offset_y = layer_sign * (layer_offset_y_noise[batch_idx].item() / 2.0) if layer_offset_y_noise is not None else 0.0
+                                    offset_z = layer_sign * (layer_offset_z_noise[batch_idx].item() / 2.0) if layer_offset_z_noise is not None else 0.0
                                     
-                                    ideal_coms[i, 0] = (layer_idx - 0.5) * layer_dist + offset_x
+                                    ideal_coms[i, 0] = (layer_idx - 0.5) * layer_dist
                                     ideal_coms[i, 1] = offset_y
                                     ideal_coms[i, 2] = z_centered * target_pitch + offset_z
                                     
