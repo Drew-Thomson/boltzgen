@@ -405,8 +405,10 @@ class DesignWriter(BasePredictionWriter):
 
                 # Per-residue amino acid constraints (for inverse folding step)
                 # Only save if constraints exist AND have non-zero values
+                print("DEBUG WRITER:", "aa_constraint_mask" in batch)
                 if "aa_constraint_mask" in batch:
                     aa_mask = batch["aa_constraint_mask"][0]
+                    print("DEBUG MASK ANY:", aa_mask.any().item(), aa_mask.max().item(), aa_mask.min().item())
                     if aa_mask.any():  # Only save if there are actual constraints
                         metadata_dict["aa_constraint_mask"] = aa_mask[token_mask].cpu().numpy()
 
