@@ -216,3 +216,8 @@ material_out/
 test_out*/
 *material_spec.yaml
 test_material.yaml
+
+# Material Topologies and Roadmap
+PEPTIDE_MATERIALS_TOPOLOGIES.md
+roadmap.md
+ROADMAP.md

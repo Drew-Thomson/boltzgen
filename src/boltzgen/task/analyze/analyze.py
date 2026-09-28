@@ -1157,25 +1157,38 @@ class Analyze(Task):
                 
                 coords_ideal = feat["coords"][0] if feat["coords"].dim() == 3 else feat["coords"]
                 coords_refold = feat_out["coords"][0] if feat_out["coords"].dim() == 3 else feat_out["coords"]
-                
                 bb_mask_ideal = feat["backbone_mask"].bool()
                 if bb_mask_ideal.dim() == 2: bb_mask_ideal = bb_mask_ideal[0]
                 bb_mask_refold = feat_out["backbone_mask"].bool()
                 if bb_mask_refold.dim() == 2: bb_mask_refold = bb_mask_refold[0]
-                
+
+                def expand_token_feature_to_atoms(
+                    token_feature: torch.Tensor,
+                    atom_mapping: torch.Tensor,
+                ) -> torch.Tensor:
+                    """Expand per-token features using either supported atom mapping layout."""
+                    if atom_mapping.dim() == 3:
+                        atom_mapping = atom_mapping[0]
+                    if atom_mapping.dim() == 1:
+                        return token_feature[atom_mapping.long()]
+                    return atom_mapping.to(token_feature.dtype) @ token_feature
+
                 c_id_ideal = feat["asym_id"]
                 if c_id_ideal.dim() == 2: c_id_ideal = c_id_ideal[0]
-                t_idx = feat["token_index"].long()
-                if t_idx.dim() == 2: t_idx = t_idx[0]
-                atom_asym_id_ideal = c_id_ideal[t_idx]
-                
+                atom_asym_id_ideal = expand_token_feature_to_atoms(
+                    c_id_ideal, feat["atom_to_token"]
+                )
+
                 c_id_refold = feat_out["asym_id"]
                 if c_id_refold.dim() == 2: c_id_refold = c_id_refold[0]
-                t_idx_r = feat_out["token_index"].long()
-                if t_idx_r.dim() == 2: t_idx_r = t_idx_r[0]
-                atom_asym_id_refold = c_id_refold[t_idx_r]
+                atom_asym_id_refold = expand_token_feature_to_atoms(
+                    c_id_refold, feat["atom_to_token"]
+                )
                 
                 def get_coms(coords, chain_ids, bb_mask):
+                    L = coords.shape[0]
+                    chain_ids = chain_ids[:L]
+                    bb_mask = bb_mask[:L]
                     chains = torch.unique(chain_ids[bb_mask])
                     coms = []
                     masks = []

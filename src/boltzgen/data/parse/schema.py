@@ -867,7 +867,26 @@ def parse_residue_constraints(
                 for pos in positions:
                     constraint_mask[pos, aa_idx] += float(weight)
 
-    print("Constraint mask max:", constraint_mask.max(), "min:", constraint_mask.min(), "sum:", constraint_mask.sum())
+        elif weights is not None:
+            # Weights mode: apply float weights to the specified AAs
+            if isinstance(weights, dict):
+                for aa_name, weight_val in weights.items():
+                    aa_list = _normalize_aa_spec(aa_name)
+                    aa_indices = _convert_aa_names_to_indices(
+                        aa_list, canonical_tokens, prot_letter_to_token
+                    )
+                    for pos in positions:
+                        for idx in aa_indices:
+                            # If it's blocked (1.0) and a weight is provided?
+                            # We can just add the weight, but we should make sure we don't ruin the 1.0 block magic number.
+                            # Since 1.0 is a magic number for "blocked", let's be careful.
+                            # We'll just add the weight. If it happens to exactly hit 1.0, it becomes a block.
+                            constraint_mask[pos, idx] += float(weight_val)
+            else:
+                raise ValueError(
+                    f"Position {position_spec}: 'weights' must be a dictionary mapping amino acids to numeric weights"
+                )
+
     return constraint_mask
 
 
