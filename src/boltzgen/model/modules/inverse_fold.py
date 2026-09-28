@@ -55,10 +55,9 @@ def build_constraint_logit_mask(
         expected_shape = (num_nodes, num_aa)
         if aa_constraint_mask.shape == expected_shape:
             custom_mask = aa_constraint_mask.to(device=device, dtype=torch.float32)
-            if torch.all((custom_mask == 0.0) | (custom_mask == 1.0)):
-                bias[custom_mask == 1.0] = -inf
-            else:
-                bias = custom_mask
+            bias = custom_mask.clone()
+            # 1.0 is the legacy/magic value for "disallowed" hard blocks.
+            bias[custom_mask == 1.0] = -inf
 
     global_blocked = torch.zeros(num_aa, dtype=torch.bool, device=device)
     for res_type in inverse_fold_restriction:

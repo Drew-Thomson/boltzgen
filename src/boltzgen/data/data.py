@@ -1970,7 +1970,7 @@ class DesignInfo(NumpySerializable):
             )
 
         # Check if any designed position has ALL amino acids blocked
-        all_blocked = info.res_aa_constraint_mask.all(axis=1)
+        all_blocked = (info.res_aa_constraint_mask == 1.0).all(axis=1)
         if any(all_blocked & info.res_design_mask.astype(bool)):
             msg = "Invalid residue constraints: some designed positions have all amino acids disallowed."
             raise ValueError(msg)

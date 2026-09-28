@@ -98,15 +98,16 @@ def main():
     parser.add_argument("--output_dir", type=str, default="material_out", help="Directory for BoltzGen outputs")
     parser.add_argument("--num_designs", type=int, default=1, help="Number of design candidates to generate")
     parser.add_argument("--asym_unit_size", type=int, default=1, help="Number of chains in the asymmetric unit")
-    parser.add_argument("--topology", type=str, choices=["floating", "cyclic", "linear_tape", "double_tape", "helical", "open_arc"], default="floating", help="Topology constraint during diffusion")
+    parser.add_argument("--topology", type=str, choices=["floating", "cyclic", "linear_tape", "double_tape", "helical", "open_arc", "cage_tetrahedral", "cage_octahedral"], default="floating", help="Topology constraint during diffusion")
     parser.add_argument("--guidance_scale", type=float, default=1.0, help="Strength of the shape guidance")
-    parser.add_argument("--target_pitch", type=float, default=10.0, help="Target spacing between adjacent chains for tapes (A)")
+    parser.add_argument("--target_pitch", type=float, default=4.8, help="Target spacing between adjacent chains for tapes (A)")
     parser.add_argument("--layer_dist", type=float, default=10.0, help="Target distance between the two layers in double_tape (A)")
     parser.add_argument("--target_radius", type=float, default=15.0, help="Target radius for cyclic/helical (A)")
     parser.add_argument("--target_dz", type=float, default=5.0, help="Target axial translation per chain for helical (A)")
     parser.add_argument("--target_angle", type=float, default=30.0, help="Target rotation angle per chain for helical (degrees)")
     parser.add_argument("--arc_radius", type=float, default=100.0, help="Target radius of curvature for open_arc (A)")
     parser.add_argument("--target_arc_spacing", type=float, default=10.0, help="Target spacing between adjacent chains along the arc (A)")
+    parser.add_argument("--target_cage_radius", type=float, default=None, help="Target cage radius (A); defaults to 20.0 for tetrahedral and 35.0 for octahedral cages")
     parser.add_argument("--spacing_noise", type=float, default=0.0, help="Standard deviation of noise to add to the spacing target (A)")
     parser.add_argument("--antiparallel_prob", type=float, default=0.0, help="Probability (0.0-1.0) of generating an antiparallel arrangement")
     parser.add_argument("--secondary_structure", type=str, default=None, help="Secondary structure constraint (H, S, L, or a full string)")
@@ -125,12 +126,26 @@ def main():
         for k, v in config.items():
             if hasattr(args, k) and k != "asym_unit":
                 setattr(args, k, v)
-                
+
     if "asym_unit" in config:
         asym_unit_def = config["asym_unit"]
         args.asym_unit_size = len(asym_unit_def)
     else:
         asym_unit_def = [{"type": "protein", "length": args.length, "secondary_structure": args.secondary_structure} for _ in range(args.asym_unit_size)]
+
+    if args.target_cage_radius is None:
+        args.target_cage_radius = 20.0 if args.topology == "cage_tetrahedral" else 35.0
+
+    expected_copies = {
+        "cage_tetrahedral": 12,
+        "cage_octahedral": 24,
+    }.get(args.topology)
+    if expected_copies is not None and args.copies != expected_copies:
+        parser.error(
+            f"{args.topology} requires --copies {expected_copies}; got {args.copies}"
+        )
+    if expected_copies is not None and args.asym_unit_size != 1:
+        parser.error(f"{args.topology} requires --asym_unit_size 1")
     
     if args.output_dir == "material_out":
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -149,6 +164,7 @@ def main():
     os.environ["MAT_SPACING_NOISE"] = str(args.spacing_noise)
     os.environ["MAT_ANTIPARALLEL_PROB"] = str(args.antiparallel_prob)
     os.environ["MAT_LAYER_DIST"] = str(args.layer_dist)
+    os.environ["MAT_TARGET_CAGE_RADIUS"] = str(args.target_cage_radius)
     
     yaml_file = generate_yaml_from_spec(args.copies, asym_unit_def, output_file="material_spec.yaml")
     
