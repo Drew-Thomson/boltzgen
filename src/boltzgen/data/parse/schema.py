@@ -858,14 +858,6 @@ def parse_residue_constraints(
             for pos in positions:
                 for idx in aa_indices:
                     constraint_mask[pos, idx] = 1.0  # Block specified
-                    
-        elif weights is not None:
-            if not isinstance(weights, dict):
-                raise ValueError(f"Position {position_spec}: 'weights' must be a dictionary of AA to float")
-            for aa, weight in weights.items():
-                aa_idx = _convert_aa_names_to_indices([aa], canonical_tokens, prot_letter_to_token)[0]
-                for pos in positions:
-                    constraint_mask[pos, aa_idx] += float(weight)
 
         elif weights is not None:
             # Weights mode: apply float weights to the specified AAs
