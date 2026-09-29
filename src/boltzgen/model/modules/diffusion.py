@@ -559,12 +559,20 @@ class AtomDiffusion(Module):
         import os
         topology = os.environ.get("MAT_TOPOLOGY", "floating")
         spacing_noise = float(os.environ.get("MAT_SPACING_NOISE", "0.0"))
-        if topology in ["linear_tape", "double_tape", "helical", "open_arc"] and spacing_noise > 0:
+        if topology in [
+            "linear_tape",
+            "double_tape",
+            "bilayer_sheet",
+            "helical",
+            "open_arc",
+            "nanotube",
+            "multi_helical",
+        ] and spacing_noise > 0:
             pitch_offsets = torch.randn(shape[0], device=self.device) * spacing_noise
         else:
             pitch_offsets = None
             
-        if topology == "double_tape" and spacing_noise > 0:
+        if topology in ("double_tape", "bilayer_sheet") and spacing_noise > 0:
             # Symmetric noise for the double_tape lattice:
             # - layer_dist_noise perturbs the inter-sheet distance (applied equally to both
             #   sheets via the existing (layer_idx - 0.5) * layer_dist formula), encouraging
@@ -638,6 +646,10 @@ class AtomDiffusion(Module):
                 "open_arc",
                 "cage_tetrahedral",
                 "cage_octahedral",
+                "bilayer_sheet",
+                "hexagonal_mesh",
+                "nanotube",
+                "multi_helical",
             ]
             if topology in guided_topologies:
                 guidance_scale = float(os.environ.get("MAT_GUIDANCE_SCALE", "1.0"))
@@ -683,7 +695,7 @@ class AtomDiffusion(Module):
                                 )
                             
                             chain_masks = []
-                            if topology == "double_tape":
+                            if topology in ("double_tape", "bilayer_sheet"):
                                 for c_id in chain_ids:
                                     chain_masks.append(atom_asym_id == c_id)
                             else:
@@ -741,6 +753,25 @@ class AtomDiffusion(Module):
                                     if layer_offset_z_noise is not None
                                     else None
                                 ),
+                                "grid_dim_x": int(os.environ.get("MAT_GRID_DIM_X", "2")),
+                                "grid_dim_y": int(os.environ.get("MAT_GRID_DIM_Y", "2")),
+                                "row_pitch": float(os.environ.get("MAT_ROW_PITCH", "10.0")),
+                                "lattice_constant": (
+                                    float(os.environ["MAT_LATTICE_CONSTANT"])
+                                    if "MAT_LATTICE_CONSTANT" in os.environ
+                                    else None
+                                ),
+                                "pore_diameter": (
+                                    float(os.environ["MAT_PORE_DIAMETER"])
+                                    if "MAT_PORE_DIAMETER" in os.environ
+                                    else None
+                                ),
+                                "ring_size": int(os.environ.get("MAT_RING_SIZE", "4")),
+                                "num_tiers": int(os.environ.get("MAT_NUM_TIERS", "4")),
+                                "chiral_stagger": float(
+                                    os.environ.get("MAT_CHIRAL_STAGGER", "0.0")
+                                ),
+                                "num_starts": int(os.environ.get("MAT_NUM_STARTS", "3")),
                             }
                             ideal_coms, ideal_rotations = materials.generate_ideal_lattice(
                                 topology,
@@ -769,9 +800,16 @@ class AtomDiffusion(Module):
                             R_kabsch = U @ D @ Vh # R_kabsch maps P to Q
                             
                             # 4. Map to Local Frame, Fold, and Average
-                            if topology == "double_tape":
-                                ref_coords_accs = [None] * asym_unit_size
-                                counts = [0] * asym_unit_size
+                            if topology in ("double_tape", "bilayer_sheet"):
+                                if topology == "bilayer_sheet":
+                                    n_consensus_slots = (
+                                        int(params["grid_dim_x"])
+                                        * int(params["grid_dim_y"])
+                                    )
+                                else:
+                                    n_consensus_slots = asym_unit_size
+                                ref_coords_accs = [None] * n_consensus_slots
+                                counts = [0] * n_consensus_slots
                             else:
                                 ref_coords_acc = None
                             
@@ -791,8 +829,16 @@ class AtomDiffusion(Module):
                                 )[0]
                                 
                                 is_anti = False
+                                # Mesh, tube, and multi-start antiparallel strand
+                                # pairing is deferred beyond this phase.
                                 if (
-                                    topology not in ("cage_tetrahedral", "cage_octahedral")
+                                    topology not in (
+                                        "cage_tetrahedral",
+                                        "cage_octahedral",
+                                        "hexagonal_mesh",
+                                        "nanotube",
+                                        "multi_helical",
+                                    )
                                     and "is_antiparallel" in feats
                                 ):
                                     is_anti = feats["is_antiparallel"][batch_idx].item()
@@ -813,13 +859,28 @@ class AtomDiffusion(Module):
                                             else:
                                                 R_rot = torch.tensor([[-1., 0., 0.], [0., -1., 0.], [0., 0., 1.]], device=coords_folded.device, dtype=coords_folded.dtype)
                                             coords_folded = torch.matmul(coords_folded, R_rot)
+                                    elif topology == "bilayer_sheet":
+                                        position = i % (int(params["grid_dim_x"]) * int(params["grid_dim_y"]))
+                                        u = position // int(params["grid_dim_y"])
+                                        layer = i // (int(params["grid_dim_x"]) * int(params["grid_dim_y"]))
+                                        if (u + layer) % 2 == 1:
+                                            R_rot = torch.tensor(
+                                                [[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]],
+                                                device=coords_folded.device,
+                                                dtype=coords_folded.dtype,
+                                            )
+                                            coords_folded = torch.matmul(coords_folded, R_rot)
                                     else:
                                         if i % 2 == 1:
                                             R_flip = torch.tensor([[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]], device=coords_folded.device, dtype=coords_folded.dtype)
                                             coords_folded = torch.matmul(coords_folded, R_flip)
                                 
-                                if topology == "double_tape":
-                                    c_idx = i % asym_unit_size
+                                if topology in ("double_tape", "bilayer_sheet"):
+                                    c_idx = (
+                                        i % (int(params["grid_dim_x"]) * int(params["grid_dim_y"]))
+                                        if topology == "bilayer_sheet"
+                                        else i % asym_unit_size
+                                    )
                                     if ref_coords_accs[c_idx] is None:
                                         ref_coords_accs[c_idx] = coords_folded
                                     else:
@@ -831,7 +892,7 @@ class AtomDiffusion(Module):
                                     else:
                                         ref_coords_acc += coords_folded
                                     
-                            if topology == "double_tape":
+                            if topology in ("double_tape", "bilayer_sheet"):
                                 aligned_ref_coords_list = []
                                 for acc, count in zip(ref_coords_accs, counts):
                                     ref_coords = acc / count
@@ -865,14 +926,26 @@ class AtomDiffusion(Module):
                             for i, mask in enumerate(chain_masks):
                                 mask_indices = mask.nonzero(as_tuple=True)[0][:min_atoms]
                                 # Unfold
-                                if topology == "double_tape":
-                                    c_idx = i % asym_unit_size
+                                if topology in ("double_tape", "bilayer_sheet"):
+                                    c_idx = (
+                                        i % (int(params["grid_dim_x"]) * int(params["grid_dim_y"]))
+                                        if topology == "bilayer_sheet"
+                                        else i % asym_unit_size
+                                    )
                                     coords_to_unfold = aligned_ref_coords_list[c_idx]
                                 else:
                                     coords_to_unfold = ref_coords
                                 is_anti = False
+                                # Mesh, tube, and multi-start antiparallel strand
+                                # pairing is deferred beyond this phase.
                                 if (
-                                    topology not in ("cage_tetrahedral", "cage_octahedral")
+                                    topology not in (
+                                        "cage_tetrahedral",
+                                        "cage_octahedral",
+                                        "hexagonal_mesh",
+                                        "nanotube",
+                                        "multi_helical",
+                                    )
                                     and "is_antiparallel" in feats
                                 ):
                                     is_anti = feats["is_antiparallel"][batch_idx].item()
@@ -892,6 +965,17 @@ class AtomDiffusion(Module):
                                                 R_rot = torch.tensor([[-1., 0., 0.], [0., 1., 0.], [0., 0., -1.]], device=ref_coords.device, dtype=ref_coords.dtype)
                                             else:
                                                 R_rot = torch.tensor([[-1., 0., 0.], [0., -1., 0.], [0., 0., 1.]], device=ref_coords.device, dtype=ref_coords.dtype)
+                                            coords_to_unfold = torch.matmul(coords_to_unfold, R_rot)
+                                    elif topology == "bilayer_sheet":
+                                        position = i % (int(params["grid_dim_x"]) * int(params["grid_dim_y"]))
+                                        u = position // int(params["grid_dim_y"])
+                                        layer = i // (int(params["grid_dim_x"]) * int(params["grid_dim_y"]))
+                                        if (u + layer) % 2 == 1:
+                                            R_rot = torch.tensor(
+                                                [[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]],
+                                                device=coords_to_unfold.device,
+                                                dtype=coords_to_unfold.dtype,
+                                            )
                                             coords_to_unfold = torch.matmul(coords_to_unfold, R_rot)
                                     else:
                                         if i % 2 == 1:

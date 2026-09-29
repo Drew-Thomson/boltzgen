@@ -482,7 +482,7 @@ class Filter(Task):
         # Scale the ranks by importance (divide by inverse_importance)
         # Use the feature that we are ranking by AND the number of filters that a design passes. Thus the things that do not pass ass many filters (e.g. they dont pass all the filters) are at the end
         for col, inverse_importance in self.metrics.items():
-            if self.metrics[col] is None:
+            if inverse_importance is None or col not in self.df.columns:
                 continue
 
             rank_df[f"rank_{col}"] = (
