@@ -4,6 +4,7 @@ name: analyze
 design_dir: null
 debug: false
 num_processes: 32
+material_metrics: true
 
 # Common metrics to compute
 affinity_metrics: false

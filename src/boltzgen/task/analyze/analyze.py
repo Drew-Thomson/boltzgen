@@ -105,6 +105,7 @@ class Analyze(Task):
         skip_specific_ids: List[str] = None,
         designfolding_metrics: bool = False,
         use_design_mask_for_target: bool = False,
+        material_metrics: bool = True,
     ) -> None:
         """Initialize the task.
 
@@ -112,6 +113,8 @@ class Analyze(Task):
         ----------
         fold_metrics : bool,
             Compute folding metrics and assume that the folding directory exists.
+        material_metrics : bool, default=True
+            Compute topology-specific material geometry metrics when applicable.
         """
         super().__init__()
         self.name = name
@@ -154,6 +157,8 @@ class Analyze(Task):
         self.slurm = slurm
         self.diversity_subset = diversity_subset
         self.use_design_mask_for_target = use_design_mask_for_target
+        self.material_metrics = material_metrics
+        self.material_metrics = material_metrics
 
         # Prevent each worker process from spawning its own multithreaded pools
         torch.set_num_threads(1)
@@ -1242,6 +1247,45 @@ class Analyze(Task):
                     
                     packing = metrics.get("delta_sasa_refolded", 0)
                     metrics["packing_density_refolded"] = packing / max(1, num_chains)
+
+                    if self.material_metrics:
+                        import os
+
+                        from boltzgen.task.analyze.material_metrics import (
+                            backbone_ca_coords,
+                            compute_material_metrics,
+                        )
+
+                        topology = os.environ.get("MAT_TOPOLOGY", "floating")
+                        if topology in {
+                            "cage_tetrahedral",
+                            "cage_octahedral",
+                            "bilayer_sheet",
+                            "hexagonal_mesh",
+                            "nanotube",
+                        }:
+                            backbone_coords = coords_refold[
+                                bb_mask_refold[: coords_refold.shape[0]]
+                            ]
+                            material_ca_coords = backbone_ca_coords(
+                                coords_refold,
+                                atom_asym_id_refold,
+                                bb_mask_refold,
+                            )
+                            try:
+                                custom_metrics = compute_material_metrics(
+                                    topology,
+                                    coms_refold,
+                                    backbone_coords,
+                                    material_ca_coords,
+                                )
+                            except (ValueError, RuntimeError) as metric_error:
+                                print(
+                                    "Error computing optional material geometry metrics:",
+                                    metric_error,
+                                )
+                            else:
+                                metrics.update(custom_metrics)
         except Exception as e:
             print("Error computing material metrics:", e)
 

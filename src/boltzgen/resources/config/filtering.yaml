@@ -14,3 +14,13 @@ metrics_override:  null  # overrides metrics None values delete keys
 num_liability_plots:  0
 plot_seq_logos:  false  # make sequence logo diagrams of designed sequence
 
+# Material topology presets are normally selected by material_builder.py.
+# For manual runs, the equivalent metrics_override values are:
+#   nanocages: {design_to_target_iptm: null, neg_min_design_to_target_pae: null,
+#               neg_cage_sphericity_rmsd: 1, cage_void_radius: 1,
+#               neg_lattice_rmsd_refolded: 1}
+#   bilayer_sheet: {sheet_planarity: 1, h_bonds_per_interface_refolded: 1}
+#   hexagonal_mesh: {sheet_planarity: 1, neg_pore_aspect_ratio: 1,
+#                    h_bonds_per_interface_refolded: 1}
+# `neg_*` material metrics are oriented so Filter's maximize ranking prefers
+# lower RMSD/aspect ratio. Higher cavity radius remains preferred.

@@ -5,6 +5,7 @@ import yaml
 import glob
 import datetime
 from pathlib import Path
+from boltzgen.task.filter.material_presets import format_metrics_override
 try:
     import biotite.structure as struc
     import biotite.structure.io.pdb as pdb
@@ -98,16 +99,25 @@ def main():
     parser.add_argument("--output_dir", type=str, default="material_out", help="Directory for BoltzGen outputs")
     parser.add_argument("--num_designs", type=int, default=1, help="Number of design candidates to generate")
     parser.add_argument("--asym_unit_size", type=int, default=1, help="Number of chains in the asymmetric unit")
-    parser.add_argument("--topology", type=str, choices=["floating", "cyclic", "linear_tape", "double_tape", "helical", "open_arc", "cage_tetrahedral", "cage_octahedral"], default="floating", help="Topology constraint during diffusion")
+    parser.add_argument("--topology", type=str, choices=["floating", "cyclic", "linear_tape", "double_tape", "helical", "open_arc", "cage_tetrahedral", "cage_octahedral", "bilayer_sheet", "hexagonal_mesh", "nanotube", "multi_helical"], default="floating", help="Topology constraint during diffusion")
     parser.add_argument("--guidance_scale", type=float, default=1.0, help="Strength of the shape guidance")
     parser.add_argument("--target_pitch", type=float, default=4.8, help="Target spacing between adjacent chains for tapes (A)")
     parser.add_argument("--layer_dist", type=float, default=10.0, help="Target distance between the two layers in double_tape (A)")
     parser.add_argument("--target_radius", type=float, default=15.0, help="Target radius for cyclic/helical (A)")
-    parser.add_argument("--target_dz", type=float, default=5.0, help="Target axial translation per chain for helical (A)")
+    parser.add_argument("--target_dz", type=float, default=None, help="Target axial translation per chain for helical / nanotube tier pitch (A)")
     parser.add_argument("--target_angle", type=float, default=30.0, help="Target rotation angle per chain for helical (degrees)")
     parser.add_argument("--arc_radius", type=float, default=100.0, help="Target radius of curvature for open_arc (A)")
     parser.add_argument("--target_arc_spacing", type=float, default=10.0, help="Target spacing between adjacent chains along the arc (A)")
     parser.add_argument("--target_cage_radius", type=float, default=None, help="Target cage radius (A); defaults to 20.0 for tetrahedral and 35.0 for octahedral cages")
+    parser.add_argument("--grid_dim_x", type=int, default=2, help="Grid width for bilayer_sheet / hexagonal_mesh")
+    parser.add_argument("--grid_dim_y", type=int, default=2, help="Grid height for bilayer_sheet / hexagonal_mesh")
+    parser.add_argument("--row_pitch", type=float, default=10.0, help="In-plane row spacing for bilayer_sheet (A)")
+    parser.add_argument("--pore_diameter", type=float, default=None, help="Target pore diameter for hexagonal_mesh (A)")
+    parser.add_argument("--lattice_constant", type=float, default=None, help="Hexagonal lattice constant (A), alternative to --pore_diameter")
+    parser.add_argument("--ring_size", type=int, default=4, help="K-mer ring size for nanotube")
+    parser.add_argument("--num_tiers", type=int, default=4, help="Number of stacked nanotube tiers")
+    parser.add_argument("--chiral_stagger", type=float, default=0.0, help="Per-tier nanotube rotation offset (degrees)")
+    parser.add_argument("--num_starts", type=int, default=3, help="Number of strands for multi_helical")
     parser.add_argument("--spacing_noise", type=float, default=0.0, help="Standard deviation of noise to add to the spacing target (A)")
     parser.add_argument("--antiparallel_prob", type=float, default=0.0, help="Probability (0.0-1.0) of generating an antiparallel arrangement")
     parser.add_argument("--secondary_structure", type=str, default=None, help="Secondary structure constraint (H, S, L, or a full string)")
@@ -132,6 +142,55 @@ def main():
         args.asym_unit_size = len(asym_unit_def)
     else:
         asym_unit_def = [{"type": "protein", "length": args.length, "secondary_structure": args.secondary_structure} for _ in range(args.asym_unit_size)]
+
+    if args.grid_dim_x < 1 or args.grid_dim_y < 1:
+        parser.error("--grid_dim_x and --grid_dim_y must be positive")
+
+    if args.target_dz is None:
+        args.target_dz = 4.8 if args.topology == "nanotube" else 5.0
+
+    if args.ring_size < 1 or args.num_tiers < 1 or args.num_starts < 1:
+        parser.error("--ring_size, --num_tiers, and --num_starts must be positive")
+
+    if args.topology == "bilayer_sheet":
+        if args.asym_unit_size != 1:
+            parser.error("bilayer_sheet requires --asym_unit_size 1")
+        expected_copies = 2 * args.grid_dim_x * args.grid_dim_y
+        if args.copies != expected_copies:
+            parser.error(
+                f"bilayer_sheet requires --copies {expected_copies}; got {args.copies}"
+            )
+    if args.topology == "hexagonal_mesh":
+        if args.asym_unit_size != 1:
+            parser.error("hexagonal_mesh requires --asym_unit_size 1")
+        expected_copies = 3 * args.grid_dim_x * args.grid_dim_y
+        if args.copies != expected_copies:
+            parser.error(
+                f"hexagonal_mesh requires --copies {expected_copies}; got {args.copies}"
+            )
+        if args.pore_diameter is None and args.lattice_constant is None:
+            parser.error("hexagonal_mesh requires --pore_diameter or --lattice_constant")
+        if args.pore_diameter is not None and args.lattice_constant is not None:
+            parser.error("specify only one of --pore_diameter or --lattice_constant")
+        if args.lattice_constant is None and args.pore_diameter is not None:
+            args.lattice_constant = args.pore_diameter + 10.0
+
+    if args.topology == "nanotube":
+        if args.asym_unit_size != 1:
+            parser.error("nanotube requires --asym_unit_size 1")
+        expected_copies = args.ring_size * args.num_tiers
+        if args.copies != expected_copies:
+            parser.error(
+                f"nanotube requires --copies {expected_copies}; got {args.copies}"
+            )
+    if args.topology == "multi_helical":
+        if args.asym_unit_size != 1:
+            parser.error("multi_helical requires --asym_unit_size 1")
+        if args.copies % args.num_starts != 0:
+            parser.error(
+                "multi_helical requires --copies divisible by --num_starts "
+                f"({args.num_starts})"
+            )
 
     if args.target_cage_radius is None:
         args.target_cage_radius = 20.0 if args.topology == "cage_tetrahedral" else 35.0
@@ -165,6 +224,18 @@ def main():
     os.environ["MAT_ANTIPARALLEL_PROB"] = str(args.antiparallel_prob)
     os.environ["MAT_LAYER_DIST"] = str(args.layer_dist)
     os.environ["MAT_TARGET_CAGE_RADIUS"] = str(args.target_cage_radius)
+    os.environ["MAT_GRID_DIM_X"] = str(args.grid_dim_x)
+    os.environ["MAT_GRID_DIM_Y"] = str(args.grid_dim_y)
+    os.environ["MAT_ROW_PITCH"] = str(args.row_pitch)
+    if args.pore_diameter is not None:
+        os.environ["MAT_PORE_DIAMETER"] = str(args.pore_diameter)
+    if args.lattice_constant is not None:
+        os.environ["MAT_LATTICE_CONSTANT"] = str(args.lattice_constant)
+    os.environ["MAT_RING_SIZE"] = str(args.ring_size)
+    os.environ["MAT_NUM_TIERS"] = str(args.num_tiers)
+    os.environ["MAT_CHIRAL_STAGGER"] = str(args.chiral_stagger)
+    os.environ["MAT_NUM_STARTS"] = str(args.num_starts)
+    os.environ["MAT_ASYM_UNIT_SIZE"] = str(1 if args.topology == "hexagonal_mesh" else args.asym_unit_size)
     
     yaml_file = generate_yaml_from_spec(args.copies, asym_unit_def, output_file="material_spec.yaml")
     
@@ -183,6 +254,10 @@ def main():
             "--inverse_fold_num_sequences", str(args.seqs_per_backbone),
             "--config", "inverse_folding", f"override.inverse_fold_args.sampling_temperature={args.inverse_temp}"
         ]
+
+        material_filtering_override = format_metrics_override(args.topology)
+        if material_filtering_override is not None:
+            cmd.extend(["--config", "filtering", material_filtering_override])
         
         if args.avoid_aa:
             cmd.extend(["--inverse_fold_avoid", args.avoid_aa])
