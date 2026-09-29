@@ -5,7 +5,18 @@ import yaml
 import glob
 import datetime
 from pathlib import Path
-from boltzgen.task.filter.material_presets import format_metrics_override
+from boltzgen.model.modules.material_layout import expand_material_spec, write_layout
+try:
+    from boltzgen.task.filter.material_presets import format_metrics_override
+except ModuleNotFoundError as exc:
+    # The presets module is optional in older/source-only BoltzGen installs.
+    # Topologies without a custom ranking preset (such as cyclic) can still use
+    # the filtering defaults without it.
+    if exc.name != "boltzgen.task.filter.material_presets":
+        raise
+
+    def format_metrics_override(topology):
+        return None
 try:
     import biotite.structure as struc
     import biotite.structure.io.pdb as pdb
@@ -21,47 +32,14 @@ def get_chain_id(idx):
     return res
 
 def generate_yaml_from_spec(num_copies, asym_unit_def, output_file="material_spec.yaml"):
-    entities = []
-    asym_unit_size = len(asym_unit_def)
-    total_chains = num_copies * asym_unit_size
-    
-    chain_ids = [get_chain_id(i) for i in range(total_chains)]
-    
-    for copy_idx in range(num_copies):
-        for chain_idx_in_unit, chain_def in enumerate(asym_unit_def):
-            global_chain_idx = copy_idx * asym_unit_size + chain_idx_in_unit
-            c_id = chain_ids[global_chain_idx]
-            
-            ent_type = chain_def.get("type", "protein")
-            ent_dict = {"id": c_id}
-            
-            if ent_type == "protein":
-                ent_dict["sequence"] = str(chain_def.get("length", 15))
-                ent_dict["symmetric_group"] = chain_def.get("symmetric_group", chain_idx_in_unit + 1)
-                
-                sec_struct = chain_def.get("secondary_structure")
-                if sec_struct:
-                    length = chain_def.get("length", 15)
-                    if len(sec_struct) == 1:
-                        ent_dict["secondary_structure"] = sec_struct * length
-                    else:
-                        ent_dict["secondary_structure"] = sec_struct
-            elif ent_type == "ligand":
-                if "ccd" in chain_def:
-                    ent_dict["ccd"] = chain_def["ccd"]
-                if "smiles" in chain_def:
-                    ent_dict["smiles"] = chain_def["smiles"]
-            
-            # Carry over any other keys natively to BoltzGen (like residue_constraints)
-            for k, v in chain_def.items():
-                if k not in ["type", "length", "secondary_structure", "symmetric_group", "ccd", "smiles"]:
-                    ent_dict[k] = v
-                    
-            entities.append({ent_type: ent_dict})
-            
+    entities, layout = expand_material_spec(num_copies, asym_unit_def)
     spec = {"entities": entities}
     with open(output_file, "w") as f:
         yaml.dump(spec, f, sort_keys=False)
+    output_path = Path(output_file).resolve()
+    layout_path = output_path.with_name("material_layout.json")
+    write_layout(layout, layout_path)
+    os.environ["MAT_LAYOUT_FILE"] = str(layout_path)
     print(f"Generated design spec: {output_file}")
     return output_file
 
@@ -139,9 +117,15 @@ def main():
 
     if "asym_unit" in config:
         asym_unit_def = config["asym_unit"]
-        args.asym_unit_size = len(asym_unit_def)
     else:
         asym_unit_def = [{"type": "protein", "length": args.length, "secondary_structure": args.secondary_structure} for _ in range(args.asym_unit_size)]
+
+    protein_templates = [
+        item for item in asym_unit_def if str(item.get("type", "protein")).lower() == "protein"
+    ]
+    args.asym_unit_size = len(protein_templates)
+    if not protein_templates:
+        parser.error("asym_unit must contain at least one protein template")
 
     if args.grid_dim_x < 1 or args.grid_dim_y < 1:
         parser.error("--grid_dim_x and --grid_dim_y must be positive")
@@ -154,7 +138,7 @@ def main():
 
     if args.topology == "bilayer_sheet":
         if args.asym_unit_size != 1:
-            parser.error("bilayer_sheet requires --asym_unit_size 1")
+            parser.error("bilayer_sheet requires exactly one protein template per placement")
         expected_copies = 2 * args.grid_dim_x * args.grid_dim_y
         if args.copies != expected_copies:
             parser.error(
@@ -162,7 +146,7 @@ def main():
             )
     if args.topology == "hexagonal_mesh":
         if args.asym_unit_size != 1:
-            parser.error("hexagonal_mesh requires --asym_unit_size 1")
+            parser.error("hexagonal_mesh requires exactly one protein template per placement")
         expected_copies = 3 * args.grid_dim_x * args.grid_dim_y
         if args.copies != expected_copies:
             parser.error(
@@ -177,7 +161,7 @@ def main():
 
     if args.topology == "nanotube":
         if args.asym_unit_size != 1:
-            parser.error("nanotube requires --asym_unit_size 1")
+            parser.error("nanotube requires exactly one protein template per placement")
         expected_copies = args.ring_size * args.num_tiers
         if args.copies != expected_copies:
             parser.error(
@@ -185,7 +169,7 @@ def main():
             )
     if args.topology == "multi_helical":
         if args.asym_unit_size != 1:
-            parser.error("multi_helical requires --asym_unit_size 1")
+            parser.error("multi_helical requires exactly one protein template per placement")
         if args.copies % args.num_starts != 0:
             parser.error(
                 "multi_helical requires --copies divisible by --num_starts "
@@ -204,7 +188,7 @@ def main():
             f"{args.topology} requires --copies {expected_copies}; got {args.copies}"
         )
     if expected_copies is not None and args.asym_unit_size != 1:
-        parser.error(f"{args.topology} requires --asym_unit_size 1")
+        parser.error(f"{args.topology} requires exactly one protein template per placement")
     
     if args.output_dir == "material_out":
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -235,7 +219,7 @@ def main():
     os.environ["MAT_NUM_TIERS"] = str(args.num_tiers)
     os.environ["MAT_CHIRAL_STAGGER"] = str(args.chiral_stagger)
     os.environ["MAT_NUM_STARTS"] = str(args.num_starts)
-    os.environ["MAT_ASYM_UNIT_SIZE"] = str(1 if args.topology == "hexagonal_mesh" else args.asym_unit_size)
+    os.environ.pop("MAT_LAYOUT_FILE", None)
     
     yaml_file = generate_yaml_from_spec(args.copies, asym_unit_def, output_file="material_spec.yaml")
     

@@ -9,6 +9,7 @@ import math
 
 import numpy as np
 import torch
+import json
 import torch.nn.functional as F  # noqa: N812
 from einops import rearrange
 from torch import nn
@@ -558,6 +559,16 @@ class AtomDiffusion(Module):
 
         import os
         topology = os.environ.get("MAT_TOPOLOGY", "floating")
+        material_layout = None
+        layout_path = os.environ.get("MAT_LAYOUT_FILE")
+        if layout_path:
+            try:
+                with open(layout_path) as layout_file:
+                    material_layout = json.load(layout_file)
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"Could not load material layout {layout_path!r}: {exc}"
+                ) from exc
         spacing_noise = float(os.environ.get("MAT_SPACING_NOISE", "0.0"))
         if topology in [
             "linear_tape",
@@ -686,25 +697,41 @@ class AtomDiffusion(Module):
                     for batch_idx in range(b):
                         atom_asym_id = asym_id[batch_idx, token_indices[batch_idx]]
                         chain_ids = torch.unique(atom_asym_id)
-                        
-                        if len(chain_ids) >= 2 * asym_unit_size:
-                            N_chains = len(chain_ids)
-                            if topology in ("cage_tetrahedral", "cage_octahedral") and N_chains != required_copies:
-                                raise ValueError(
-                                    f"{topology} requires {required_copies} chains, got {N_chains}"
+                        chain_masks = []
+                        ligand_layout = []
+                        protein_asym_to_mask = {}
+                        placement_protein_asym = []
+                        if material_layout is not None:
+                            chain_masks, protein_asym_to_mask, ligand_layout = (
+                                materials.build_layout_guidance_masks(
+                                    atom_asym_id,
+                                    material_layout,
+                                    topology,
+                                    atom_valid_mask=atom_mask[batch_idx],
                                 )
-                            
-                            chain_masks = []
+                            )
+                            placement_protein_asym = [
+                                [int(index) for index in placement["protein_asym_indices"]]
+                                for placement in material_layout.get("placements", [])
+                            ]
+                        else:
                             if topology in ("double_tape", "bilayer_sheet"):
                                 for c_id in chain_ids:
                                     chain_masks.append(atom_asym_id == c_id)
                             else:
-                                N_units = N_chains // asym_unit_size
+                                N_units = len(chain_ids) // asym_unit_size
                                 for i in range(N_units):
                                     mask = torch.zeros_like(atom_asym_id, dtype=torch.bool)
                                     for j in range(asym_unit_size):
                                         mask = mask | (atom_asym_id == chain_ids[i * asym_unit_size + j])
                                     chain_masks.append(mask)
+
+                        if len(chain_masks) >= 2:
+                            N_chains = len(chain_masks)
+                            if topology in ("cage_tetrahedral", "cage_octahedral") and N_chains != required_copies:
+                                raise ValueError(
+                                    f"{topology} requires {required_copies} guided protein placements, got {N_chains}"
+                                )
                             
                             # Filter empty masks
                             chain_masks = [m for m in chain_masks if m.sum() > 0]
@@ -814,6 +841,13 @@ class AtomDiffusion(Module):
                                 ref_coords_acc = None
                             
                             min_atoms = min(mask.sum().item() for mask in chain_masks)
+                            original_protein_coords = {}
+                            if material_layout is not None:
+                                for asym_index, mask in protein_asym_to_mask.items():
+                                    original_protein_coords[asym_index] = (
+                                        mask.nonzero(as_tuple=True)[0],
+                                        atom_coords_denoised[batch_idx, mask].clone(),
+                                    )
                             
                             for i, mask in enumerate(chain_masks):
                                 mask_indices = mask.nonzero(as_tuple=True)[0][:min_atoms]
@@ -996,6 +1030,44 @@ class AtomDiffusion(Module):
                                     (1 - guidance_scale) * atom_coords_denoised[batch_idx, mask_indices] +
                                     guidance_scale * coords_global
                                 )
+
+                            # Carry each ligand by the rigid transform of its parent
+                            # protein, or of all proteins in its placement for a
+                            # unit-scoped ligand. Ligand coordinates never enter the
+                            # topology COM/Kabsch fit.
+                            if material_layout is not None and ligand_layout:
+                                placement_records = {
+                                    int(placement["placement_index"]): placement
+                                    for placement in material_layout.get("placements", [])
+                                }
+                                for ligand_asym, record, ligand_mask in ligand_layout:
+                                    placement_idx = int(record["placement_index"])
+                                    ligand_indices = ligand_mask.nonzero(as_tuple=True)[0]
+                                    original_ligand = atom_coords_denoised[batch_idx, ligand_indices].clone()
+                                    parent_asym = record.get("parent_asym_index")
+                                    if parent_asym is not None:
+                                        protein_indices = [int(parent_asym)]
+                                    else:
+                                        protein_indices = [
+                                            int(idx)
+                                            for idx in placement_records[placement_idx]["protein_asym_indices"]
+                                        ]
+                                    source_parts, target_parts = [], []
+                                    for protein_asym in protein_indices:
+                                        atom_indices, source_coords = original_protein_coords[protein_asym]
+                                        target_coords = atom_coords_denoised[batch_idx, atom_indices]
+                                        n = min(source_coords.shape[0], target_coords.shape[0])
+                                        source_parts.append(source_coords[:n])
+                                        target_parts.append(target_coords[:n])
+                                    rotation, translation = materials.fit_rigid_transform(
+                                        torch.cat(source_parts, dim=0),
+                                        torch.cat(target_parts, dim=0),
+                                    )
+                                    carried = original_ligand @ rotation + translation
+                                    atom_coords_denoised[batch_idx, ligand_indices] = (
+                                        (1 - guidance_scale) * original_ligand
+                                        + guidance_scale * carried
+                                    )
 
                 atom_coords_noisy = atom_coords_noisy.to(atom_coords_denoised)
 

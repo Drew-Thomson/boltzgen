@@ -1,0 +1,14 @@
+copies: 8
+topology: cyclic
+target_radius: 15.0
+antiparallel_prob: 1.0
+num_designs: 10
+asym_unit:
+  - type: protein
+    name: helical_peptide
+    length: 20
+    secondary_structure: H
+  - type: ligand
+    ccd: ZN
+    ligands_per_peptide: 0.5
+    attach_to: helical_peptide

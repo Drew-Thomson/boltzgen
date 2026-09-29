@@ -1,0 +1,18 @@
+copies: 10
+topology: bilayer_sheet
+grid_dim_x: 1
+grid_dim_y: 5
+row_pitch: 10.0
+target_pitch: 4.8
+layer_dist: 10.0
+antiparallel_prob: 1.0
+num_designs: 10
+asym_unit:
+  - type: protein
+    name: sheet_peptide
+    length: 9
+    secondary_structure: S
+  - type: ligand
+    ccd: CU
+    ligands_per_peptide: 0.5
+    attach_to: sheet_peptide

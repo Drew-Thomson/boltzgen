@@ -1,65 +1,171 @@
 # BoltzGen Material Builder Topologies
 
-The `material_builder.py` script allows you to generate highly symmetrical peptide assemblies using the BoltzGen diffusion model. By applying specific COM (Center of Mass) guidance at each diffusion timestep, you can coerce the model into generating specific geometric structures. 
+`material_builder.py` can guide BoltzGen toward a range of repeated peptide-assembly geometries. Choose a topology with `--topology`; the remaining parameters below are command-line options to `material_builder.py`. Distances are in Å unless otherwise noted. Values listed as defaults reflect the builder's current CLI defaults, and some constraints apply only to the topology named.
 
-Below is an overview of the available topologies, their behavior, and the parameters used to configure them.
+## Shared guidance parameters
 
-## General Guidance Parameters
+- `--guidance_scale` (default `1.0`): Strength of COM shape guidance during diffusion. Larger values adhere more strongly to the target lattice; `0` disables guidance.
+- `--spacing_noise` (default `0.0`): Standard deviation of random variation in spacing targets. For `double_tape` and `bilayer_sheet`, it perturbs inter-chain and inter-layer spacing. Effective spacings are clamped to avoid values below 4.8 Å.
+- `--antiparallel_prob` (default `0.0`): Probability from `0.0` to `1.0` of applying an alternating antiparallel arrangement, where supported. This setting does not control orientation for cage, mesh, nanotube, or multi-start helical topologies.
+- `--asym_unit_size` (default `1`): Number of generated protein templates when using CLI options instead of an `asym_unit` config. When `asym_unit` is provided, the builder derives this value from protein entries only; ligand entries and ligand multiplicities do not affect topology slot counts. Cage, sheet, mesh, nanotube, and multi-helical topologies require one guided protein template per placement.
 
-These parameters can be applied to any guided topology to adjust how the model samples geometries:
+## Ligands in topology-guided assemblies
 
-- `--guidance_scale` (Default: `1.0`): The strength of the shape guidance applied during the diffusion process. Higher values force the chains to strictly adhere to the ideal coordinates, while lower values give the network more flexibility.
-- `--spacing_noise` (Default: `0.0`): The standard deviation of random noise (in Ångströms) to add to the spacing target. Setting this > 0 allows the model to sample more diverse packing arrangements across a batch. It has a hard lower bound of 4.8 Å to prevent chains from clashing (the typical spacing of a beta-sheet).
-- `--antiparallel_prob` (Default: `0.0`): The probability (0.0 to 1.0) of generating an antiparallel arrangement. If triggered, every alternating chain in the assembly is flipped 180° around its local radial/lateral axis. This allows for C2/D2-like symmetries (e.g., antiparallel beta tapes or alternating alpha solenoids).
+In material-builder YAML, topology placements are based on protein templates. Ligands are expanded as entities in the output spec but do not consume topology positions or contribute to topology COM fitting. Ligand coordinates are carried with their parent peptide (or placement for unit-scoped ligands) during guidance.
 
----
+Ligand entries may specify exactly one of:
 
-## 1. Floating (`floating`)
-The default topology. No COM constraints are applied during diffusion. The chains are allowed to pack freely based purely on the diffusion model's learned physics and interactions.
-* **Relevant Arguments**: None (Ignores all structural constraints).
+- `ligands_per_peptide` (positive integer or ratio): Number of ligand copies per parent peptide across the assembly. Integer values support multiple ligands per peptide; rational values such as `0.5` mean one ligand per two peptides. The total across all copies must be an integer, and the deterministic expansion distributes ligand instances across placements.
+- `ligands_per_asym_unit` (positive integer): Number of copies generated per topology placement, independent of the number of peptide templates.
+- `attach_to` (protein template name or zero-based protein-template index): Required with `ligands_per_peptide` when the asymmetric unit contains more than one protein template. With one protein template it may be omitted. It is not valid with `ligands_per_asym_unit`.
 
-## 2. Linear Tape (`linear_tape`)
-Aligns the chains in a straight, 1-dimensional array along the Z-axis. Ideal for generating beta-tapes, amyloid-like fibrils, or parallel/antiparallel flat assemblies.
-* **Relevant Arguments**:
-  * `--target_pitch` (Default: `10.0` Å): The target spacing (translation) between adjacent chains along the tape.
+If neither multiplicity field is supplied, a ligand retains the legacy default of one copy per topology placement. Give protein templates a `name` to use a stable `attach_to` reference. `copies` continues to count topology placements; total emitted chains can be higher due to ligands.
 
-## 3. Cyclic (`cyclic`)
-Arranges the chains in a closed ring (C_n symmetry) in the XY-plane. The angle between each chain is automatically calculated based on the total number of `--copies` to form a perfect circle.
-* **Relevant Arguments**:
-  * `--target_radius` (Default: `15.0` Å): The target radius of the ring.
+Example: one zinc ligand per two peptides and three calcium ligands per placement:
 
-## 4. Helical (`helical`)
-Arranges the chains in a continuous helical spiral. Chains translate along the Z-axis while simultaneously rotating around it. Ideal for generating alpha solenoids, helical filaments, and nanotubes.
-* **Relevant Arguments**:
-  * `--target_radius` (Default: `15.0` Å): The target radius of the helix from the central Z-axis.
-  * `--target_angle` (Default: `30.0` degrees): The target rotation angle applied between each adjacent chain.
-  * `--target_dz` (Default: `5.0` Å): The target axial translation (rise) per chain along the Z-axis. 
+```yaml
+copies: 8
+topology: cyclic
+asym_unit:
+  - type: protein
+    name: helix
+    length: 20
+    secondary_structure: H
+  - type: ligand
+    ccd: ZN
+    ligands_per_peptide: 0.5
+    attach_to: helix
+  - type: ligand
+    ccd: CA
+    ligands_per_asym_unit: 3
+```
 
-## 5. Open Arc (`open_arc`)
-Arranges the chains along a curved path (an incomplete ring) in the XY-plane. Unlike `cyclic`, the chains do not close into a full circle. This is useful for crescent-shaped assemblies or large curved fragments.
-* **Relevant Arguments**:
-  * `--arc_radius` (Default: `100.0` Å): The target radius of curvature for the arc.
-  * `--target_arc_spacing` (Default: `10.0` Å): The target distance (chord length) between adjacent chains along the arc.
+## Topologies
 
-## 6. Double Tape (`double_tape`)
-Aligns the chains into two parallel planes to form a double-layer tape (e.g., a steric zipper or sandwich). The chains alternate evenly between the two layers and propagate along the Z-axis. When combined with `--antiparallel_prob 1.0`, it natively enforces alternating orientations within each layer (forming two true antiparallel beta sheets) that are also antiparallel to each other face-to-face.
-* **Relevant Arguments**:
-  * `--target_pitch` (Default for this topology: `4.8` Å): The spacing between adjacent chains within the same layer along the Z-axis.
-  * `--layer_dist` (Default: `10.0` Å): The distance between the two parallel layers.
+### Floating (`floating`)
 
----
+No COM lattice constraints are applied. Chain placement is left to the model.
 
-### Example Usage
+**Topology-specific parameters:** None.
 
-Generate an antiparallel helical alpha-solenoid (20 copies, length 15):
+### Linear tape (`linear_tape`)
+
+Places chains in a one-dimensional array along the Z-axis, useful for tapes and fibrils.
+
+- `--target_pitch` (default `4.8`): Target translation between adjacent chains along the tape.
+
+### Cyclic (`cyclic`)
+
+Places chains on a ring in the XY-plane. The angular interval is determined by the number of copies.
+
+- `--target_radius` (default `15.0`): Ring radius.
+
+### Helical (`helical`)
+
+Places chains on a helix about the Z-axis.
+
+- `--target_radius` (default `15.0`): Helix radius.
+- `--target_angle` (default `30.0`): Rotation between adjacent chains, in degrees.
+- `--target_dz` (default `5.0`): Axial rise per chain.
+
+### Open arc (`open_arc`)
+
+Places chains along an incomplete circular arc in the XY-plane.
+
+- `--arc_radius` (default `100.0`): Radius of curvature.
+- `--target_arc_spacing` (default `10.0`): Target chord distance between adjacent chains.
+
+### Double tape (`double_tape`)
+
+Places chains in two parallel layers, with chains advancing along the Z-axis. With `--antiparallel_prob 1.0`, alternating chains form antiparallel sheets in both layers.
+
+- `--target_pitch` (default `4.8`): Spacing between neighboring chains along each tape.
+- `--layer_dist` (default `10.0`): Separation between layers.
+
+### Tetrahedral cage (`cage_tetrahedral`)
+
+Arranges a fixed set of chains on a tetrahedral cage lattice.
+
+- `--target_cage_radius` (default `20.0`): Cage radius.
+- **Copy constraint:** exactly 12 copies; `--asym_unit_size 1`.
+
+### Octahedral cage (`cage_octahedral`)
+
+Arranges a fixed set of chains on an octahedral cage lattice.
+
+- `--target_cage_radius` (default `35.0`): Cage radius.
+- **Copy constraint:** exactly 24 copies; `--asym_unit_size 1`.
+
+### Bilayer sheet (`bilayer_sheet`)
+
+Creates two parallel, rectangular chain sheets. Each sheet has `grid_dim_x` by `grid_dim_y` positions.
+
+- `--grid_dim_x` (default `2`): Grid width.
+- `--grid_dim_y` (default `2`): Grid height.
+- `--row_pitch` (default `10.0`): In-plane row spacing.
+- `--layer_dist` (default `10.0`): Separation between the sheets.
+- `--target_pitch` (default `4.8`): Spacing along the other in-plane direction.
+- **Copy constraint:** `--copies` must equal `2 * grid_dim_x * grid_dim_y`; `--asym_unit_size 1`.
+
+### Hexagonal mesh (`hexagonal_mesh`)
+
+Builds a hexagonal pore mesh from three chain orientations at each grid position.
+
+- `--grid_dim_x` (default `2`): Grid width.
+- `--grid_dim_y` (default `2`): Grid height.
+- `--pore_diameter` (default unset): Target pore diameter. Use either this or `--lattice_constant`, not both. If only pore diameter is given, the builder derives the lattice constant as `pore_diameter + 10.0`.
+- `--lattice_constant` (default unset): Hexagonal lattice constant; alternative to `--pore_diameter`.
+- **Copy constraint:** `--copies` must equal `3 * grid_dim_x * grid_dim_y`; `--asym_unit_size 1`.
+- **Required input:** provide either `--pore_diameter` or `--lattice_constant`.
+
+### Nanotube (`nanotube`)
+
+Stacks oligomeric rings into a tube along the Z-axis.
+
+- `--ring_size` (default `4`): Number of chains in each ring.
+- `--num_tiers` (default `4`): Number of stacked rings.
+- `--target_radius` (default `15.0`): Tube radius.
+- `--target_dz` (default `4.8`): Axial rise between tiers (default is topology-specific).
+- `--chiral_stagger` (default `0.0`): Rotation offset per tier, in degrees.
+- **Copy constraint:** `--copies` must equal `ring_size * num_tiers`; `--asym_unit_size 1`.
+
+### Multi-helical (`multi_helical`)
+
+Arranges chains as multiple interleaved helical starts around a common axis.
+
+- `--num_starts` (default `3`): Number of helical strands.
+- `--target_radius` (default `15.0`): Helix radius.
+- `--target_angle` (default `30.0`): Rotation between sequential chain positions, in degrees.
+- `--target_dz` (default `5.0`): Axial rise per chain.
+- **Copy constraint:** `--copies` must be divisible by `num_starts`; `--asym_unit_size 1`.
+
+## Examples
+
+Generate an antiparallel helical assembly:
+
 ```bash
 python material_builder.py --copies 20 --length 15 --topology helical \
-    --target_radius 15.0 --target_dz 5.0 --target_angle 30.0 \
+    --target_radius 15 --target_dz 5 --target_angle 30 \
     --antiparallel_prob 1.0 --run
 ```
 
-Generate diverse linear beta-tapes with slight variations in spacing:
+Generate a bilayer with 3-by-4 grids (24 chains total):
+
 ```bash
-python material_builder.py --copies 10 --length 8 --topology linear_tape \
-    --target_pitch 4.8 --spacing_noise 0.5 --run
+python material_builder.py --copies 24 --length 15 --topology bilayer_sheet \
+    --grid_dim_x 3 --grid_dim_y 4 --row_pitch 10 --layer_dist 10 --run
+```
+
+Generate a hexagonal mesh with a requested pore diameter:
+
+```bash
+python material_builder.py --copies 12 --length 15 --topology hexagonal_mesh \
+    --grid_dim_x 2 --grid_dim_y 2 --pore_diameter 20 --run
+```
+
+Generate a four-tier, six-member nanotube:
+
+```bash
+python material_builder.py --copies 24 --length 15 --topology nanotube \
+    --ring_size 6 --num_tiers 4 --target_radius 15 --target_dz 4.8 --run
 ```
