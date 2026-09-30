@@ -29,6 +29,7 @@ from boltzgen.utils.quiet import quiet_startup
 quiet_startup()
 
 import collections
+import json
 import huggingface_hub
 import argparse
 from dataclasses import dataclass
@@ -1186,6 +1187,10 @@ class BinderDesignPipeline:
                         f"data.cfg.num_workers={args.num_workers}",
                         f"data.skip_existing={args.reuse}",
                         f"data.skip_existing_kind=folded",
+                        # Counter-screen IDs include a deliberate double-underscore
+                        # child suffix (e.g. __homomer_a), which the default
+                        # target-ID pattern does not accept.
+                        "data.cfg.target_id_regex='^(.+)$'",
                         f"override.use_kernels={use_kernels}",
                         f"checkpoint={get_artifact_path(args, args.folding_checkpoint)}",
                         f"data.cfg.moldir={moldir}",

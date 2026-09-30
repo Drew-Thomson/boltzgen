@@ -98,3 +98,27 @@ def test_load_prediction_metrics_handles_vector_outputs(tmp_path):
         "complex_plddt": 75.0,
         "design_iptm": 0.7,
     }
+
+
+def test_best_folding_sample_uses_available_modern_confidence_keys():
+    from boltzgen.task.analyze.analyze_utils import get_best_folding_sample
+
+    folded = {
+        "coords": np.asarray([[[0.0, 0.0, 0.0]], [[1.0, 1.0, 1.0]]]),
+        "design_iptm": np.asarray([0.4, 0.8]),
+        "ptm": np.asarray([0.9, 0.9]),
+        "complex_plddt": np.asarray([60.0, 80.0]),
+    }
+
+    best = get_best_folding_sample(folded)
+    assert np.array_equal(best["coords"], folded["coords"][1])
+    assert best["design_iptm"] == pytest.approx(0.8)
+    assert best["complex_plddt"] == pytest.approx(80.0)
+
+
+def test_best_folding_sample_falls_back_to_coords_without_confidence():
+    from boltzgen.task.analyze.analyze_utils import get_best_folding_sample
+
+    folded = {"coords": np.asarray([[[0.0, 0.0, 0.0]], [[1.0, 1.0, 1.0]]])}
+    best = get_best_folding_sample(folded)
+    assert np.array_equal(best["coords"], folded["coords"][0])

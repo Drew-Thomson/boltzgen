@@ -21,11 +21,15 @@ def _place_chain(seed: Structure, center: torch.Tensor, rotation: torch.Tensor) 
     """Clone a one-chain structure and place it using row-vector transforms."""
     coords = seed.coords.copy()
     atoms = seed.atoms.copy()
-    source = torch.as_tensor(coords["coords"], dtype=center.dtype)
+    # Structured NumPy fields can have non-contiguous/unaligned strides that
+    # torch.as_tensor rejects. Materialize ordinary contiguous coordinate arrays.
+    source = torch.as_tensor(np.array(coords["coords"], copy=True), dtype=center.dtype)
     source_center = source.mean(dim=0)
     placed = (source - source_center) @ rotation + center
     coords["coords"] = placed.cpu().numpy()
-    atom_coords = torch.as_tensor(atoms["coords"], dtype=center.dtype)
+    atom_coords = torch.as_tensor(
+        np.array(atoms["coords"], copy=True), dtype=center.dtype
+    )
     atoms["coords"] = (
         (atom_coords - source_center) @ rotation + center
     ).cpu().numpy()
@@ -141,7 +145,7 @@ class PrepareHeteromerCounterScreens(Task):
             if source_path.name.endswith("_native.cif"):
                 continue
             parsed = parse_mmcif(source_path, moldir=self.moldir, use_original_res_idx=False)
-            source_ids: dict[str, tuple[str, int]] = {}
+            source_ids: dict[str, str] = {}
             source_chain_names = [str(chain["name"]) for chain in parsed.data.chains]
             expected_chain_count = (
                 self.num_chains
@@ -180,9 +184,7 @@ class PrepareHeteromerCounterScreens(Task):
                     )
                 partner = record.get("partner_label")
                 if partner in {"A", "B"}:
-                    source_ids.setdefault(
-                        str(partner), (chain_name, int(record["placement_index"]))
-                    )
+                    source_ids.setdefault(str(partner), chain_name)
             if layout["guided_proteins_per_unit"] == 1 and len(source_ids) != 2:
                 raise ValueError(
                     "Heteromer layout does not contain both alternating partner chains "
@@ -205,7 +207,7 @@ class PrepareHeteromerCounterScreens(Task):
                 parent_id,
             )
             for partner in ("A", "B"):
-                chain_name, _placement_idx = source_ids[partner]
+                chain_name = source_ids[partner]
                 seed, sequence = _extract_partner(parsed, chain_name)
                 template = template_definitions[0 if partner == "A" else 1]
                 template_sequence = template.get("sequence")

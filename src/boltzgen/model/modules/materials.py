@@ -28,6 +28,19 @@ def _ring_points(count: int, radius: float, *, device: torch.device, dtype: torc
     return points, rotations
 
 
+def double_tape_layer_position(chain_index: int) -> tuple[int, int]:
+    """Map emitted double-tape chain order to its layer and axial position.
+
+    Emitted chains alternate between the two layers at each axial position:
+    0=(layer 0, position 0), 1=(layer 1, position 0), 2=(layer 0, position 1), ...
+    Keep this mapping shared with antiparallel guidance so chain orientation
+    cannot accidentally use a different (serpentine) order from the lattice.
+    """
+    if chain_index < 0:
+        raise ValueError("chain_index must be non-negative")
+    return chain_index % 2, chain_index // 2
+
+
 def generate_ideal_lattice(
     topology: str,
     n_chains: int,
@@ -85,8 +98,7 @@ def generate_ideal_lattice(
         units = math.ceil(n_chains / 2)
         coms = torch.zeros((n_chains, 3), device=device, dtype=dtype)
         for i in range(n_chains):
-            layer = i % 2
-            step = i // 2
+            layer, step = double_tape_layer_position(i)
             coms[i, 1] = (layer - 0.5) * layer_dist
             coms[i, 2] = (step - (units - 1) / 2) * pitch
         rotations = identity.expand(n_chains, -1, -1).clone()

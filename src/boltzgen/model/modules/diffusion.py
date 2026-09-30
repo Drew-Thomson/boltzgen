@@ -879,10 +879,7 @@ class AtomDiffusion(Module):
                                 
                                 if is_anti:
                                     if topology == "double_tape":
-                                        unit_idx = i // 2
-                                        chain_in_unit = i % 2
-                                        layer_idx = (chain_in_unit + unit_idx) % 2
-                                        z_idx = unit_idx
+                                        layer_idx, z_idx = materials.double_tape_layer_position(i)
                                         if layer_idx == 0:
                                             if z_idx % 2 == 1:
                                                 R_rot = torch.tensor([[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]], device=coords_folded.device, dtype=coords_folded.dtype)
@@ -986,10 +983,7 @@ class AtomDiffusion(Module):
                                 
                                 if is_anti:
                                     if topology == "double_tape":
-                                        unit_idx = i // 2
-                                        chain_in_unit = i % 2
-                                        layer_idx = (chain_in_unit + unit_idx) % 2
-                                        z_idx = unit_idx
+                                        layer_idx, z_idx = materials.double_tape_layer_position(i)
                                         if layer_idx == 0:
                                             if z_idx % 2 == 1:
                                                 R_rot = torch.tensor([[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]], device=ref_coords.device, dtype=ref_coords.dtype)

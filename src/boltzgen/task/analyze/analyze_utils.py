@@ -95,8 +95,41 @@ def make_histogram(
 
 
 def get_best_folding_sample(folded):
-    confidence = 0.8 * folded["design_to_target_iptm"] + 0.2 * folded["design_ptm"]
-    best_idx = np.argmax(confidence)
+    """Select the best fold sample using confidence keys available in the archive.
+
+    Prediction archives may come from different Boltz-2/BoltzGen versions and
+    can expose ``design_iptm``/``ptm`` instead of the older
+    ``design_to_target_iptm``/``design_ptm`` pair.
+    """
+    n_samples = len(folded["coords"])
+
+    def sample_metric(candidates):
+        for key in candidates:
+            if key not in folded:
+                continue
+            values = np.asarray(folded[key])
+            if values.ndim == 0:
+                return np.full(n_samples, float(values))
+            if values.shape[0] == n_samples:
+                if values.ndim > 1:
+                    values = values.reshape(n_samples, -1).mean(axis=1)
+                return values.astype(float)
+        return None
+
+    interface_confidence = sample_metric(
+        ("design_to_target_iptm", "design_iptm", "protein_iptm", "iptm")
+    )
+    fold_confidence = sample_metric(("design_ptm", "ptm", "target_ptm"))
+    if interface_confidence is None and fold_confidence is None:
+        confidence = np.zeros(n_samples, dtype=float)
+    elif interface_confidence is None:
+        confidence = fold_confidence
+    elif fold_confidence is None:
+        confidence = interface_confidence
+    else:
+        confidence = 0.8 * interface_confidence + 0.2 * fold_confidence
+    confidence = np.where(np.isfinite(confidence), confidence, -np.inf)
+    best_idx = int(np.argmax(confidence))
 
     # TODO: remove the "if k in folded"
     best_sample = {
@@ -162,18 +195,21 @@ def get_fold_metrics(
     # metrics without prefix (backbone only is the same as all atom)
     # TODO: remove the "if k in best_sample"
     confs = {k: best_sample[k] for k in const.eval_keys_confidence if k in best_sample}
-    confs["min_interaction_pae<1.5"] = bool(confs["min_interaction_pae"] <= 1.5)
-    confs["min_interaction_pae<2"] = bool(confs["min_interaction_pae"] <= 2.0)
-    confs["min_interaction_pae<2.5"] = bool(confs["min_interaction_pae"] <= 2.5)
-    confs["min_interaction_pae<3"] = bool(confs["min_interaction_pae"] <= 3)
-    confs["min_interaction_pae<4"] = bool(confs["min_interaction_pae"] <= 4)
-    confs["min_interaction_pae<5"] = bool(confs["min_interaction_pae"] <= 5)
-    confs["design_ptm>80"] = bool(confs["design_ptm"] >= 0.8)
-    confs["design_ptm>75"] = bool(confs["design_ptm"] >= 0.75)
-    confs["design_iptm>80"] = bool(confs["design_iptm"] >= 0.8)
-    confs["design_iptm>70"] = bool(confs["design_iptm"] >= 0.7)
-    confs["design_iptm>60"] = bool(confs["design_iptm"] >= 0.6)
-    confs["design_iptm>50"] = bool(confs["design_iptm"] >= 0.5)
+    if "min_interaction_pae" in confs:
+        for threshold in (1.5, 2, 2.5, 3, 4, 5):
+            confs[f"min_interaction_pae<{threshold:g}"] = bool(
+                confs["min_interaction_pae"] <= threshold
+            )
+    if "design_ptm" in confs:
+        for threshold in (0.8, 0.75):
+            confs[f"design_ptm>{int(threshold * 100)}"] = bool(
+                confs["design_ptm"] >= threshold
+            )
+    if "design_iptm" in confs:
+        for threshold in (0.8, 0.7, 0.6, 0.5):
+            confs[f"design_iptm>{int(threshold * 100)}"] = bool(
+                confs["design_iptm"] >= threshold
+            )
 
     prefixed_metrics = {f"{prefix}{k}": v for k, v in metrics.items()}
     prefixed_metrics.update(confs)
