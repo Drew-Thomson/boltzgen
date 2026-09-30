@@ -448,8 +448,8 @@ class Filter(Task):
 
         self.df["absolute_score"] = 0.0
         for base_col, weight in importances.items():
-            if base_col in self.df.columns:
-                norm_col = base_col + "_z"
+            norm_col = base_col + "_z"
+            if norm_col in self.df.columns:
                 self.df["absolute_score"] += weight * self.df[norm_col]
         total_importance = sum(abs(w) for w in importances.values())
         self.df["absolute_score"] /= total_importance
@@ -459,9 +459,12 @@ class Filter(Task):
         for col in ["design_iiptm", "design_ptm", "min_design_to_target_pae"]:
             weight = importances[col]
             norm_col = col + "_z"
+            if norm_col not in self.df.columns:
+                continue
             weight_sum += abs(weight)
             self.df["structure_confidence"] += weight * self.df[norm_col]
-        self.df["structure_confidence"] /= weight_sum
+        if weight_sum:
+            self.df["structure_confidence"] /= weight_sum
 
         for flt in self.filters:
             feat = flt["feature"]
