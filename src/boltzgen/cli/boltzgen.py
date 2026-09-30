@@ -69,6 +69,9 @@ main_script = project_root / "resources/main.py"
 step_names = [
     "design",
     "inverse_folding",
+    "prepare_counter_screens",
+    "counter_screen_folding",
+    "merge_counter_screen_metrics",
     "design_folding",
     "folding",
     "affinity",
@@ -201,6 +204,11 @@ def add_configure_arguments(
         action="store_true",
         help="Reuse existing results across all steps. Generate only as many new designs are "
         "needed to achieve the specified total number of designs.",
+    )
+    p.add_argument(
+        "--heteromer-counter-screen",
+        action="store_true",
+        help="Run A-only and B-only homomer counter-screen folds for a two-chain heteromer design",
     )
 
     # Design configuration options
@@ -774,6 +782,28 @@ def execute_command(args: argparse.Namespace) -> None:
 
     # Filter steps if specific steps are requested
     enabled_steps = set(args.steps) if args.steps else None
+    if enabled_steps and "counter_screen_folding" in enabled_steps:
+        required = {"prepare_counter_screens", "inverse_folding"}
+        missing = required - enabled_steps
+        if missing:
+            raise ValueError(
+                "counter_screen_folding requires the pipeline steps: "
+                + ", ".join(sorted(missing))
+            )
+    if (
+        enabled_steps
+        and "prepare_counter_screens" in enabled_steps
+        and "inverse_folding" not in enabled_steps
+    ):
+        raise ValueError("prepare_counter_screens requires inverse_folding")
+    if enabled_steps and "merge_counter_screen_metrics" in enabled_steps:
+        required = {"analysis", "counter_screen_folding", "prepare_counter_screens"}
+        missing = required - enabled_steps
+        if missing:
+            raise ValueError(
+                "merge_counter_screen_metrics requires the pipeline steps: "
+                + ", ".join(sorted(missing))
+            )
     resolved_steps: List[Tuple[str, Path]] = []
 
     for step_info in steps_data["steps"]:
@@ -944,6 +974,10 @@ class BinderDesignPipeline:
         print(f"Using {devices} devices")
 
         self.steps = []
+        if args.heteromer_counter_screen and args.skip_inverse_folding:
+            raise ValueError(
+                "heteromer counter-screening requires inverse folding and cannot be combined with --skip_inverse_folding"
+            )
 
         # Design generation
         output_dir = args.output / "intermediate_designs"
@@ -1103,6 +1137,63 @@ class BinderDesignPipeline:
                     )
                 )
 
+        if args.heteromer_counter_screen and not args.skip_inverse_folding:
+            source_dir = output_dir
+            layout_path = args.design_spec[0].resolve().parent / "material_layout.json"
+            counter_screen_dir = args.output / "heteromer_counter_screens"
+            if len(args.design_spec) != 1:
+                raise ValueError(
+                    "heteromer counter-screening currently requires exactly one material design spec"
+                )
+            layout_metadata_path = args.design_spec[0].resolve().parent / "material_layout.json"
+            if not layout_metadata_path.exists():
+                raise FileNotFoundError(
+                    "heteromer counter-screening requires material_builder layout metadata: "
+                    f"{layout_metadata_path}"
+                )
+            layout_metadata = json.loads(layout_metadata_path.read_text())
+            heteromer_meta = layout_metadata.get("heteromer_screening", {})
+            if not heteromer_meta.get("enabled"):
+                raise ValueError(
+                    "design spec layout does not enable heteromer counter-screening; "
+                    "generate it with material_builder.py --heteromer-counter-screen"
+                )
+            topology_params = heteromer_meta.get("topology_params", {})
+            topology = heteromer_meta.get("topology")
+            self.steps.append(
+                PipelineStep(
+                    name="prepare_counter_screens",
+                    config_path=args.config_dir / "prepare_counter_screens.yaml",
+                    args=[
+                        f"input_dir={source_dir}",
+                        f"output_dir={counter_screen_dir}",
+                        f"layout_path={layout_path}",
+                        f"topology={topology}",
+                        f"copies={layout_metadata['copies']}",
+                        f"moldir={moldir}",
+                        "topology_params=" + json.dumps(topology_params),
+                    ],
+                )
+            )
+            self.steps.append(
+                PipelineStep(
+                    name="counter_screen_folding",
+                    config_path=args.config_dir / "fold.yaml",
+                    args=[
+                        f"output={counter_screen_dir}",
+                        f"data.design_dir={counter_screen_dir}",
+                        f"trainer.devices={devices}",
+                        f"data.cfg.num_workers={args.num_workers}",
+                        f"data.skip_existing={args.reuse}",
+                        f"data.skip_existing_kind=folded",
+                        f"override.use_kernels={use_kernels}",
+                        f"checkpoint={get_artifact_path(args, args.folding_checkpoint)}",
+                        f"data.cfg.moldir={moldir}",
+                        "keys_dict_out=[complex_plddt,protein_iptm,design_iptm,min_interaction_pae]",
+                    ],
+                )
+            )
+
         # Folding
         input_dir = output_dir
         self.steps.append(
@@ -1123,6 +1214,10 @@ class BinderDesignPipeline:
                 + config_args_by_step["folding"],
             )
         )
+        if args.heteromer_counter_screen:
+            self.steps[-1].args.append(
+                "keys_dict_out=[complex_plddt,protein_iptm,design_iptm,min_interaction_pae]"
+            )
 
         # Design folding
         input_dir = output_dir
@@ -1182,6 +1277,7 @@ class BinderDesignPipeline:
                     f"data.skip_existing_kind=analyzed",
                     f"data.cfg.moldir={moldir}",
                     f"designfolding_metrics={do_design_folding}",
+                    f"heteromer_counter_screening={args.heteromer_counter_screen}",
                     f"delta_sasa_original={args.skip_inverse_folding}",
                     f"noncovalents_original={args.skip_inverse_folding}",
                     f"allatom_fold_metrics={args.skip_inverse_folding}",
@@ -1189,6 +1285,18 @@ class BinderDesignPipeline:
                 + config_args_by_step["analysis"],
             )
         )
+
+        if args.heteromer_counter_screen and not args.skip_inverse_folding:
+            self.steps.append(
+                PipelineStep(
+                    name="merge_counter_screen_metrics",
+                    config_path=args.config_dir / "merge_counter_screen_metrics.yaml",
+                    args=[
+                        f"design_dir={input_dir}",
+                        f"counter_screen_dir={args.output / 'heteromer_counter_screens'}",
+                    ],
+                )
+            )
 
         # Filtering
         output_dir = args.output / "final_ranked_designs"
@@ -1203,6 +1311,16 @@ class BinderDesignPipeline:
             f"filter_designfolding={do_design_folding}",
             f"budget={args.budget}",
         ]
+        if args.heteromer_counter_screen:
+            filter_args.append(
+                "metrics_override={delta_design_iptm_vs_homomer_max: 1, "
+                "delta_complex_plddt_vs_homomer_max: 1, "
+                "delta_protein_iptm_vs_homomer_max: 2, "
+                "design_to_target_iptm: null, design_ptm: null, "
+                "neg_min_design_to_target_pae: null, "
+                "neg_lattice_rmsd_refolded: null, "
+                "h_bonds_per_interface_refolded: null, packing_density_refolded: null}"
+            )
 
         # Add optional filtering arguments
         if args.alpha is not None:

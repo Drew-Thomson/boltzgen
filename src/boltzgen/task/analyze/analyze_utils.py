@@ -180,6 +180,51 @@ def get_fold_metrics(
     return prefixed_metrics
 
 
+def heteromer_counter_screen_contrasts(
+    heteromer_metrics: dict[str, float],
+    homomer_a_metrics: dict[str, float],
+    homomer_b_metrics: dict[str, float],
+) -> dict[str, float]:
+    """Return higher-is-better heteromer advantages over the stronger homomer."""
+    metric_names = ("complex_plddt", "design_iptm", "protein_iptm")
+    result: dict[str, float] = {}
+    for name in metric_names:
+        values = (
+            heteromer_metrics.get(name),
+            homomer_a_metrics.get(name),
+            homomer_b_metrics.get(name),
+        )
+        if any(value is None for value in values):
+            continue
+        heteromer, homomer_a, homomer_b = (float(value) for value in values)
+        result[f"heteromer_{name}"] = heteromer
+        result[f"homomer_a_{name}"] = homomer_a
+        result[f"homomer_b_{name}"] = homomer_b
+        result[f"delta_{name}_vs_homomer_max"] = heteromer - max(
+            homomer_a, homomer_b
+        )
+
+    for prefix, values in (
+        ("heteromer", heteromer_metrics),
+        ("homomer_a", homomer_a_metrics),
+        ("homomer_b", homomer_b_metrics),
+    ):
+        if values.get("min_interaction_pae") is not None:
+            result[f"{prefix}_min_interaction_pae"] = float(
+                values["min_interaction_pae"]
+            )
+    if all(
+        values.get("min_interaction_pae") is not None
+        for values in (heteromer_metrics, homomer_a_metrics, homomer_b_metrics)
+    ):
+        # Negative sign makes a reduction in PAE a positive (better) advantage.
+        result["delta_neg_min_interaction_pae_vs_homomer_max"] = min(
+            float(homomer_a_metrics["min_interaction_pae"]),
+            float(homomer_b_metrics["min_interaction_pae"]),
+        ) - float(heteromer_metrics["min_interaction_pae"])
+    return result
+
+
 def count_noncovalents(feat):
     metrics = {}
     with warnings.catch_warnings():

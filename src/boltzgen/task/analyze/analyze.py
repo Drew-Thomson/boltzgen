@@ -106,6 +106,7 @@ class Analyze(Task):
         designfolding_metrics: bool = False,
         use_design_mask_for_target: bool = False,
         material_metrics: bool = True,
+        heteromer_counter_screening: bool = False,
     ) -> None:
         """Initialize the task.
 
@@ -158,6 +159,7 @@ class Analyze(Task):
         self.diversity_subset = diversity_subset
         self.use_design_mask_for_target = use_design_mask_for_target
         self.material_metrics = material_metrics
+        self.heteromer_counter_screening = heteromer_counter_screening
         self.material_metrics = material_metrics
 
         # Prevent each worker process from spawning its own multithreaded pools
@@ -695,6 +697,23 @@ class Analyze(Task):
             metrics["design_largest_hydrophobic_patch"] = area
         if des_cif_path is not None:
             des_cif_path.unlink(missing_ok=True)
+
+        if self.heteromer_counter_screening:
+            folded_confidence_path = (
+                self.design_dir / const.folding_dirname / f"{sample_id}.npz"
+            )
+            if folded_confidence_path.exists():
+                with np.load(folded_confidence_path, allow_pickle=True) as confidence:
+                    for key in (
+                        "complex_plddt",
+                        "design_iptm",
+                        "protein_iptm",
+                        "min_interaction_pae",
+                    ):
+                        if key in confidence.files:
+                            value = np.asarray(confidence[key], dtype=float)
+                            if value.size:
+                                metrics[f"heteromer_{key}"] = float(np.nanmean(value))
 
         # Count logging
         metrics["num_prot_tokens"] = (

@@ -42,8 +42,22 @@ def _positive_ratio(value: Any, field: str) -> Fraction:
     return ratio
 
 
+def _heteromer_partner_slot(topology: str, chain_order: int) -> tuple[int, int | None]:
+    """Return the source partner slot and tape side for one lattice chain."""
+    if topology != "double_tape":
+        return chain_order % 2, None
+    side = chain_order % 2
+    axial_position = chain_order // 2
+    return axial_position % 2, side
+
+
 def expand_material_spec(
-    copies: int, asym_unit: list[dict[str, Any]]
+    copies: int,
+    asym_unit: list[dict[str, Any]],
+    *,
+    heteromer_screening: bool = False,
+    topology: str | None = None,
+    topology_params: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Expand material templates and return BoltzGen entities plus a sidecar layout.
 
@@ -77,6 +91,34 @@ def expand_material_spec(
                 names[name] = protein_idx
         else:
             ligands.append((template_idx, template))
+
+    supported_heteromer_topologies = {
+        "cyclic",
+        "linear_tape",
+        "double_tape",
+        "open_arc",
+        "helical",
+    }
+    if heteromer_screening:
+        if len(proteins) != 2:
+            raise ValueError(
+                "heteromer counter-screening requires exactly two protein templates"
+            )
+        if ligands:
+            raise ValueError(
+                "heteromer-vs-homomer counter-screening is unsuitable for material "
+                "asymmetric units containing ligands; ligand-mediated assembly is "
+                "a ternary interaction and is not screened by the current protein-only controls"
+            )
+        if copies % 2:
+            raise ValueError(
+                "heteromer counter-screening requires an even number of placements"
+            )
+        if topology not in supported_heteromer_topologies:
+            raise ValueError(
+                "heteromer counter-screening supports only cyclic, linear_tape, "
+                "double_tape, open_arc, and helical topologies"
+            )
 
     normalized_ligands: list[tuple[int, dict[str, Any], str, int | None, int | Fraction]] = []
     for template_idx, ligand in ligands:
@@ -124,6 +166,14 @@ def expand_material_spec(
     records: list[dict[str, Any]] = []
     unit_records: list[dict[str, Any]] = []
     for placement_idx in range(copies):
+        if heteromer_screening:
+            partner_slot, side = _heteromer_partner_slot(topology, placement_idx)
+            emitted_proteins = [(partner_slot, proteins[partner_slot], side)]
+        else:
+            emitted_proteins = [
+                (slot, protein_template, None)
+                for slot, protein_template in enumerate(proteins)
+            ]
         unit_record = {
             "placement_index": placement_idx,
             "protein_asym_indices": [],
@@ -131,7 +181,7 @@ def expand_material_spec(
         }
         protein_asym_by_slot: dict[int, int] = {}
 
-        for protein_slot, (template_idx, protein) in enumerate(proteins):
+        for protein_slot, (template_idx, protein), side in emitted_proteins:
             asym_index = len(entities)
             chain_id = _chain_id(asym_index)
             entity = _make_entity("protein", protein, chain_id, protein_slot + 1)
@@ -148,6 +198,24 @@ def expand_material_spec(
                     "protein_template_index": template_idx,
                     "template_name": protein.get("name"),
                     "parent_asym_index": None,
+                    **(
+                        {
+                            "partner_label": "A" if protein_slot == 0 else "B",
+                            "topology_order_index": placement_idx,
+                            "topology_pattern": "double_tape_side_alternating"
+                            if topology == "double_tape"
+                            else "alternating",
+                            **(
+                                {
+                            "double_tape_side": side
+                                }
+                                if topology == "double_tape"
+                                else {}
+                            ),
+                        }
+                        if heteromer_screening
+                        else {}
+                    ),
                 }
             )
 
@@ -191,10 +259,50 @@ def expand_material_spec(
     layout = {
         "version": 1,
         "copies": copies,
-        "guided_proteins_per_unit": len(proteins),
+        "guided_proteins_per_unit": 1 if heteromer_screening else len(proteins),
         "chains": records,
         "placements": unit_records,
     }
+    if topology_params is not None:
+        layout["topology_params"] = dict(topology_params)
+    if heteromer_screening:
+        layout["heteromer_screening"] = {
+            "enabled": True,
+            "partner_labels": ["A", "B"],
+            "topology": topology,
+            "copies": copies,
+            "source_templates": [protein for _, protein in proteins],
+            "placement_pattern": "alternating_along_each_side"
+            if topology == "double_tape"
+            else "alternating_in_topology_order",
+            "protein_template_names": [
+                protein.get("name")
+                or f"protein_{slot}"
+                for slot, (_, protein) in enumerate(proteins)
+            ],
+            "counter_screen_supported": True,
+            "topology_params": dict(topology_params or {}),
+        }
+        for record in records:
+            if record["role"] == "protein":
+                record.update(
+                    {
+                        "partner_label": (
+                            "A"
+                            if record["protein_template_index"] == proteins[0][0]
+                            else "B"
+                        ),
+                        "topology_order_index": int(record["placement_index"]),
+                        "topology_pattern": layout["heteromer_screening"]["placement_pattern"],
+                        **(
+                            {"double_tape_side": _heteromer_partner_slot(
+                                topology, int(record["placement_index"])
+                            )[1]}
+                            if topology == "double_tape"
+                            else {}
+                        ),
+                    }
+                )
     return entities, layout
 
 
@@ -203,7 +311,11 @@ def _make_entity(
 ) -> dict[str, Any]:
     entity: dict[str, Any] = {"id": chain_id}
     if kind == "protein":
-        entity["sequence"] = str(template.get("length", 15))
+        entity["sequence"] = str(
+            template.get("sequence")
+            if template.get("sequence") is not None
+            else template.get("length", 15)
+        )
         entity["symmetric_group"] = template.get(
             "symmetric_group", default_symmetric_group
         )
@@ -225,6 +337,7 @@ def _make_entity(
         if key not in _BUILDER_KEYS | {
             "type",
             "length",
+            "sequence",
             "secondary_structure",
             "symmetric_group",
             "ccd",
@@ -247,3 +360,72 @@ def write_layout(layout: dict[str, Any], path: str | Path) -> str:
     path = Path(path)
     path.write_text(json.dumps(layout, indent=2) + "\n")
     return str(path)
+
+
+def build_homomer_counter_screen_entities(
+    sequence: str,
+    copies: int,
+    *,
+    partner_label: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Build a standard entity list and parent metadata for one homomer screen."""
+    if not isinstance(sequence, str) or not sequence:
+        raise ValueError("counter-screen sequence must be a non-empty string")
+    if isinstance(copies, bool) or not isinstance(copies, int) or copies < 1:
+        raise ValueError("counter-screen copies must be a positive integer")
+    if partner_label not in {"A", "B"}:
+        raise ValueError("partner_label must be 'A' or 'B'")
+    entities = [
+        {"protein": {"id": _chain_id(index), "sequence": sequence}}
+        for index in range(copies)
+    ]
+    mapping = {
+        "version": 1,
+        "screen_type": "homomer",
+        "partner_label": partner_label,
+        "copies": copies,
+        "sequence": sequence,
+    }
+    return entities, mapping
+
+
+def build_heteromer_counter_screen_specs(
+    partner_sequences: dict[str, str],
+    copies: int,
+    topology: str,
+    topology_params: dict[str, Any],
+    parent_design_id: str,
+) -> dict[str, dict[str, Any]]:
+    """Describe paired homomer jobs derived from one heteromer design.
+
+    The returned records contain ordinary BoltzGen entity specifications and
+    explicit parent/child metadata. Structure and prediction files are created
+    by the caller because they depend on the source design's coordinates.
+    """
+    if set(partner_sequences) != {"A", "B"}:
+        raise ValueError("partner_sequences must contain exactly keys 'A' and 'B'")
+    if any(not isinstance(seq, str) or not seq for seq in partner_sequences.values()):
+        raise ValueError("both partner sequences must be non-empty strings")
+    if isinstance(copies, bool) or not isinstance(copies, int) or copies < 2 or copies % 2:
+        raise ValueError("heteromer counter-screen copies must be a positive even integer")
+    if topology not in {"cyclic", "linear_tape", "double_tape", "open_arc", "helical"}:
+        raise ValueError(f"Unsupported counter-screen topology: {topology}")
+    if not isinstance(parent_design_id, str) or not parent_design_id:
+        raise ValueError("parent_design_id must be a non-empty string")
+
+    jobs: dict[str, dict[str, Any]] = {}
+    for partner in ("A", "B"):
+        screen_id = f"{parent_design_id}__homomer_{partner.lower()}"
+        entities, layout = build_homomer_counter_screen_entities(
+            partner_sequences[partner], copies, partner_label=partner
+        )
+        jobs[partner] = {
+            "id": screen_id,
+            "parent_design_id": parent_design_id,
+            "partner_label": partner,
+            "topology": topology,
+            "topology_params": dict(topology_params),
+            "entities": entities,
+            "layout": layout,
+        }
+    return jobs

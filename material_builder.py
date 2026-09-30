@@ -31,8 +31,22 @@ def get_chain_id(idx):
         idx = idx // 26 - 1
     return res
 
-def generate_yaml_from_spec(num_copies, asym_unit_def, output_file="material_spec.yaml"):
-    entities, layout = expand_material_spec(num_copies, asym_unit_def)
+def generate_yaml_from_spec(
+    num_copies,
+    asym_unit_def,
+    output_file="material_spec.yaml",
+    *,
+    heteromer_counter_screen=False,
+    topology=None,
+    topology_params=None,
+):
+    entities, layout = expand_material_spec(
+        num_copies,
+        asym_unit_def,
+        heteromer_screening=heteromer_counter_screen,
+        topology=topology,
+        topology_params=topology_params,
+    )
     spec = {"entities": entities}
     with open(output_file, "w") as f:
         yaml.dump(spec, f, sort_keys=False)
@@ -103,6 +117,11 @@ def main():
     parser.add_argument("--seqs_per_backbone", type=int, default=1, help="Number of sequences to generate per structural backbone")
     parser.add_argument("--avoid_aa", type=str, default="", help="String of amino acids to completely avoid (e.g. 'CWP')")
     parser.add_argument("--run", action="store_true", help="Execute BoltzGen after generating YAML")
+    parser.add_argument(
+        "--heteromer-counter-screen",
+        action="store_true",
+        help="Design a two-chain heteromer with alternating partner identities and run homomer counter-screens",
+    )
     
     args = parser.parse_args()
     
@@ -120,12 +139,48 @@ def main():
     else:
         asym_unit_def = [{"type": "protein", "length": args.length, "secondary_structure": args.secondary_structure} for _ in range(args.asym_unit_size)]
 
+    if args.heteromer_counter_screen and "asym_unit" not in config:
+        parser.error(
+            "--heteromer-counter-screen requires asym_unit with two distinct, fixed sequence entries"
+        )
+
     protein_templates = [
         item for item in asym_unit_def if str(item.get("type", "protein")).lower() == "protein"
     ]
     args.asym_unit_size = len(protein_templates)
     if not protein_templates:
         parser.error("asym_unit must contain at least one protein template")
+
+    supported_heteromer_topologies = {
+        "cyclic",
+        "linear_tape",
+        "double_tape",
+        "open_arc",
+        "helical",
+    }
+    if args.heteromer_counter_screen:
+        if len(protein_templates) != 2:
+            parser.error(
+                "--heteromer-counter-screen requires exactly two protein templates"
+            )
+        if any(
+            str(item.get("type", "protein")).lower() == "ligand"
+            for item in asym_unit_def
+        ):
+            parser.error(
+                "--heteromer-counter-screen does not support ligands in the asymmetric unit; "
+                "ligand-mediated assembly is a ternary system and is unsuitable for the "
+                "current protein-only homomer controls"
+            )
+        if args.topology not in supported_heteromer_topologies:
+            parser.error(
+                "--heteromer-counter-screen supports cyclic, linear_tape, "
+                "double_tape, open_arc, and helical topologies"
+            )
+        if args.copies % 2:
+            parser.error(
+                "--heteromer-counter-screen requires an even number of placements"
+            )
 
     if args.grid_dim_x < 1 or args.grid_dim_y < 1:
         parser.error("--grid_dim_x and --grid_dim_y must be positive")
@@ -196,8 +251,12 @@ def main():
         
     # Set environment variables for the modified diffusion loop
     os.environ["MAT_TOPOLOGY"] = args.topology
+    os.environ["MAT_COPIES"] = str(args.copies)
     os.environ["MAT_GUIDANCE_SCALE"] = str(args.guidance_scale)
-    os.environ["MAT_ASYM_UNIT_SIZE"] = str(args.asym_unit_size)
+    os.environ["MAT_ASYM_UNIT_SIZE"] = str(
+        1 if args.heteromer_counter_screen else args.asym_unit_size
+    )
+    os.environ["MAT_HETEROMER_SCREEN"] = str(args.heteromer_counter_screen).lower()
     os.environ["MAT_TARGET_PITCH"] = str(args.target_pitch)
     os.environ["MAT_TARGET_RADIUS"] = str(args.target_radius)
     os.environ["MAT_TARGET_DZ"] = str(args.target_dz)
@@ -221,7 +280,22 @@ def main():
     os.environ["MAT_NUM_STARTS"] = str(args.num_starts)
     os.environ.pop("MAT_LAYOUT_FILE", None)
     
-    yaml_file = generate_yaml_from_spec(args.copies, asym_unit_def, output_file="material_spec.yaml")
+    yaml_file = generate_yaml_from_spec(
+        args.copies,
+        asym_unit_def,
+        output_file="material_spec.yaml",
+        heteromer_counter_screen=args.heteromer_counter_screen,
+        topology=args.topology,
+        topology_params={
+            "target_pitch": args.target_pitch,
+            "target_radius": args.target_radius,
+            "target_dz": args.target_dz,
+            "target_angle": args.target_angle,
+            "arc_radius": args.arc_radius,
+            "target_arc_spacing": args.target_arc_spacing,
+            "layer_dist": args.layer_dist,
+        },
+    )
     
     if args.run:
         if "asym_unit" in config:
@@ -238,6 +312,8 @@ def main():
             "--inverse_fold_num_sequences", str(args.seqs_per_backbone),
             "--config", "inverse_folding", f"override.inverse_fold_args.sampling_temperature={args.inverse_temp}"
         ]
+        if args.heteromer_counter_screen:
+            cmd.append("--heteromer-counter-screen")
 
         material_filtering_override = format_metrics_override(args.topology)
         if material_filtering_override is not None:

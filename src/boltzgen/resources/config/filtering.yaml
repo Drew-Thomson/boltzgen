@@ -24,3 +24,6 @@ plot_seq_logos:  false  # make sequence logo diagrams of designed sequence
 #                    h_bonds_per_interface_refolded: 1}
 # `neg_*` material metrics are oriented so Filter's maximize ranking prefers
 # lower RMSD/aspect ratio. Higher cavity radius remains preferred.
+# Heteromer counter-screen metrics are only added when enabled with
+# `material_builder.py --heteromer-counter-screen`; the CLI then supplies
+# contrast-based `metrics_override` values.

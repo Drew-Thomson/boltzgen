@@ -2,7 +2,12 @@ import json
 
 import pytest
 
-from boltzgen.model.modules.material_layout import expand_material_spec, write_layout
+from boltzgen.model.modules.material_layout import (
+    build_homomer_counter_screen_entities,
+    build_heteromer_counter_screen_specs,
+    expand_material_spec,
+    write_layout,
+)
 
 
 def test_ligand_multiplicity_expansion_and_parent_mapping():
@@ -151,3 +156,108 @@ def test_layout_sidecar_round_trips(tmp_path):
     loaded = json.loads((tmp_path / "material_layout.json").read_text())
     assert path.endswith("material_layout.json")
     assert loaded == layout
+
+
+@pytest.mark.parametrize(
+    ("topology", "expected"),
+    [
+        ("cyclic", ["A", "B", "A", "B"]),
+        ("linear_tape", ["A", "B", "A", "B"]),
+        ("open_arc", ["A", "B", "A", "B"]),
+        ("helical", ["A", "B", "A", "B"]),
+        ("double_tape", ["A", "A", "B", "B", "A", "A", "B", "B"]),
+    ],
+)
+def test_heteromer_layout_alternates_partner_identity(topology, expected):
+    copies = len(expected)
+    entities, layout = expand_material_spec(
+        copies,
+        [
+            {"type": "protein", "name": "partner_a", "length": 8},
+            {"type": "protein", "name": "partner_b", "length": 9},
+        ],
+        heteromer_screening=True,
+        topology=topology,
+    )
+    assert len(entities) == copies
+    assert [record["partner_label"] for record in layout["chains"]] == expected
+    assert layout["guided_proteins_per_unit"] == 1
+    assert layout["heteromer_screening"]["enabled"] is True
+
+
+@pytest.mark.parametrize(
+    ("copies", "topology", "protein_count", "message"),
+    [
+        (4, "cyclic", 1, "exactly two"),
+        (3, "linear_tape", 2, "even number"),
+        (4, "nanotube", 2, "supports only"),
+    ],
+)
+def test_heteromer_layout_rejects_unsupported_inputs(
+    copies, topology, protein_count, message
+):
+    with pytest.raises(ValueError, match=message):
+        expand_material_spec(
+            copies,
+            [{"type": "protein", "length": 8} for _ in range(protein_count)],
+            heteromer_screening=True,
+            topology=topology,
+        )
+
+
+def test_heteromer_screening_rejects_ligands_as_ternary_systems():
+    with pytest.raises(ValueError, match="unsuitable.*ligands"):
+        expand_material_spec(
+            4,
+            [
+                {"type": "protein", "name": "A", "length": 8},
+                {"type": "protein", "name": "B", "length": 9},
+                {"type": "ligand", "ccd": "ZN", "ligands_per_asym_unit": 1},
+            ],
+            heteromer_screening=True,
+            topology="cyclic",
+        )
+
+
+def test_build_homomer_counter_screen_entities():
+    entities, mapping = build_homomer_counter_screen_entities(
+        "ACDE", 4, partner_label="B"
+    )
+    assert [entity["protein"]["id"] for entity in entities] == ["A", "B", "C", "D"]
+    assert all(entity["protein"]["sequence"] == "ACDE" for entity in entities)
+    assert mapping["partner_label"] == "B"
+    assert mapping["copies"] == 4
+
+
+def test_build_heteromer_counter_screen_specs_preserves_parent_and_params():
+    jobs = build_heteromer_counter_screen_specs(
+        {"A": "ACDE", "B": "FGHI"},
+        6,
+        "helical",
+        {"target_radius": 12.0, "target_dz": 5.0},
+        "design_001",
+    )
+    assert jobs["A"]["id"] == "design_001__homomer_a"
+    assert jobs["B"]["id"] == "design_001__homomer_b"
+    assert jobs["A"]["parent_design_id"] == "design_001"
+    assert len(jobs["A"]["entities"]) == len(jobs["B"]["entities"]) == 6
+    assert jobs["A"]["entities"][0]["protein"]["sequence"] == "ACDE"
+    assert jobs["B"]["entities"][0]["protein"]["sequence"] == "FGHI"
+    assert jobs["A"]["topology_params"] == {"target_radius": 12.0, "target_dz": 5.0}
+
+
+@pytest.mark.parametrize(
+    ("sequences", "copies", "topology", "error"),
+    [
+        ({"A": "AC", "B": "FG", "C": "HI"}, 4, "cyclic", "exactly keys"),
+        ({"A": "AC", "B": "FG"}, 3, "cyclic", "even integer"),
+        ({"A": "AC", "B": "FG"}, 4, "nanotube", "Unsupported"),
+    ],
+)
+def test_build_heteromer_counter_screen_specs_rejects_invalid_inputs(
+    sequences, copies, topology, error
+):
+    with pytest.raises(ValueError, match=error):
+        build_heteromer_counter_screen_specs(
+            sequences, copies, topology, {}, "parent"
+        )

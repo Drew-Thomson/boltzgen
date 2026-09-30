@@ -1,5 +1,11 @@
 # BoltzGen Material Builder Topologies
 
+## Two-chain heteromer counter-screening
+
+`material_builder.py --heteromer-counter-screen` opts into homomer counter-screening for a two-protein asymmetric unit. The supported topologies are `cyclic`, `linear_tape`, `double_tape`, `open_arc`, and `helical`. The feature currently requires an even number of placements and a protein-only `asym_unit`; ligand-bearing heteromers are explicitly rejected as unsuitable because the metal/ligand can mediate assembly, making this a ternary interaction rather than a protein-only A/B comparison. Partner identity alternates around cyclic assemblies and along linear, arc, and helical position order. For `double_tape`, identity alternates along each side.
+
+After inverse folding, BoltzGen creates and folds N-copy homomers for each designed partner, where N is the total number of protein chains in the intended heteromer. This compares `A_N` and `B_N` with the intended equal-stoichiometry heteromer. The feature is disabled by default and is separate from `designfolding`. Confidence differences such as `delta_design_iptm_vs_homomer_max` are model-confidence proxies, not thermodynamic measurements or experimental evidence of specificity.
+
 `material_builder.py` can guide BoltzGen toward a range of repeated peptide-assembly geometries. Choose a topology with `--topology`; the remaining parameters below are command-line options to `material_builder.py`. Distances are in Å unless otherwise noted. Values listed as defaults reflect the builder's current CLI defaults, and some constraints apply only to the topology named.
 
 ## Shared guidance parameters

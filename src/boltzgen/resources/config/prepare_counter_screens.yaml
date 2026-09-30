@@ -1,0 +1,9 @@
+_target_: boltzgen.task.predict.heteromer_counter_screen.PrepareHeteromerCounterScreens
+
+input_dir: null
+output_dir: null
+layout_path: null
+topology: null
+copies: null
+topology_params: {}
+moldir: null
