@@ -738,6 +738,31 @@ class AtomDiffusion(Module):
                             N_chains = len(chain_masks)
                             if N_chains < 2:
                                 continue
+
+                            double_tape_slot_indices = None
+                            heteromer_double_tape = (
+                                topology == "double_tape"
+                                and material_layout is not None
+                                and material_layout.get("heteromer_screening", {}).get(
+                                    "enabled", False
+                                )
+                            )
+                            if heteromer_double_tape:
+                                double_tape_slot_indices = (
+                                    materials.double_tape_consensus_slot_indices_from_layout(
+                                        material_layout
+                                    )
+                                )
+                                if len(double_tape_slot_indices) != N_chains:
+                                    raise ValueError(
+                                        "Heteromer double_tape layout slot count does not "
+                                        f"match guided chain masks: slots="
+                                        f"{len(double_tape_slot_indices)}, masks={N_chains}"
+                                    )
+                                if not double_tape_slot_indices:
+                                    raise ValueError(
+                                        "Heteromer double_tape layout produced no consensus slots"
+                                    )
                                 
                             # 1. Calculate current COMs
                             coms = []
@@ -833,10 +858,21 @@ class AtomDiffusion(Module):
                                         int(params["grid_dim_x"])
                                         * int(params["grid_dim_y"])
                                     )
+                                elif heteromer_double_tape:
+                                    n_consensus_slots = max(double_tape_slot_indices) + 1
+                                elif topology == "double_tape":
+                                    # Skip consensus averaging for double_tape; Kabsch COM alignment
+                                    # is sufficient to enforce the lattice geometry without introducing
+                                    # zig-zag artifacts from PCA frame alignment of antiparallel chains.
+                                    n_consensus_slots = 0
                                 else:
                                     n_consensus_slots = asym_unit_size
-                                ref_coords_accs = [None] * n_consensus_slots
-                                counts = [0] * n_consensus_slots
+                                if n_consensus_slots > 0:
+                                    ref_coords_accs = [None] * n_consensus_slots
+                                    counts = [0] * n_consensus_slots
+                                else:
+                                    ref_coords_accs = []
+                                    counts = []
                             else:
                                 ref_coords_acc = None
                             
@@ -879,17 +915,10 @@ class AtomDiffusion(Module):
                                 
                                 if is_anti:
                                     if topology == "double_tape":
-                                        layer_idx, z_idx = materials.double_tape_layer_position(i)
-                                        if layer_idx == 0:
-                                            if z_idx % 2 == 1:
-                                                R_rot = torch.tensor([[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]], device=coords_folded.device, dtype=coords_folded.dtype)
-                                                coords_folded = torch.matmul(coords_folded, R_rot)
-                                        else:
-                                            if z_idx % 2 == 0:
-                                                R_rot = torch.tensor([[-1., 0., 0.], [0., 1., 0.], [0., 0., -1.]], device=coords_folded.device, dtype=coords_folded.dtype)
-                                            else:
-                                                R_rot = torch.tensor([[-1., 0., 0.], [0., -1., 0.], [0., 0., 1.]], device=coords_folded.device, dtype=coords_folded.dtype)
-                                            coords_folded = torch.matmul(coords_folded, R_rot)
+                                        R_rot = materials.double_tape_antiparallel_rotation(
+                                            i, device=coords_folded.device, dtype=coords_folded.dtype
+                                        )
+                                        coords_folded = torch.matmul(coords_folded, R_rot)
                                     elif topology == "bilayer_sheet":
                                         position = i % (int(params["grid_dim_x"]) * int(params["grid_dim_y"]))
                                         u = position // int(params["grid_dim_y"])
@@ -907,11 +936,19 @@ class AtomDiffusion(Module):
                                             coords_folded = torch.matmul(coords_folded, R_flip)
                                 
                                 if topology in ("double_tape", "bilayer_sheet"):
-                                    c_idx = (
-                                        i % (int(params["grid_dim_x"]) * int(params["grid_dim_y"]))
-                                        if topology == "bilayer_sheet"
-                                        else i % asym_unit_size
-                                    )
+                                    if topology == "bilayer_sheet":
+                                        c_idx = i % (
+                                            int(params["grid_dim_x"])
+                                            * int(params["grid_dim_y"])
+                                        )
+                                    elif heteromer_double_tape:
+                                        c_idx = double_tape_slot_indices[i]
+                                    elif topology == "double_tape":
+                                        # Route by layer to keep antiparallel orientations separate.
+                                        layer, _ = materials.double_tape_layer_position(i)
+                                        c_idx = layer
+                                    else:
+                                        c_idx = i % asym_unit_size
                                     if ref_coords_accs[c_idx] is None:
                                         ref_coords_accs[c_idx] = coords_folded
                                     else:
@@ -925,32 +962,50 @@ class AtomDiffusion(Module):
                                     
                             if topology in ("double_tape", "bilayer_sheet"):
                                 aligned_ref_coords_list = []
-                                for acc, count in zip(ref_coords_accs, counts):
+                                for slot_idx, (acc, count) in enumerate(
+                                    zip(ref_coords_accs, counts)
+                                ):
+                                    if acc is None or count <= 0:
+                                        raise ValueError(
+                                            f"{topology} consensus slot {slot_idx} is empty; "
+                                            f"counts={counts}, heteromer_screening="
+                                            f"{heteromer_double_tape}"
+                                        )
                                     ref_coords = acc / count
                                     ref_coords = ref_coords - ref_coords.mean(dim=0)
                                     cov_ref = ref_coords.T @ ref_coords
                                     U_ref, _, _ = torch.linalg.svd(cov_ref)
                                     
-                                    primary_idx = 0
-                                    
-                                    if torch.abs(U_ref[0, 1]) > torch.abs(U_ref[0, 2]):
-                                        secondary_idx = 1
-                                        tertiary_idx = 2
+                                    if topology == "bilayer_sheet":
+                                        # Apply SVD/PCA frame alignment for bilayer_sheet only.
+                                        cov_ref = ref_coords.T @ ref_coords
+                                        U_ref, _, _ = torch.linalg.svd(cov_ref)
+                                        primary_idx = 0
+                                        if torch.abs(U_ref[0, 1]) > torch.abs(U_ref[0, 2]):
+                                            secondary_idx, tertiary_idx = 1, 2
+                                        else:
+                                            secondary_idx, tertiary_idx = 2, 1
+                                        target_y = torch.tensor(
+                                            [0., 1., 0.], device=U_ref.device, dtype=U_ref.dtype
+                                        ) * torch.sign(U_ref[1, primary_idx] + 1e-6)
+                                        target_x = torch.tensor(
+                                            [1., 0., 0.], device=U_ref.device, dtype=U_ref.dtype
+                                        ) * torch.sign(U_ref[0, secondary_idx] + 1e-6)
+                                        target_z = torch.linalg.cross(target_x, target_y)
+                                        current_U = torch.stack(
+                                            [U_ref[:, secondary_idx], U_ref[:, primary_idx], U_ref[:, tertiary_idx]],
+                                            dim=1,
+                                        )
+                                        if torch.det(current_U) < 0:
+                                            current_U[:, 2] = -current_U[:, 2]
+                                        target_U = torch.stack([target_x, target_y, target_z], dim=1)
+                                        R_tilt = target_U @ current_U.T
+                                        aligned_ref_coords_list.append(torch.matmul(ref_coords, R_tilt.T))
                                     else:
-                                        secondary_idx = 2
-                                        tertiary_idx = 1
-                                        
-                                    target_y = torch.tensor([0., 1., 0.], device=U_ref.device, dtype=U_ref.dtype) * torch.sign(U_ref[1, primary_idx] + 1e-6)
-                                    target_x = torch.tensor([1., 0., 0.], device=U_ref.device, dtype=U_ref.dtype) * torch.sign(U_ref[0, secondary_idx] + 1e-6)
-                                    target_z = torch.linalg.cross(target_x, target_y)
-                                    
-                                    current_U = torch.stack([U_ref[:, secondary_idx], U_ref[:, primary_idx], U_ref[:, tertiary_idx]], dim=1)
-                                    if torch.det(current_U) < 0:
-                                        current_U[:, 2] = -current_U[:, 2]
-                                        
-                                    target_U = torch.stack([target_x, target_y, target_z], dim=1)
-                                    R_tilt = target_U @ current_U.T
-                                    aligned_ref_coords_list.append(torch.matmul(ref_coords, R_tilt.T))
+                                        # For double_tape, skip SVD alignment entirely.
+                                        # Use averaged consensus coordinates directly, relying on
+                                        # Kabsch COM alignment to enforce the lattice geometry.
+                                        aligned_ref_coords_list.append(ref_coords)
                             else:
                                 ref_coords = ref_coords_acc / N_chains
                                 ref_coords = ref_coords - ref_coords.mean(dim=0)
@@ -960,14 +1015,34 @@ class AtomDiffusion(Module):
                                 mask_indices = mask.nonzero(as_tuple=True)[0][:min_atoms]
                                 # Unfold
                                 if topology in ("double_tape", "bilayer_sheet"):
-                                    c_idx = (
-                                        i % (int(params["grid_dim_x"]) * int(params["grid_dim_y"]))
-                                        if topology == "bilayer_sheet"
-                                        else i % asym_unit_size
-                                    )
+                                    if topology == "bilayer_sheet":
+                                        c_idx = i % (
+                                            int(params["grid_dim_x"])
+                                            * int(params["grid_dim_y"])
+                                        )
+                                    elif heteromer_double_tape:
+                                        c_idx = double_tape_slot_indices[i]
+                                    elif topology == "double_tape":
+                                        # Route by layer to match fold logic.
+                                        layer, _ = materials.double_tape_layer_position(i)
+                                        c_idx = layer
+                                    else:
+                                        c_idx = i % asym_unit_size
+                                    if c_idx >= len(aligned_ref_coords_list):
+                                        raise ValueError(
+                                            f"{topology} chain {i} selects missing consensus "
+                                            f"slot {c_idx}; available slots="
+                                            f"{len(aligned_ref_coords_list)}"
+                                        )
                                     coords_to_unfold = aligned_ref_coords_list[c_idx]
+                                    # Unfold using the per-chain ideal COM to preserve step positions,
+                                    # but with the averaged (smoothed) folded coordinates
+                                    ideal_com_to_use = ideal_coms[i]
+                                    ideal_rotation_to_use = ideal_rotations[i]
                                 else:
                                     coords_to_unfold = ref_coords
+                                    ideal_com_to_use = None
+                                    ideal_rotation_to_use = None
                                 is_anti = False
                                 # Mesh, tube, and multi-start antiparallel strand
                                 # pairing is deferred beyond this phase.
@@ -985,17 +1060,12 @@ class AtomDiffusion(Module):
                                 
                                 if is_anti:
                                     if topology == "double_tape":
-                                        layer_idx, z_idx = materials.double_tape_layer_position(i)
-                                        if layer_idx == 0:
-                                            if z_idx % 2 == 1:
-                                                R_rot = torch.tensor([[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]], device=ref_coords.device, dtype=ref_coords.dtype)
-                                                coords_to_unfold = torch.matmul(coords_to_unfold, R_rot)
-                                        else:
-                                            if z_idx % 2 == 0:
-                                                R_rot = torch.tensor([[-1., 0., 0.], [0., 1., 0.], [0., 0., -1.]], device=ref_coords.device, dtype=ref_coords.dtype)
-                                            else:
-                                                R_rot = torch.tensor([[-1., 0., 0.], [0., -1., 0.], [0., 0., 1.]], device=ref_coords.device, dtype=ref_coords.dtype)
-                                            coords_to_unfold = torch.matmul(coords_to_unfold, R_rot)
+                                        R_rot = materials.double_tape_antiparallel_rotation(
+                                            i,
+                                            device=coords_to_unfold.device,
+                                            dtype=coords_to_unfold.dtype,
+                                        )
+                                        coords_to_unfold = torch.matmul(coords_to_unfold, R_rot)
                                     elif topology == "bilayer_sheet":
                                         position = i % (int(params["grid_dim_x"]) * int(params["grid_dim_y"]))
                                         u = position // int(params["grid_dim_y"])
@@ -1014,8 +1084,8 @@ class AtomDiffusion(Module):
                                 
                                 coords_unfolded = materials.unfold_from_consensus_frame(
                                     coords_to_unfold,
-                                    ideal_coms[i:i + 1],
-                                    ideal_rotations[i:i + 1],
+                                    ideal_com_to_use.unsqueeze(0) if ideal_com_to_use is not None else ideal_coms[i:i + 1],
+                                    ideal_rotation_to_use.unsqueeze(0) if ideal_rotation_to_use is not None else ideal_rotations[i:i + 1],
                                 )[0]
                                 
                                 # Transform back to global frame
