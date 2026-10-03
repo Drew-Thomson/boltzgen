@@ -1,0 +1,7 @@
+_target_: boltzgen.task.predict.filter_identity_pairs.FilterHighIdentityPairs
+
+design_dir: null
+layout_path: null
+moldir: null
+max_partner_identity: 0.5
+max_surviving_designs: null

@@ -359,12 +359,16 @@ class Filter(Task):
         self.df_in = df_in.copy()
         df = df_in.copy()
 
-        if self.from_inverse_folded:
+        if "neg_lattice_rmsd_refolded" in df:
+            df["filter_rmsd"] = -df["neg_lattice_rmsd_refolded"]
+            df["filter_rmsd_design"] = -df["neg_lattice_rmsd_refolded"]
+        elif self.from_inverse_folded:
             df["filter_rmsd"] = df["bb_rmsd"]
             df["filter_rmsd_design"] = df["bb_rmsd_design"]
         else:
             df["filter_rmsd"] = df["rmsd"]
             df["filter_rmsd_design"] = df["rmsd_design"]
+
         if "designfolding-rmsd" in df:
             df["designfolding-filter_rmsd"] = df["designfolding-rmsd"]
         if "designfolding-bb_rmsd" in df and self.from_inverse_folded:
@@ -398,6 +402,10 @@ class Filter(Task):
             feat = filter["feature"]
             low = filter["lower_is_better"]
             threshold = filter["threshold"]
+
+            if feat not in self.df.columns:
+                print(f"Warning: feature '{feat}' not found in metrics. Skipping filter.")
+                continue
 
             filter_col = f"pass_{feat}_filter"
             filter_cols.append(filter_col)
@@ -469,6 +477,10 @@ class Filter(Task):
         for flt in self.filters:
             feat = flt["feature"]
             filter_col = f"pass_{feat}_filter"
+            
+            if filter_col not in self.df.columns:
+                continue
+
             if "fraction" in feat:
                 # If this is a "fraction" feature, meaning a res_type fraction filter, only apply the penalty if num_design > 8
                 mask_fail = (self.df["num_design"] > 8) & (self.df[filter_col] == False)
@@ -1113,7 +1125,11 @@ class Filter(Task):
         filters_df = pd.DataFrame(self.filters)
         filters_df["Pass"] = 0
         for i, filter in enumerate(self.filters):
-            filters_df.at[i, "Pass"] = self.df[f"pass_{filter['feature']}_filter"].sum()
+            col_name = f"pass_{filter['feature']}_filter"
+            if col_name in self.df.columns:
+                filters_df.at[i, "Pass"] = self.df[col_name].sum()
+            else:
+                filters_df.at[i, "Pass"] = 0
 
         fig_height = 0.4 * len(filters_df) + 2
         fig, ax = plt.subplots(figsize=(8.5, fig_height))

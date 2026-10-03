@@ -308,12 +308,12 @@ class TestParseResidueConstraintsErrors:
 
     def test_both_allowed_and_disallowed(self):
         spec = [{"position": 1, "allowed": "A", "disallowed": "C"}]
-        with pytest.raises(ValueError, match="cannot specify both"):
+        with pytest.raises(ValueError, match="must specify exactly one of"):
             parse_residue_constraints(spec, 10, CANONICAL, LETTER_MAP)
 
     def test_neither_allowed_nor_disallowed(self):
         spec = [{"position": 1}]
-        with pytest.raises(ValueError, match="must specify either"):
+        with pytest.raises(ValueError, match="must specify exactly one of"):
             parse_residue_constraints(spec, 10, CANONICAL, LETTER_MAP)
 
     def test_empty_allowed(self):

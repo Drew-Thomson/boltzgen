@@ -22,8 +22,8 @@ def test_double_tape_chain_order_alternates_layers_at_each_axial_position():
     assert [double_tape_layer_position(index) for index in range(count)] == [
         (index % 2, index // 2) for index in range(count)
     ]
-    assert torch.allclose(coms[::2, 1], torch.full((4,), -layer_dist / 2))
-    assert torch.allclose(coms[1::2, 1], torch.full((4,), layer_dist / 2))
+    assert torch.allclose(coms[::2, 0], torch.full((4,), -layer_dist / 2))
+    assert torch.allclose(coms[1::2, 0], torch.full((4,), layer_dist / 2))
     assert torch.allclose(coms[::2, 2], coms[1::2, 2])
     assert torch.allclose(torch.diff(coms[::2, 2]), torch.full((3,), pitch))
     assert torch.allclose(torch.diff(coms[1::2, 2]), torch.full((3,), pitch))

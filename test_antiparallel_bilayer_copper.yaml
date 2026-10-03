@@ -7,6 +7,8 @@ target_pitch: 4.8
 layer_dist: 10.0
 antiparallel_prob: 1.0
 num_designs: 10
+spacing_noise: 1
+inverse_temp: 2
 asym_unit:
   - type: protein
     name: sheet_peptide

@@ -503,6 +503,8 @@ class InverseFoldingDecoder(nn.Module):
         inverse_fold_restriction: List[str] = [],
         sampling_temperature: float = 0.1,
         tie_symmetric_sequences: bool = True,
+        heteromer_anti_correlation: bool = False,
+        anti_correlation_strength: float = 2.0,
         **kwargs, # old checkpoint compatibility
     ):
         super().__init__()
@@ -525,6 +527,8 @@ class InverseFoldingDecoder(nn.Module):
         self.inverse_fold_restriction = inverse_fold_restriction
         self.sampling_temperature = sampling_temperature
         self.tie_symmetric_sequences = tie_symmetric_sequences
+        self.heteromer_anti_correlation = heteromer_anti_correlation
+        self.anti_correlation_strength = anti_correlation_strength
 
         self.decoder_layers = nn.ModuleList()
         self.inf = 10**6
@@ -655,13 +659,42 @@ class InverseFoldingDecoder(nn.Module):
 
         # Build symmetric groups for homomer tying
         if self.tie_symmetric_sequences and "symmetric_group" in feats:
-            print("SYMMETRIC GROUP FIELD IN FEATS:", feats["symmetric_group"]); sym_groups, position_to_group = self._build_symmetric_groups(
+            sym_groups, position_to_group = self._build_symmetric_groups(
                 feats, valid_mask, design_mask
             )
             sampled = set(torch.where(~design_mask)[0].cpu().numpy().tolist()) if num_not_design > 0 else set()
         else:
             sym_groups, position_to_group = {}, {}
             sampled = set()
+
+        cross_partner_map = {}
+        if self.heteromer_anti_correlation and sym_groups and "symmetric_group" in feats:
+            from collections import defaultdict
+            symmetric_group_tensor = feats["symmetric_group"][valid_mask]
+            res_idx_tensor = feats["feature_residue_index"][valid_mask]
+            
+            # Find unique non-zero symmetric_group values among designable positions
+            unique_sym_groups = set()
+            for i in range(symmetric_group_tensor.shape[0]):
+                if design_mask[i]:
+                    g = symmetric_group_tensor[i].item()
+                    if g > 0:
+                        unique_sym_groups.add(g)
+                        
+            if len(unique_sym_groups) == 2:
+                res_idx_to_groups = defaultdict(list)
+                for gid, positions in sym_groups.items():
+                    pos0 = positions[0]
+                    sym_g = symmetric_group_tensor[pos0].item()
+                    r_idx = res_idx_tensor[pos0].item()
+                    res_idx_to_groups[r_idx].append((gid, sym_g))
+                
+                for r_idx, groups in res_idx_to_groups.items():
+                    if len(groups) == 2:
+                        gid_a, gid_b = groups[0][0], groups[1][0]
+                        cross_partner_map[gid_a] = gid_b
+                        cross_partner_map[gid_b] = gid_a
+        sampled_groups = set()
 
         src_idx, dst_idx = edge_idx[0], edge_idx[1]
 
@@ -714,7 +747,7 @@ class InverseFoldingDecoder(nn.Module):
                 ids_canonical = torch.argmax(pred_canonical, dim=-1)
             else:
                 ids_canonical = torch.multinomial(
-                    F.softmax(pred_canonical / self.sampling_temperature, dim=-1),
+                    F.softmax(pred_canonical / 0.2, dim=-1),
                     num_samples=1,
                 ).squeeze(-1)
 
@@ -727,6 +760,15 @@ class InverseFoldingDecoder(nn.Module):
                 logits[pos] = aggregated_logits
                 if self.tie_symmetric_sequences:
                     sampled.add(pos)
+                    
+            if self.heteromer_anti_correlation and i in position_to_group:
+                my_group_id = position_to_group[i]
+                sampled_groups.add(my_group_id)
+                partner_group_id = cross_partner_map.get(my_group_id)
+                if partner_group_id is not None and partner_group_id not in sampled_groups:
+                    # Penalize the same AA at the partner's corresponding position
+                    for partner_pos in sym_groups[partner_group_id]:
+                        per_residue_mask[partner_pos, ids_canonical.item()] -= self.anti_correlation_strength
 
         n_tokens = valid_mask.shape[1]
         res_type = torch.zeros(1, n_tokens, self.num_res_type, device=s.device)

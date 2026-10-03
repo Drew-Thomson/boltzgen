@@ -8,6 +8,57 @@ from pathlib import Path
 from typing import Any
 
 
+SIGMA_ORIENTATION = 0.2  # radians, approx 11 degrees tolerance for side-chain orientation
+
+def classify_sidechains(coms, rots, residues):
+    """
+    Classify each residue side-chain as "inward" or "outward" relative to the bilayer normal of a double-tape lattice.
+
+    Parameters
+    ----------
+    coms : list of centre-of-mass coordinates for each chain (from ideal lattice generation)
+    rots : list of rotation matrices for each chain (same order as ``coms``)
+    residues : list of residue records containing ``chain_index`` and atomic coordinates
+               (CA, CB or N for Gly). The order must match the sequence used in the
+               decoder output.
+
+    Returns
+    -------
+    list[str]
+        A list with the same length as ``residues`` containing either "inward"
+        or "outward".  The classification is based on the angle between the
+        side-chain vector (CB-CA for non-Gly, N-CA for Gly) and the local bilayer
+        normal.  An angle smaller than ``SIGMA_ORIENTATION`` (in radians) is
+        considered "inward"; otherwise "outward".
+    """
+    import numpy as np
+    classifications = []
+    # compute bilayer normal for each chain from its rotation matrix (Z-axis)
+    chain_normals = [rot[:, 2] for rot in rots]
+    for res in residues:
+        chain_idx = res["chain_index"]
+        # side-chain vector
+        if res.get("is_glycine"):
+            vec = np.array(res["N"]) - np.array(res["CA"])
+        else:
+            vec = np.array(res["CB"]) - np.array(res["CA"])
+        vec_norm = np.linalg.norm(vec)
+        if vec_norm == 0:
+            angle = np.pi
+        else:
+            vec = vec / vec_norm
+            normal = chain_normals[chain_idx]
+            dot = np.clip(np.dot(vec, normal), -1.0, 1.0)
+            angle = np.arccos(dot)
+        if angle < SIGMA_ORIENTATION:
+            classifications.append("inward")
+        else:
+            classifications.append("outward")
+    return classifications
+
+
+
+
 _BUILDER_KEYS = {
     "name",
     "attach_to",
@@ -58,6 +109,7 @@ def expand_material_spec(
     heteromer_screening: bool = False,
     topology: str | None = None,
     topology_params: dict[str, Any] | None = None,
+    charge_bias_strength: float | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Expand material templates and return BoltzGen entities plus a sidecar layout.
 
@@ -185,6 +237,30 @@ def expand_material_spec(
             asym_index = len(entities)
             chain_id = _chain_id(asym_index)
             entity = _make_entity("protein", protein, chain_id, protein_slot + 1)
+            
+            if heteromer_screening and charge_bias_strength is not None and float(charge_bias_strength) != 0:
+                partner_label = "A" if protein_slot == 0 else "B"
+                bias = float(charge_bias_strength)
+                if partner_label == "A":
+                    weights = {"R": bias, "K": bias, "H": bias * 0.53, "D": -bias * 0.33, "E": -bias * 0.33}
+                else:
+                    weights = {"D": bias, "E": bias, "R": -bias * 0.33, "K": -bias * 0.33, "H": -bias * 0.2}
+                
+                weights = {k: (0.99 if round(v, 4) == 1.0 else v) for k, v in weights.items()}
+                
+                chain_length = int(entity["protein"].get("length", len(entity["protein"].get("sequence", ""))))
+                if "length" not in entity["protein"] and "sequence" in entity["protein"]:
+                    if str(entity["protein"]["sequence"]).isdigit():
+                        chain_length = int(entity["protein"]["sequence"])
+                
+                new_constraint = {
+                    "position": f"1..{chain_length}",
+                    "weights": weights
+                }
+                
+                existing = entity["protein"].get("residue_constraints", [])
+                entity["protein"]["residue_constraints"] = list(existing) + [new_constraint]
+
             entities.append(entity)
             protein_asym_by_slot[protein_slot] = asym_index
             unit_record["protein_asym_indices"].append(asym_index)

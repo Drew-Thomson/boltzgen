@@ -70,6 +70,7 @@ main_script = project_root / "resources/main.py"
 step_names = [
     "design",
     "inverse_folding",
+    "filter_identity_pairs",
     "prepare_counter_screens",
     "counter_screen_folding",
     "merge_counter_screen_metrics",
@@ -210,6 +211,25 @@ def add_configure_arguments(
         "--heteromer-counter-screen",
         action="store_true",
         help="Run A-only and B-only homomer counter-screen folds for a two-chain heteromer design",
+    )
+    p.add_argument(
+        "--max-partner-identity",
+        type=float,
+        default=0.5,
+        help="Maximum allowed sequence identity between partners A and B before counter-screening (default: 0.5)",
+    )
+    p.add_argument(
+        "--max-surviving-designs",
+        type=int,
+        default=None,
+        help="Maximum number of designs to keep after identity filtering to prevent expensive downstream counter-screening (default: keep all that pass)",
+    )
+
+    p.add_argument(
+        "--anti-correlation-strength",
+        type=float,
+        default=2.0,
+        help="Strength of cross-partner anti-correlation applied during inverse folding (default: 2.0)",
     )
 
     # Design configuration options
@@ -797,6 +817,12 @@ def execute_command(args: argparse.Namespace) -> None:
         and "inverse_folding" not in enabled_steps
     ):
         raise ValueError("prepare_counter_screens requires inverse_folding")
+    if (
+        enabled_steps
+        and "filter_identity_pairs" in enabled_steps
+        and "inverse_folding" not in enabled_steps
+    ):
+        raise ValueError("filter_identity_pairs requires inverse_folding")
     if enabled_steps and "merge_counter_screen_metrics" in enabled_steps:
         required = {"analysis", "counter_screen_folding", "prepare_counter_screens"}
         missing = required - enabled_steps
@@ -1051,23 +1077,27 @@ class BinderDesignPipeline:
                 )
             print(f"Inverse-folded designs will be saved to: {output_dir}")
             # Designs from inverse folding
+            inverse_fold_args = [
+                f"output={output_dir}",
+                f"data.cfg.yaml_path=[{', '.join(str(s) for s in args.design_spec)}]",
+                f"trainer.devices={devices}",
+                f"data.cfg.multiplicity={getattr(args, 'inverse_fold_num_sequences', 10)}",
+                f"data.cfg.skip_existing={args.reuse}",
+                f"data.cfg.output_dir={output_dir}",
+                f"override.use_kernels={use_kernels}",
+                f"checkpoint={get_artifact_path(args, args.inverse_fold_checkpoint)}",
+                f"data.cfg.moldir={moldir}",
+                f"override.inverse_fold_args.inverse_fold_restriction=[{', '.join(exclude_residues)}]",
+            ]
+            if getattr(args, "heteromer_counter_screen", False):
+                inverse_fold_args.append("override.inverse_fold_args.heteromer_anti_correlation=True")
+                inverse_fold_args.append(f"override.inverse_fold_args.anti_correlation_strength={args.anti_correlation_strength}")
+
             self.steps.append(
                 PipelineStep(
                     name="inverse_folding",
                     config_path=args.config_dir / "inverse_fold_only.yaml",
-                    args=[
-                        f"output={output_dir}",
-                        f"data.cfg.yaml_path=[{', '.join(str(s) for s in args.design_spec)}]",
-                        f"trainer.devices={devices}",
-                        f"data.cfg.multiplicity={getattr(args, 'inverse_fold_num_sequences', 10)}",
-                        f"data.cfg.skip_existing={args.reuse}",
-                        f"data.cfg.output_dir={output_dir}",
-                        f"override.use_kernels={use_kernels}",
-                        f"checkpoint={get_artifact_path(args, args.inverse_fold_checkpoint)}",
-                        f"data.cfg.moldir={moldir}",
-                        f"override.inverse_fold_args.inverse_fold_restriction=[{', '.join(exclude_residues)}]",
-                    ]
-                    + config_args_by_step.get("inverse_folding", []),
+                    args=inverse_fold_args + config_args_by_step.get("inverse_folding", []),
                 )
             )
         else:
@@ -1117,24 +1147,28 @@ class BinderDesignPipeline:
                 input_dir = output_dir
                 output_dir = args.output / "intermediate_designs_inverse_folded"
                 print(f"Inverse-folded designs will be saved to: {output_dir}")
+                inverse_fold_args = [
+                    f"output={output_dir}",
+                    f"data.design_dir={input_dir}",
+                    f"data.cfg.multiplicity={args.inverse_fold_num_sequences}",
+                    f"data.cfg.num_workers={args.num_workers}",
+                    f"data.skip_existing={args.reuse}",
+                    f"data.skip_existing_kind=inverse_fold",
+                    f"override.use_kernels={use_kernels}",
+                    f"checkpoint={get_artifact_path(args, args.inverse_fold_checkpoint)}",
+                    f"data.cfg.moldir={moldir}",
+                    f"trainer.devices={devices}",
+                    f"override.inverse_fold_args.inverse_fold_restriction=[{', '.join(exclude_residues)}]",
+                ]
+                if getattr(args, "heteromer_counter_screen", False):
+                    inverse_fold_args.append("override.inverse_fold_args.heteromer_anti_correlation=True")
+                    inverse_fold_args.append(f"override.inverse_fold_args.anti_correlation_strength={args.anti_correlation_strength}")
+
                 self.steps.append(
                     PipelineStep(
                         name="inverse_folding",
                         config_path=args.config_dir / "inverse_fold.yaml",
-                        args=[
-                            f"output={output_dir}",
-                            f"data.design_dir={input_dir}",
-                            f"data.cfg.multiplicity={args.inverse_fold_num_sequences}",
-                            f"data.cfg.num_workers={args.num_workers}",
-                            f"data.skip_existing={args.reuse}",
-                            f"data.skip_existing_kind=inverse_fold",
-                            f"override.use_kernels={use_kernels}",
-                            f"checkpoint={get_artifact_path(args, args.inverse_fold_checkpoint)}",
-                            f"data.cfg.moldir={moldir}",
-                            f"trainer.devices={devices}",
-                            f"override.inverse_fold_args.inverse_fold_restriction=[{', '.join(exclude_residues)}]",
-                        ]
-                        + config_args_by_step["inverse_folding"],
+                        args=inverse_fold_args + config_args_by_step["inverse_folding"],
                     )
                 )
 
@@ -1161,6 +1195,19 @@ class BinderDesignPipeline:
                 )
             topology_params = heteromer_meta.get("topology_params", {})
             topology = heteromer_meta.get("topology")
+            self.steps.append(
+                PipelineStep(
+                    name="filter_identity_pairs",
+                    config_path=args.config_dir / "filter_identity_pairs.yaml",
+                    args=[
+                        f"design_dir={source_dir}",
+                        f"layout_path={layout_path}",
+                        f"moldir={moldir}",
+                        f"max_partner_identity={args.max_partner_identity}",
+                        f"max_surviving_designs={args.max_surviving_designs}",
+                    ],
+                )
+            )
             self.steps.append(
                 PipelineStep(
                     name="prepare_counter_screens",

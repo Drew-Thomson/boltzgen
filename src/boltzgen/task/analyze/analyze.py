@@ -1254,8 +1254,89 @@ class Analyze(Task):
                         R = U @ D @ Vh
                         c_r_aligned = P @ R
                         
-                        rmsd = torch.sqrt(torch.mean((c_r_aligned - Q)**2)).item()
-                        metrics["neg_lattice_rmsd_refolded"] = -rmsd
+                        import os
+                        topology = os.environ.get("MAT_TOPOLOGY", "floating")
+                        
+                        if topology == "double_tape":
+                            # Sort by ideal index to group pairs correctly
+                            aligned_r_dict = {i_idx: coords_refold[masks_refold[r_idx]] for r_idx, i_idx in zip(row_ind, col_ind) if masks_refold[r_idx].sum() == masks_ideal[i_idx].sum()}
+                            aligned_i_dict = {i_idx: coords_ideal[masks_ideal[i_idx]] for r_idx, i_idx in zip(row_ind, col_ind) if masks_refold[r_idx].sum() == masks_ideal[i_idx].sum()}
+                            
+                            # check homomer (if all chains are the same length and we know from MAT_SCREEN_TYPE)
+                            # the prompt said "for homomers return 0.0"
+                            screen_type = os.environ.get("MAT_SCREEN_TYPE", "")
+                            if screen_type == "homomer" or len(coms_ideal) == 1:
+                                metrics["local_double_tape_rmsd"] = 0.0
+                            else:
+                                rmsds = []
+                                for i in range(0, num_chains, 2):
+                                    if i in aligned_r_dict and (i+1) in aligned_r_dict:
+                                        cr = torch.cat([aligned_r_dict[i], aligned_r_dict[i+1]])
+                                        ci = torch.cat([aligned_i_dict[i], aligned_i_dict[i+1]])
+                                        
+                                        P = cr - cr.mean(dim=0)
+                                        Q = ci - ci.mean(dim=0)
+                                        H = P.T @ Q
+                                        U, S, Vh = torch.linalg.svd(H)
+                                        d = torch.sign(torch.det(U @ Vh))
+                                        D = torch.eye(3, device=P.device, dtype=P.dtype)
+                                        D[2, 2] = d
+                                        R = U @ D @ Vh
+                                        cr_aligned = P @ R
+                                        
+                                        rmsd = torch.sqrt(torch.mean((cr_aligned - Q)**2)).item()
+                                        rmsds.append(rmsd)
+                                metrics["local_double_tape_rmsd"] = float(np.mean(rmsds)) if rmsds else 0.0
+                            metrics["neg_lattice_rmsd_refolded"] = 0.0
+                            
+                            # Calculate chi_outward
+                            if len(coms_ideal) > 1:
+                                normal = (coms_ideal[1] - coms_ideal[0]).cpu().numpy()
+                                normal_norm = np.linalg.norm(normal)
+                                if normal_norm > 0:
+                                    normal = normal / normal_norm
+                                    
+                                    # Use full sequence for the whole complex
+                                    full_res_type = torch.argmax(feat["res_type"], dim=-1)
+                                    full_seq_mask = feat["token_pad_mask"].bool()
+                                    if full_seq_mask.dim() == 2: full_seq_mask = full_seq_mask[0]
+                                    if full_res_type.dim() == 2: full_res_type = full_res_type[0]
+                                    full_seq_tensor = full_res_type[full_seq_mask]
+                                    full_seq = "".join([const.prot_token_to_letter.get(const.tokens[t], "X") for t in full_seq_tensor])
+                                    
+                                    bb_out = feat_out["coords"][bb_mask_refold[: feat_out["coords"].shape[0]]].reshape(-1, 4, 3).cpu().numpy()
+                                    classifications = []
+                                    import math
+                                    for idx_res in range(len(bb_out)):
+                                        if idx_res >= len(full_seq):
+                                            break
+                                        res_name = full_seq[idx_res]
+                                        CA = bb_out[idx_res, 1]
+                                        if res_name == 'G':
+                                            vec = bb_out[idx_res, 0] - CA
+                                        else:
+                                            vec = bb_out[idx_res, 3] - CA
+                                        vnorm = np.linalg.norm(vec)
+                                        if vnorm == 0:
+                                            angle = math.pi
+                                        else:
+                                            vec = vec / vnorm
+                                            chain_id = atom_asym_id_refold[bb_mask_refold[: feat_out["coords"].shape[0]]][idx_res*4].item()
+                                            side = chain_id % 2
+                                            curr_normal = normal if side == 0 else -normal
+                                            dot = np.clip(np.dot(vec, curr_normal), -1.0, 1.0)
+                                            angle = math.acos(dot)
+                                        
+                                        if angle < 0.2:
+                                            classifications.append("inward")
+                                        else:
+                                            classifications.append("outward")
+                                            
+                                    from boltzgen.task.analyze.analyze_utils import compute_chi_outward
+                                    metrics["chi_outward"] = compute_chi_outward(torch.tensor(bb_out[:len(full_seq), 1, :]), full_seq, classifications)
+                        else:
+                            rmsd = torch.sqrt(torch.mean((c_r_aligned - Q)**2)).item()
+                            metrics["neg_lattice_rmsd_refolded"] = -rmsd
                         
                         # Twist angle roughly estimated by the angle of rotation matrix relative to identity 
                         # after aligning the primary axes. For simplicity, just use lattice_rmsd as primary geometry proxy.
@@ -1270,10 +1351,13 @@ class Analyze(Task):
                     if self.material_metrics:
                         import os
 
-                        from boltzgen.task.analyze.material_metrics import (
-                            backbone_ca_coords,
-                            compute_material_metrics,
-                        )
+                        try:
+                            from boltzgen.task.analyze.material_metrics import (
+                                backbone_ca_coords,
+                                compute_material_metrics,
+                            )
+                        except ImportError:
+                            compute_material_metrics = None
 
                         topology = os.environ.get("MAT_TOPOLOGY", "floating")
                         if topology in {
@@ -1282,7 +1366,7 @@ class Analyze(Task):
                             "bilayer_sheet",
                             "hexagonal_mesh",
                             "nanotube",
-                        }:
+                        } and compute_material_metrics is not None:
                             backbone_coords = coords_refold[
                                 bb_mask_refold[: coords_refold.shape[0]]
                             ]

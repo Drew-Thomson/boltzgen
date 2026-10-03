@@ -1344,3 +1344,44 @@ def compute_liability_metrics(sequence, liability_modality, liability_peptide_ty
         "; ".join(violation_summary) if violation_summary else ""
     )
     return metrics
+
+def compute_chi_outward(ca_coords, design_seq, classification):
+    """
+    Calculate the proportion of alternating outward aromatic/cation-pi contacts.
+    Only counts Trp/Tyr aromatic pairs (homo- or hetero-) and Lys/Arg cation-pi contacts.
+    Excludes Phe entirely.
+    Returns a value in [0, 1] where 1 indicates perfect alternation.
+    """
+    import itertools
+    import torch
+
+    def is_valid_interaction(type_i, type_j):
+        aromatic = {"W", "Y"}
+        cationic = {"K", "R"}
+        if type_i in aromatic and type_j in aromatic:
+            return True
+        if (type_i in aromatic and type_j in cationic) or (type_j in aromatic and type_i in cationic):
+            return True
+        return False
+
+    outward_indices = [i for i, c in enumerate(classification) if c == "outward"]
+    if len(outward_indices) < 2:
+        return 0.0
+
+    ca_outward = ca_coords[outward_indices]
+    dist_matrix = torch.cdist(ca_outward, ca_outward)
+
+    contacts = []
+    for idx_i in range(len(outward_indices)):
+        for idx_j in range(idx_i + 1, len(outward_indices)):
+            if dist_matrix[idx_i, idx_j] < 8.0:
+                i = outward_indices[idx_i]
+                j = outward_indices[idx_j]
+                if is_valid_interaction(design_seq[i], design_seq[j]):
+                    contacts.append((i, j))
+
+    if not contacts:
+        return 0.0
+
+    alternation = sum(1 for (i, j) in contacts if (j - i) % 2 == 1) / len(contacts)
+    return float(alternation)

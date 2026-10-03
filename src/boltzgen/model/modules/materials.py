@@ -99,7 +99,7 @@ def generate_ideal_lattice(
         coms = torch.zeros((n_chains, 3), device=device, dtype=dtype)
         for i in range(n_chains):
             layer, step = double_tape_layer_position(i)
-            coms[i, 1] = (layer - 0.5) * layer_dist
+            coms[i, 0] = (layer - 0.5) * layer_dist
             coms[i, 2] = (step - (units - 1) / 2) * pitch
         rotations = identity.expand(n_chains, -1, -1).clone()
     elif topology == "bilayer_sheet":
@@ -114,8 +114,8 @@ def generate_ideal_lattice(
             x_idx, y_idx = divmod(position, gy)
             coms[i] = torch.tensor(
                 [
-                    (x_idx - (gx - 1) / 2) * row_pitch,
                     (layer - 0.5) * layer_dist,
+                    (x_idx - (gx - 1) / 2) * row_pitch,
                     (y_idx - (gy - 1) / 2) * pitch,
                 ],
                 device=device,

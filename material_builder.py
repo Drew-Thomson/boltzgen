@@ -16,7 +16,8 @@ except ModuleNotFoundError as exc:
         raise
 
     def format_metrics_override(topology):
-        return None
+        # 2.0A is way too strict for multi-chain assemblies; 5.0A is more reasonable for global topology
+        return "refolding_rmsd_threshold=5.0"
 try:
     import biotite.structure as struc
     import biotite.structure.io.pdb as pdb
@@ -39,6 +40,7 @@ def generate_yaml_from_spec(
     heteromer_counter_screen=False,
     topology=None,
     topology_params=None,
+    charge_bias_strength=None,
 ):
     entities, layout = expand_material_spec(
         num_copies,
@@ -46,6 +48,7 @@ def generate_yaml_from_spec(
         heteromer_screening=heteromer_counter_screen,
         topology=topology,
         topology_params=topology_params,
+        charge_bias_strength=charge_bias_strength,
     )
     spec = {"entities": entities}
     with open(output_file, "w") as f:
@@ -121,6 +124,30 @@ def main():
         "--heteromer-counter-screen",
         action="store_true",
         help="Design a two-chain heteromer with alternating partner identities and run homomer counter-screens",
+    )
+    parser.add_argument(
+        "--heteromer-charge-bias",
+        type=float,
+        default=0.5,
+        help="Strength of global charge complementarity bias applied to sequences during inverse folding (0 to disable)",
+    )
+    parser.add_argument(
+        "--max-partner-identity",
+        type=float,
+        default=0.5,
+        help="Maximum allowed sequence identity between partners A and B before counter-screening (default: 0.5)",
+    )
+    parser.add_argument(
+        "--max-surviving-designs",
+        type=int,
+        default=None,
+        help="Maximum number of designs to keep after identity filtering to prevent expensive downstream counter-screening",
+    )
+    parser.add_argument(
+        "--anti-correlation-strength",
+        type=float,
+        default=2.0,
+        help="Strength of cross-partner anti-correlation applied during inverse folding (default: 2.0)",
     )
     
     args = parser.parse_args()
@@ -295,6 +322,7 @@ def main():
             "target_arc_spacing": args.target_arc_spacing,
             "layer_dist": args.layer_dist,
         },
+        charge_bias_strength=args.heteromer_charge_bias,
     )
     
     if args.run:
@@ -314,6 +342,12 @@ def main():
         ]
         if args.heteromer_counter_screen:
             cmd.append("--heteromer-counter-screen")
+            if hasattr(args, "max_partner_identity"):
+                cmd.extend(["--max-partner-identity", str(args.max_partner_identity)])
+            if hasattr(args, "max_surviving_designs") and args.max_surviving_designs is not None:
+                cmd.extend(["--max-surviving-designs", str(args.max_surviving_designs)])
+            if hasattr(args, "anti_correlation_strength"):
+                cmd.extend(["--anti-correlation-strength", str(args.anti_correlation_strength)])
 
         material_filtering_override = format_metrics_override(args.topology)
         if material_filtering_override is not None:

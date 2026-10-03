@@ -547,6 +547,18 @@ boltzgen merge [-h] --output OUTPUT source [source ...]
 - `source` (positional) – One or more BoltzGen output directories that already contain folded/analyzed results (i.e., the directories you previously passed to `--output` when running the pipeline).
 - `--output OUTPUT` – Destination directory for the merged data. The command creates (or replaces) the design artifacts inside this folder so that `boltzgen run --steps filtering --output OUTPUT ...` can be executed afterwards.
 
+## Double-tape robust design
+
+When designing `double_tape` materials, a robust design workflow is used automatically:
+- **Low-temperature sampling (0.2):** Forces temperature to 0.2 to preserve amphipathic patterning.
+- **Side-chain orientation (`SIGMA_ORIENTATION = 0.2`):** Correctly classifies residues as inward vs outward to handle beta-register flips using a robust vector approach.
+- **New metrics:** `local_double_tape_rmsd` (which measures local A-B pair RMSD instead of brittle global lattice RMSD) and `chi_outward` (which scores the proportion of outward-facing aromatic/cation-π contacts that successfully alternate between chains). The old global `neg_lattice_rmsd_refolded` cutoff is disabled for this topology.
+
+**Example Invocation:**
+```bash
+boltzgen run --topology double_tape --temp 0.2
+```
+
 # Training BoltzGen models
 Install in dev mode which will install additional packages like `wandb`.
 ```bash
