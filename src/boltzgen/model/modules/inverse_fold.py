@@ -505,6 +505,8 @@ class InverseFoldingDecoder(nn.Module):
         tie_symmetric_sequences: bool = True,
         heteromer_anti_correlation: bool = False,
         anti_correlation_strength: float = 2.0,
+        double_tape_core_bias: float = 0.0,
+        double_tape_aromatic_bias: float = 0.0,
         **kwargs, # old checkpoint compatibility
     ):
         super().__init__()
@@ -529,6 +531,8 @@ class InverseFoldingDecoder(nn.Module):
         self.tie_symmetric_sequences = tie_symmetric_sequences
         self.heteromer_anti_correlation = heteromer_anti_correlation
         self.anti_correlation_strength = anti_correlation_strength
+        self.double_tape_core_bias = double_tape_core_bias
+        self.double_tape_aromatic_bias = double_tape_aromatic_bias
 
         self.decoder_layers = nn.ModuleList()
         self.inf = 10**6
@@ -641,6 +645,56 @@ class InverseFoldingDecoder(nn.Module):
             inf=self.inf,
             device=s.device,
         )
+
+        if self.double_tape_core_bias > 0 or self.double_tape_aromatic_bias > 0:
+            token_bb4 = feats["token_to_bb4_atoms"].float()
+            coords = feats["coords"]
+            
+            # token_bb4 might be [B, N*4, A] or [B, N, 4, A]
+            # coords might be [B, A, 3] or [B, 1, A, 3]
+            # Let's flatten to [B, N*4, A] and [B, A, 3]
+            B = coords.shape[0]
+            A = coords.shape[-2]
+            token_bb4_flat = token_bb4.view(B, -1, A)
+            coords_flat = coords.view(B, A, 3)
+            
+            bb4_flat = torch.bmm(token_bb4_flat, coords_flat)
+            bb4 = bb4_flat.view(B, -1, 4, 3)[valid_mask]
+            
+            CA = bb4[:, 1]
+            asym_id = feats["feature_asym_id"][valid_mask]
+            
+            # Compute bilayer normal from side 0 to side 1
+            com0 = CA[asym_id % 2 == 0].mean(dim=0)
+            com1 = CA[asym_id % 2 == 1].mean(dim=0)
+            normal = torch.nn.functional.normalize(com1 - com0, dim=0)
+            
+            # Compute sidechain vectors
+            is_gly = (feats["res_type_clone"][valid_mask].argmax(dim=-1) == const.tokens.index("GLY"))
+            vec = bb4[:, 3] - CA
+            vec[is_gly] = bb4[is_gly, 0] - CA[is_gly]
+            vec = torch.nn.functional.normalize(vec, dim=1)
+            
+            # Identify inward vs outward positions
+            curr_normal = torch.where((asym_id % 2 == 0).unsqueeze(1), normal.unsqueeze(0), -normal.unsqueeze(0))
+            dot = (vec * curr_normal).sum(dim=1).clamp(-1, 1)
+            angle = torch.acos(dot)
+            
+            is_inward = angle < 0.2
+            is_outward = ~is_inward
+            
+            idx_T = const.canonical_tokens.index("THR")
+            idx_A = const.canonical_tokens.index("ALA")
+            idx_W = const.canonical_tokens.index("TRP")
+            idx_Y = const.canonical_tokens.index("TYR")
+            
+            if self.double_tape_core_bias > 0:
+                per_residue_mask[is_inward, idx_T] -= self.double_tape_core_bias
+                per_residue_mask[is_inward, idx_A] += self.double_tape_core_bias
+            
+            if self.double_tape_aromatic_bias > 0:
+                per_residue_mask[is_outward, idx_W] += self.double_tape_aromatic_bias
+                per_residue_mask[is_outward, idx_Y] += self.double_tape_aromatic_bias
 
         order = torch.randperm(num_nodes, device=s.device).cpu().numpy().tolist()
         # Non-design residues are not sampled and used as the condition. So the order should filter them out.

@@ -231,6 +231,18 @@ def add_configure_arguments(
         default=2.0,
         help="Strength of cross-partner anti-correlation applied during inverse folding (default: 2.0)",
     )
+    p.add_argument(
+        "--double-tape-core-bias",
+        type=float,
+        default=0.0,
+        help="Strength of penalty for T and boost for A in the core (inward-facing) of double-tape (default: 0.0)",
+    )
+    p.add_argument(
+        "--double-tape-aromatic-bias",
+        type=float,
+        default=0.0,
+        help="Strength of boost for W and Y on the outside (outward-facing) of double-tape (default: 0.0)",
+    )
 
     # Design configuration options
     p = parser.add_argument_group("design")
@@ -1093,6 +1105,11 @@ class BinderDesignPipeline:
                 inverse_fold_args.append("override.inverse_fold_args.heteromer_anti_correlation=True")
                 inverse_fold_args.append(f"override.inverse_fold_args.anti_correlation_strength={args.anti_correlation_strength}")
 
+            if getattr(args, "double_tape_core_bias", 0.0) > 0.0:
+                inverse_fold_args.append(f"override.inverse_fold_args.double_tape_core_bias={args.double_tape_core_bias}")
+            if getattr(args, "double_tape_aromatic_bias", 0.0) > 0.0:
+                inverse_fold_args.append(f"override.inverse_fold_args.double_tape_aromatic_bias={args.double_tape_aromatic_bias}")
+
             self.steps.append(
                 PipelineStep(
                     name="inverse_folding",
@@ -1163,6 +1180,11 @@ class BinderDesignPipeline:
                 if getattr(args, "heteromer_counter_screen", False):
                     inverse_fold_args.append("override.inverse_fold_args.heteromer_anti_correlation=True")
                     inverse_fold_args.append(f"override.inverse_fold_args.anti_correlation_strength={args.anti_correlation_strength}")
+
+                if getattr(args, "double_tape_core_bias", 0.0) > 0.0:
+                    inverse_fold_args.append(f"override.inverse_fold_args.double_tape_core_bias={args.double_tape_core_bias}")
+                if getattr(args, "double_tape_aromatic_bias", 0.0) > 0.0:
+                    inverse_fold_args.append(f"override.inverse_fold_args.double_tape_aromatic_bias={args.double_tape_aromatic_bias}")
 
                 self.steps.append(
                     PipelineStep(

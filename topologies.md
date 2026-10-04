@@ -87,6 +87,18 @@ Places chains in two parallel layers, with chains advancing along the Z-axis. Wi
 
 - `--target_pitch` (default `4.8`): Spacing between neighboring chains along each tape.
 - `--layer_dist` (default `10.0`): Separation between layers.
+- `--double-tape-core-bias` (default `1.0`): Sequence generation bias for the inward-facing core. Decreases Threonine and increases Alanine probabilities at structurally inward-facing positions.
+- `--double-tape-aromatic-bias` (default `1.0`): Sequence generation bias for the outward-facing exterior. Increases Tryptophan and Tyrosine probabilities at outward-facing positions to promote stabilizing aromatic pairs.
+
+## Sequence Biasing and Heteromer Design
+
+While `material_builder.py` primarily drives topology placement, it also exposes advanced flags for controlling the sequences during the inverse-folding stage:
+
+- `--heteromer-counter-screen`: Instructs the pipeline to design a two-chain heteromer with alternating partner identities (e.g. A-B-A-B). Includes A-only and B-only counter-screen folding steps to filter out designs that might form unintended homomers.
+- `--heteromer-charge-bias` (default `0.5`): Strength of global charge complementarity bias applied during inverse folding to enforce positive/negative charge pairing across partners.
+- `--anti-correlation-strength` (default `2.0`): Strength of cross-partner anti-correlation penalty applied during inverse folding to maximize sequence divergence between partners.
+- `--max-partner-identity` (default `0.5`): Maximum allowed sequence identity between partners A and B before running the expensive structural counter-screens.
+- `--max-surviving-designs`: Optional cap on the number of sequence designs to pass into the counter-screen folding step.
 
 ### Tetrahedral cage (`cage_tetrahedral`)
 

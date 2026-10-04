@@ -149,6 +149,18 @@ def main():
         default=2.0,
         help="Strength of cross-partner anti-correlation applied during inverse folding (default: 2.0)",
     )
+    parser.add_argument(
+        "--double-tape-core-bias",
+        type=float,
+        default=1.0,
+        help="Strength of penalty for T and boost for A in the core (inward-facing) of double-tape (default: 1.0)",
+    )
+    parser.add_argument(
+        "--double-tape-aromatic-bias",
+        type=float,
+        default=1.0,
+        help="Strength of boost for W and Y on the outside (outward-facing) of double-tape (default: 1.0)",
+    )
     
     args = parser.parse_args()
     
@@ -348,6 +360,11 @@ def main():
                 cmd.extend(["--max-surviving-designs", str(args.max_surviving_designs)])
             if hasattr(args, "anti_correlation_strength"):
                 cmd.extend(["--anti-correlation-strength", str(args.anti_correlation_strength)])
+
+        if getattr(args, "double_tape_core_bias", 0.0) > 0.0:
+            cmd.extend(["--double-tape-core-bias", str(args.double_tape_core_bias)])
+        if getattr(args, "double_tape_aromatic_bias", 0.0) > 0.0:
+            cmd.extend(["--double-tape-aromatic-bias", str(args.double_tape_aromatic_bias)])
 
         material_filtering_override = format_metrics_override(args.topology)
         if material_filtering_override is not None:
