@@ -93,6 +93,7 @@ def main():
     parser.add_argument("--length", type=int, default=15, help="Length of the peptide")
     parser.add_argument("--output_dir", type=str, default="material_out", help="Directory for BoltzGen outputs")
     parser.add_argument("--num_designs", type=int, default=1, help="Number of design candidates to generate")
+    parser.add_argument("--diffusion_batch_size", type=int, default=1, help="Number of diffusion samples per trunk run (default: 1)")
     parser.add_argument("--asym_unit_size", type=int, default=1, help="Number of chains in the asymmetric unit")
     parser.add_argument("--topology", type=str, choices=["floating", "cyclic", "linear_tape", "double_tape", "helical", "open_arc", "cage_tetrahedral", "cage_octahedral", "bilayer_sheet", "hexagonal_mesh", "nanotube", "multi_helical"], default="floating", help="Topology constraint during diffusion")
     parser.add_argument("--guidance_scale", type=float, default=1.0, help="Strength of the shape guidance")
@@ -349,6 +350,7 @@ def main():
             "--output", args.output_dir,
             "--protocol", "peptide-anything",
             "--num_designs", str(args.num_designs),
+            "--diffusion_batch_size", str(args.diffusion_batch_size),
             "--inverse_fold_num_sequences", str(args.seqs_per_backbone),
             "--config", "inverse_folding", f"override.inverse_fold_args.sampling_temperature={args.inverse_temp}"
         ]

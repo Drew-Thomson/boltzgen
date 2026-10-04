@@ -256,13 +256,9 @@ def add_configure_arguments(
     p.add_argument(
         "--diffusion_batch_size",
         type=int,
-        default=None,
-        help="Number of diffusion samples to generate per trunk run. If not specified, "
-        "this defaults to 1 if --num-designs is less than 100, and 10 otherwise. Note that "
-        "for design tasks that randomly sample the binder length (or use randomness in other "
-        "ways), all designs generated in the same batch will share the same length. "
-        "Having a large diffusion batch size compared to the total number of designs to "
-        "generate will therefore not evenly sample the possible lengths.",
+        default=1,
+        help="Number of diffusion samples to generate per trunk run. Default: %(default)s. "
+        "Each trunk run produces independent length and structural conditioning.",
     )
     p.add_argument(
         "--design_checkpoints",
@@ -1023,7 +1019,7 @@ class BinderDesignPipeline:
         print(f"Raw designs will be saved to: {output_dir}")
         diffusion_batch_size = args.diffusion_batch_size
         if diffusion_batch_size is None:
-            diffusion_batch_size = 1 if args.num_designs < 100 else 10
+            diffusion_batch_size = 1
         num_batches = math.ceil(args.num_designs / diffusion_batch_size)
         print(f"Using diffusion batch size: {diffusion_batch_size}")
         print(f"Number of diffusion batches: {num_batches}")
@@ -1093,7 +1089,7 @@ class BinderDesignPipeline:
                 f"output={output_dir}",
                 f"data.cfg.yaml_path=[{', '.join(str(s) for s in args.design_spec)}]",
                 f"trainer.devices={devices}",
-                f"data.cfg.multiplicity={getattr(args, 'inverse_fold_num_sequences', 10)}",
+                f"data.cfg.multiplicity={getattr(args, 'inverse_fold_num_sequences', 1)}",
                 f"data.cfg.skip_existing={args.reuse}",
                 f"data.cfg.output_dir={output_dir}",
                 f"override.use_kernels={use_kernels}",
