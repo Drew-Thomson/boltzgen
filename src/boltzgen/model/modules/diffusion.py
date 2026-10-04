@@ -927,6 +927,7 @@ class AtomDiffusion(Module):
                                 aligned_ref_coords_list = []
                                 for acc, count in zip(ref_coords_accs, counts):
                                     ref_coords = acc / count
+                                    ref_coords = ref_coords - ref_coords.mean(dim=0)
                                     cov_ref = ref_coords.T @ ref_coords
                                     U_ref, _, _ = torch.linalg.svd(cov_ref)
                                     
@@ -952,6 +953,7 @@ class AtomDiffusion(Module):
                                     aligned_ref_coords_list.append(torch.matmul(ref_coords, R_tilt.T))
                             else:
                                 ref_coords = ref_coords_acc / N_chains
+                                ref_coords = ref_coords - ref_coords.mean(dim=0)
                                 
                             # 5. Unfold and Map back to Global Frame
                             for i, mask in enumerate(chain_masks):

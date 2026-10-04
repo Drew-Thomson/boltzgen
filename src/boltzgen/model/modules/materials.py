@@ -95,12 +95,18 @@ def generate_ideal_lattice(
     elif topology == "double_tape":
         # Two offset rows, alternating chain indices between the layers.
         layer_dist = float(params.get("layer_dist", 10.0))
+        if params.get("layer_dist_noise") is not None:
+            layer_dist = max(4.8, layer_dist + float(params["layer_dist_noise"]))
+        offset_y = float(params.get("layer_offset_y_noise") or 0.0)
+        offset_z = float(params.get("layer_offset_z_noise") or 0.0)
         units = math.ceil(n_chains / 2)
         coms = torch.zeros((n_chains, 3), device=device, dtype=dtype)
         for i in range(n_chains):
             layer, step = double_tape_layer_position(i)
-            coms[i, 0] = (layer - 0.5) * layer_dist
-            coms[i, 2] = (step - (units - 1) / 2) * pitch
+            layer_sign = layer - 0.5
+            coms[i, 0] = layer_sign * layer_dist
+            coms[i, 1] = layer_sign * offset_y
+            coms[i, 2] = (step - (units - 1) / 2) * pitch + layer_sign * offset_z
         rotations = identity.expand(n_chains, -1, -1).clone()
     elif topology == "bilayer_sheet":
         gx, gy = int(params.get("grid_dim_x", 2)), int(params.get("grid_dim_y", 2))
@@ -108,15 +114,20 @@ def generate_ideal_lattice(
             raise ValueError(f"bilayer_sheet requires {2 * gx * gy} copies, got {n_chains}")
         row_pitch = float(params.get("row_pitch", 10.0))
         layer_dist = float(params.get("layer_dist", 10.0))
+        if params.get("layer_dist_noise") is not None:
+            layer_dist = max(4.8, layer_dist + float(params["layer_dist_noise"]))
+        offset_x = float(params.get("layer_offset_y_noise") or 0.0)
+        offset_y = float(params.get("layer_offset_z_noise") or 0.0)
         coms = torch.zeros((n_chains, 3), device=device, dtype=dtype)
         for i in range(n_chains):
             layer, position = divmod(i, gx * gy)
             x_idx, y_idx = divmod(position, gy)
+            layer_sign = layer - 0.5
             coms[i] = torch.tensor(
                 [
-                    (layer - 0.5) * layer_dist,
-                    (x_idx - (gx - 1) / 2) * row_pitch,
-                    (y_idx - (gy - 1) / 2) * pitch,
+                    layer_sign * layer_dist,
+                    (x_idx - (gx - 1) / 2) * row_pitch + layer_sign * offset_x,
+                    (y_idx - (gy - 1) / 2) * pitch + layer_sign * offset_y,
                 ],
                 device=device,
                 dtype=dtype,
