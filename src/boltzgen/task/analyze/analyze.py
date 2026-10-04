@@ -1287,7 +1287,7 @@ class Analyze(Task):
                                         rmsd = torch.sqrt(torch.mean((cr_aligned - Q)**2)).item()
                                         rmsds.append(rmsd)
                                 metrics["local_double_tape_rmsd"] = float(np.mean(rmsds)) if rmsds else 0.0
-                            metrics["neg_lattice_rmsd_refolded"] = 0.0
+                            metrics["neg_lattice_rmsd_refolded"] = -metrics["local_double_tape_rmsd"]
                             
                             # Calculate chi_outward
                             if len(coms_ideal) > 1:
@@ -1310,24 +1310,32 @@ class Analyze(Task):
                                     for idx_res in range(len(bb_out)):
                                         if idx_res >= len(full_seq):
                                             break
-                                        res_name = full_seq[idx_res]
+                                        N_at = bb_out[idx_res, 0]
                                         CA = bb_out[idx_res, 1]
-                                        if res_name == 'G':
-                                            vec = bb_out[idx_res, 0] - CA
-                                        else:
-                                            vec = bb_out[idx_res, 3] - CA
+                                        C_at = bb_out[idx_res, 2]
+                                        b_vec = CA - N_at
+                                        c_vec = C_at - CA
+
+                                        def _unit(v):
+                                            n = np.linalg.norm(v)
+                                            return v / n if n > 0 else v
+
+                                        # Idealized C-beta direction (backbone atoms are N, CA, C, O)
+                                        vec = (
+                                            -0.531018 * _unit(b_vec - c_vec)
+                                            + 1.20673 * _unit(np.cross(b_vec, c_vec))
+                                        )
                                         vnorm = np.linalg.norm(vec)
                                         if vnorm == 0:
-                                            angle = math.pi
+                                            dot = -1.0
                                         else:
                                             vec = vec / vnorm
                                             chain_id = atom_asym_id_refold[bb_mask_refold[: feat_out["coords"].shape[0]]][idx_res*4].item()
                                             side = chain_id % 2
                                             curr_normal = normal if side == 0 else -normal
                                             dot = np.clip(np.dot(vec, curr_normal), -1.0, 1.0)
-                                            angle = math.acos(dot)
-                                        
-                                        if angle < 0.2:
+
+                                        if dot > 0.0:
                                             classifications.append("inward")
                                         else:
                                             classifications.append("outward")

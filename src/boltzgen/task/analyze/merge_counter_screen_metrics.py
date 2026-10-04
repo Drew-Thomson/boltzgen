@@ -166,4 +166,27 @@ class MergeCounterScreenMetrics(Task):
                                             frame.loc[row_idx, "homomer_b_min_interaction_pae"],
                                         ) - heteromer_values["min_interaction_pae"]
                                     )
+            # Designs that were culled before counter-screening have no
+            # contrast metrics and would break contrast-based ranking. Keep them
+            # in a side file for traceability and drop them from the CSV that
+            # the filtering step consumes.
+            screened = np.array(
+                [
+                    any(
+                        row_id == parent or row_id.startswith(f"{parent}_")
+                        for parent in mapping
+                    )
+                    for row_id in frame["id"].astype(str)
+                ],
+                dtype=bool,
+            )
+            if not screened.all():
+                frame.loc[~screened].to_csv(
+                    csv_path.with_name(
+                        csv_path.name.replace("aggregate_metrics_", "culled_target_metrics_")
+                    ),
+                    index=False,
+                    float_format="%.5f",
+                )
+                frame = frame.loc[screened]
             frame.to_csv(csv_path, index=False, float_format="%.5f")

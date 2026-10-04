@@ -1,0 +1,6 @@
+_target_: boltzgen.task.analyze.filter_target_candidates.FilterTargetCandidates
+
+design_dir: null
+topology: null
+max_rmsd: 5.0
+min_complex_plddt: null

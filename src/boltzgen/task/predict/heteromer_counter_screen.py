@@ -14,6 +14,10 @@ from boltzgen.data.parse.mmcif import parse_mmcif
 from boltzgen.data.write.mmcif import to_mmcif
 from boltzgen.model.modules.material_layout import _chain_id, build_heteromer_counter_screen_specs
 from boltzgen.model.modules.materials import generate_ideal_lattice
+from boltzgen.task.analyze.filter_target_candidates import (
+    candidate_matches,
+    load_candidate_ids,
+)
 from boltzgen.task.task import Task
 
 
@@ -105,6 +109,7 @@ class PrepareHeteromerCounterScreens(Task):
         copies: int,
         topology_params: dict[str, Any] | None = None,
         moldir: str | None = None,
+        candidates_path: str | None = None,
     ) -> None:
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
@@ -114,6 +119,7 @@ class PrepareHeteromerCounterScreens(Task):
         self.topology_params = topology_params or {}
         self.moldir = moldir
         self.num_chains = copies
+        self.candidates_path = Path(candidates_path) if candidates_path else None
 
     def run(self, config=None) -> None:  # noqa: ANN001, ARG002
         if not self.input_dir.is_dir():
@@ -140,9 +146,18 @@ class PrepareHeteromerCounterScreens(Task):
         self.num_chains = int(layout["copies"])
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        candidate_ids = (
+            load_candidate_ids(self.candidates_path)
+            if self.candidates_path is not None
+            else None
+        )
         mapping: dict[str, dict[str, str]] = {}
         for source_path in sorted(self.input_dir.glob("*.cif")):
             if source_path.name.endswith("_native.cif"):
+                continue
+            if candidate_ids is not None and not candidate_matches(
+                source_path.stem, candidate_ids
+            ):
                 continue
             parsed = parse_mmcif(source_path, moldir=self.moldir, use_original_res_idx=False)
             source_ids: dict[str, str] = {}

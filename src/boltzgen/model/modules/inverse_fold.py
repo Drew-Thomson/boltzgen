@@ -65,7 +65,7 @@ def build_constraint_logit_mask(
         
     bias[:, global_blocked] = -inf
     
-    still_all_blocked = torch.isinf(bias).all(dim=1) & (bias < 0).all(dim=1)
+    still_all_blocked = (bias < 0).all(dim=1)
     if still_all_blocked.any():
         blocked_positions = torch.where(still_all_blocked)[0].tolist()
         raise ValueError(

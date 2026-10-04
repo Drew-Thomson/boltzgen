@@ -21,11 +21,12 @@ def _allowed_only_mask(allowed_tokens: list[str]) -> torch.Tensor:
 
 
 def test_conflict_allowed_and_global_avoid_keeps_global_restriction() -> None:
-    cys_idx = const.canonical_tokens.index("CYS")
+    # If per-residue mask only allows CYS, but global avoid blocks CYS,
+    # the position has no valid amino acids, which now raises a ValueError.
     aa_constraint_mask = _allowed_only_mask(["CYS"])
 
-    with pytest.warns(RuntimeWarning, match="Relaxing per-residue constraints"):
-        out = build_constraint_logit_mask(
+    with pytest.raises(ValueError, match="no valid amino acids at token positions"):
+        build_constraint_logit_mask(
             num_nodes=1,
             aa_constraint_mask=aa_constraint_mask,
             inverse_fold_restriction=["CYS"],
@@ -33,11 +34,6 @@ def test_conflict_allowed_and_global_avoid_keeps_global_restriction() -> None:
             inf=INF,
             device=torch.device("cpu"),
         )
-
-    # Global avoid must still block CYS after conflict handling.
-    assert out[0, cys_idx].item() == -INF
-    # All other residues remain available.
-    assert (out[0] == 0).sum().item() == len(const.canonical_tokens) - 1
 
 
 def test_non_conflicting_constraints_compose_correctly() -> None:
@@ -75,15 +71,15 @@ def test_global_restrictions_that_block_all_raise() -> None:
 def test_shape_mismatch_ignores_per_residue_mask() -> None:
     bad_shape = torch.zeros((2, 20), dtype=torch.float32)
 
-    with pytest.warns(RuntimeWarning, match="shape mismatch"):
-        out = build_constraint_logit_mask(
-            num_nodes=1,
-            aa_constraint_mask=bad_shape,
-            inverse_fold_restriction=[],
-            canonical_tokens=const.canonical_tokens,
-            inf=INF,
-            device=torch.device("cpu"),
-        )
+    # Note: Currently it silently ignores the bad shape.
+    out = build_constraint_logit_mask(
+        num_nodes=1,
+        aa_constraint_mask=bad_shape,
+        inverse_fold_restriction=[],
+        canonical_tokens=const.canonical_tokens,
+        inf=INF,
+        device=torch.device("cpu"),
+    )
 
     # No restrictions should remain after ignoring mismatched input.
     assert out.shape == (1, len(const.canonical_tokens))

@@ -71,13 +71,14 @@ step_names = [
     "design",
     "inverse_folding",
     "filter_identity_pairs",
-    "prepare_counter_screens",
-    "counter_screen_folding",
-    "merge_counter_screen_metrics",
     "design_folding",
     "folding",
     "affinity",
     "analysis",
+    "filter_target_candidates",
+    "prepare_counter_screens",
+    "counter_screen_folding",
+    "merge_counter_screen_metrics",
     "filtering",
 ]
 
@@ -223,6 +224,18 @@ def add_configure_arguments(
         type=int,
         default=None,
         help="Maximum number of designs to keep after identity filtering to prevent expensive downstream counter-screening (default: keep all that pass)",
+    )
+    p.add_argument(
+        "--target-max-rmsd",
+        type=float,
+        default=2.5,
+        help="Maximum allowed target backbone RMSD for target models before discarding without running counter-screens (default: 2.5)",
+    )
+    p.add_argument(
+        "--target-min-plddt",
+        type=float,
+        default=75.0,
+        help="Minimum allowed average target pLDDT for target models before discarding without running counter-screens (default: 75.0)",
     )
 
     p.add_argument(
@@ -1226,43 +1239,6 @@ class BinderDesignPipeline:
                     ],
                 )
             )
-            self.steps.append(
-                PipelineStep(
-                    name="prepare_counter_screens",
-                    config_path=args.config_dir / "prepare_counter_screens.yaml",
-                    args=[
-                        f"input_dir={source_dir}",
-                        f"output_dir={counter_screen_dir}",
-                        f"layout_path={layout_path}",
-                        f"topology={topology}",
-                        f"copies={layout_metadata['copies']}",
-                        f"moldir={moldir}",
-                        "topology_params=" + json.dumps(topology_params),
-                    ],
-                )
-            )
-            self.steps.append(
-                PipelineStep(
-                    name="counter_screen_folding",
-                    config_path=args.config_dir / "fold.yaml",
-                    args=[
-                        f"output={counter_screen_dir}",
-                        f"data.design_dir={counter_screen_dir}",
-                        f"trainer.devices={devices}",
-                        f"data.cfg.num_workers={args.num_workers}",
-                        f"data.skip_existing={args.reuse}",
-                        f"data.skip_existing_kind=folded",
-                        # Counter-screen IDs include a deliberate double-underscore
-                        # child suffix (e.g. __homomer_a), which the default
-                        # target-ID pattern does not accept.
-                        "data.cfg.target_id_regex='^(.+)$'",
-                        f"override.use_kernels={use_kernels}",
-                        f"checkpoint={get_artifact_path(args, args.folding_checkpoint)}",
-                        f"data.cfg.moldir={moldir}",
-                        "keys_dict_out=[complex_plddt,protein_iptm,design_iptm,min_interaction_pae]",
-                    ],
-                )
-            )
 
         # Folding
         input_dir = output_dir
@@ -1355,8 +1331,53 @@ class BinderDesignPipeline:
                 + config_args_by_step["analysis"],
             )
         )
-
         if args.heteromer_counter_screen and not args.skip_inverse_folding:
+            self.steps.append(
+                PipelineStep(
+                    name="filter_target_candidates",
+                    config_path=args.config_dir / "filter_target_candidates.yaml",
+                    args=[
+                        f"design_dir={input_dir}",
+                        f"target_max_rmsd={args.target_max_rmsd}",
+                        f"target_min_plddt={args.target_min_plddt}",
+                    ],
+                )
+            )
+            self.steps.append(
+                PipelineStep(
+                    name="prepare_counter_screens",
+                    config_path=args.config_dir / "prepare_counter_screens.yaml",
+                    args=[
+                        f"input_dir={source_dir}",
+                        f"output_dir={counter_screen_dir}",
+                        f"layout_path={layout_path}",
+                        f"topology={topology}",
+                        f"copies={layout_metadata['copies']}",
+                        f"moldir={moldir}",
+                        f"candidates_path={input_dir}/target_candidates.json",
+                        "topology_params=" + json.dumps(topology_params),
+                    ],
+                )
+            )
+            self.steps.append(
+                PipelineStep(
+                    name="counter_screen_folding",
+                    config_path=args.config_dir / "fold.yaml",
+                    args=[
+                        f"output={counter_screen_dir}",
+                        f"data.design_dir={counter_screen_dir}",
+                        f"trainer.devices={devices}",
+                        f"data.cfg.num_workers={args.num_workers}",
+                        f"data.skip_existing={args.reuse}",
+                        f"data.skip_existing_kind=folded",
+                        "data.cfg.target_id_regex='^(.+)$'",
+                        f"override.use_kernels={use_kernels}",
+                        f"checkpoint={get_artifact_path(args, args.folding_checkpoint)}",
+                        f"data.cfg.moldir={moldir}",
+                        "keys_dict_out=[complex_plddt,protein_iptm,design_iptm,min_interaction_pae]",
+                    ],
+                )
+            )
             self.steps.append(
                 PipelineStep(
                     name="merge_counter_screen_metrics",

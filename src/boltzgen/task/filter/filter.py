@@ -359,7 +359,21 @@ class Filter(Task):
         self.df_in = df_in.copy()
         df = df_in.copy()
 
-        if "neg_lattice_rmsd_refolded" in df:
+        lattice_informative = "neg_lattice_rmsd_refolded" in df and (
+            df["neg_lattice_rmsd_refolded"].fillna(0) != 0
+        ).any()
+        if lattice_informative:
+            df["filter_rmsd"] = -df["neg_lattice_rmsd_refolded"]
+            df["filter_rmsd_design"] = -df["neg_lattice_rmsd_refolded"]
+        elif (
+            "local_double_tape_rmsd" in df
+            and (df["local_double_tape_rmsd"].fillna(0) > 0).any()
+        ):
+            # Legacy CSVs stored an all-zero placeholder lattice RMSD for
+            # double_tape; use the real local RMSD so the filter can cull.
+            df["filter_rmsd"] = df["local_double_tape_rmsd"]
+            df["filter_rmsd_design"] = df["local_double_tape_rmsd"]
+        elif "neg_lattice_rmsd_refolded" in df:
             df["filter_rmsd"] = -df["neg_lattice_rmsd_refolded"]
             df["filter_rmsd_design"] = -df["neg_lattice_rmsd_refolded"]
         elif self.from_inverse_folded:
