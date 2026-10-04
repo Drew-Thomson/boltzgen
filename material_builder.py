@@ -171,8 +171,9 @@ def main():
             config = yaml.safe_load(f)
             
         for k, v in config.items():
-            if hasattr(args, k) and k != "asym_unit":
-                setattr(args, k, v)
+            norm_k = k.replace("-", "_")
+            if hasattr(args, norm_k) and norm_k != "asym_unit":
+                setattr(args, norm_k, v)
 
     if "asym_unit" in config:
         asym_unit_def = config["asym_unit"]

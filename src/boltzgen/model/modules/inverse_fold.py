@@ -669,18 +669,21 @@ class InverseFoldingDecoder(nn.Module):
             com1 = CA[asym_id % 2 == 1].mean(dim=0)
             normal = torch.nn.functional.normalize(com1 - com0, dim=0)
             
-            # Compute sidechain vectors
-            is_gly = (feats["res_type_clone"][valid_mask].argmax(dim=-1) == const.tokens.index("GLY"))
-            vec = bb4[:, 3] - CA
-            vec[is_gly] = bb4[is_gly, 0] - CA[is_gly]
+            # Sidechain direction: idealized C-beta reconstructed from N, CA, C
+            # (bb4 atoms are N, CA, C, O; index 3 is the carbonyl O, not CB).
+            b = CA - bb4[:, 0]
+            c = bb4[:, 2] - CA
+            vec = (
+                -0.531018 * torch.nn.functional.normalize(b - c, dim=1)
+                + 1.20673 * torch.nn.functional.normalize(torch.cross(b, c, dim=1), dim=1)
+            )
             vec = torch.nn.functional.normalize(vec, dim=1)
             
-            # Identify inward vs outward positions
+            # Identify inward vs outward positions (half-space test on bilayer normal)
             curr_normal = torch.where((asym_id % 2 == 0).unsqueeze(1), normal.unsqueeze(0), -normal.unsqueeze(0))
             dot = (vec * curr_normal).sum(dim=1).clamp(-1, 1)
-            angle = torch.acos(dot)
             
-            is_inward = angle < 0.2
+            is_inward = dot > 0.0
             is_outward = ~is_inward
             
             idx_T = const.canonical_tokens.index("THR")
@@ -801,7 +804,7 @@ class InverseFoldingDecoder(nn.Module):
                 ids_canonical = torch.argmax(pred_canonical, dim=-1)
             else:
                 ids_canonical = torch.multinomial(
-                    F.softmax(pred_canonical / 0.2, dim=-1),
+                    F.softmax(pred_canonical / self.sampling_temperature, dim=-1),
                     num_samples=1,
                 ).squeeze(-1)
 
