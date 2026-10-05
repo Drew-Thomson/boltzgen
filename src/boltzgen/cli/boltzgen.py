@@ -1338,8 +1338,9 @@ class BinderDesignPipeline:
                     config_path=args.config_dir / "filter_target_candidates.yaml",
                     args=[
                         f"design_dir={input_dir}",
-                        f"target_max_rmsd={args.target_max_rmsd}",
-                        f"target_min_plddt={args.target_min_plddt}",
+                        f"max_rmsd={args.target_max_rmsd}",
+                        f"min_complex_plddt={args.target_min_plddt}",
+                        f"topology={topology}",
                     ],
                 )
             )
@@ -1354,7 +1355,7 @@ class BinderDesignPipeline:
                         f"topology={topology}",
                         f"copies={layout_metadata['copies']}",
                         f"moldir={moldir}",
-                        f"candidates_path={input_dir}/target_candidates.json",
+                        f"candidates_path={input_dir}/counter_screen_candidates.json",
                         "topology_params=" + json.dumps(topology_params),
                     ],
                 )
