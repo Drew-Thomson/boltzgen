@@ -811,6 +811,7 @@ class Analyze(Task):
                     else:
                         current_run = 0
                 metrics["max_consecutive_ilv_sheet"] = max_run
+                metrics["neg_max_consecutive_ilv_sheet"] = -max_run
             except:
                 traceback.print_exc()
                 print(f"DSSP failed for {path}.")

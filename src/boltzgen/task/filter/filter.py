@@ -364,19 +364,18 @@ class Filter(Task):
         ).any()
         has_ligand = "ligand_burial_fraction" in df
 
-        if lattice_informative and not has_ligand:
+        if lattice_informative:
             df["filter_rmsd"] = -df["neg_lattice_rmsd_refolded"]
             df["filter_rmsd_design"] = -df["neg_lattice_rmsd_refolded"]
         elif (
             "local_double_tape_rmsd" in df
             and (df["local_double_tape_rmsd"].fillna(0) > 0).any()
-            and not has_ligand
         ):
             # Legacy CSVs stored an all-zero placeholder lattice RMSD for
             # double_tape; use the real local RMSD so the filter can cull.
             df["filter_rmsd"] = df["local_double_tape_rmsd"]
             df["filter_rmsd_design"] = df["local_double_tape_rmsd"]
-        elif "neg_lattice_rmsd_refolded" in df and not has_ligand:
+        elif "neg_lattice_rmsd_refolded" in df:
             df["filter_rmsd"] = -df["neg_lattice_rmsd_refolded"]
             df["filter_rmsd_design"] = -df["neg_lattice_rmsd_refolded"]
         elif self.from_inverse_folded:
@@ -431,7 +430,7 @@ class Filter(Task):
             else:
                 self.df[filter_col] = self.df[feat] >= threshold
 
-            self.df["num_filters_passed"] += self.df[filter_cols].all(axis=1)
+            self.df["num_filters_passed"] += self.df[filter_col].astype(int)
             self.df["pass_filters"] = self.df[filter_cols].all(axis=1)
 
             msg = f"Num designs that pass the {feat} filter with threshold {threshold} where {'lower' if low else 'higher'} is better: {self.df[filter_col].sum()}"

@@ -25,6 +25,7 @@ def material_filtering_overrides(topology: str) -> dict[str, Any] | None:
             "neg_min_design_to_target_pae": 1,
             "neg_outward_ilv_fraction": 1,
             "neg_design_largest_hydrophobic_patch_refolded": 2,
+            "neg_max_consecutive_ilv_sheet": 2,
             "complex_plddt": 1,
             "design_to_target_iptm": None,
             "neg_lattice_rmsd_refolded": None,
