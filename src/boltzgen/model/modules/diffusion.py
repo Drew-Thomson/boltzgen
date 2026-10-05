@@ -1135,6 +1135,10 @@ class AtomDiffusion(Module):
                                     if ligand_inclusion_bias > 0.0:
                                         ligand_com = carried.mean(dim=0)
                                         direction = P_mean - ligand_com
+                                        if topology not in ("cage_tetrahedral", "cage_octahedral", "floating"):
+                                            v_P = R_kabsch[:, 2] # Z-axis in P frame
+                                            direction_along_Z = torch.dot(direction, v_P) * v_P
+                                            direction = direction - direction_along_Z
                                         carried = carried + direction * ligand_inclusion_bias
 
                                     atom_coords_denoised[batch_idx, ligand_indices] = (
