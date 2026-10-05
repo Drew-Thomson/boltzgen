@@ -1130,6 +1130,13 @@ class AtomDiffusion(Module):
                                         torch.cat(target_parts, dim=0),
                                     )
                                     carried = original_ligand @ rotation + translation
+                                    
+                                    ligand_inclusion_bias = float(os.environ.get("MAT_LIGAND_INCLUSION_BIAS", "0.0"))
+                                    if ligand_inclusion_bias > 0.0:
+                                        ligand_com = carried.mean(dim=0)
+                                        direction = P_mean - ligand_com
+                                        carried = carried + direction * ligand_inclusion_bias
+
                                     atom_coords_denoised[batch_idx, ligand_indices] = (
                                         (1 - guidance_scale) * original_ligand
                                         + guidance_scale * carried

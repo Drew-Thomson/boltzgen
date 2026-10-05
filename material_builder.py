@@ -123,6 +123,7 @@ def main():
     parser.add_argument("--seqs_per_backbone", type=int, default=1, help="Number of sequences to generate per structural backbone")
     parser.add_argument("--avoid_aa", type=str, default="", help="String of amino acids to completely avoid (e.g. 'CWP')")
     parser.add_argument("--aa_bias", type=str, default="", help="Amino acid bias string for ProteinMPNN (e.g. 'T:1.0,S:0.5,V:-0.5,I:-0.5')")
+    parser.add_argument("--ligand_inclusion_bias", type=float, default=0.0, help="Strength of the inward centripetal force for ligands during diffusion (default: 0.0)")
     parser.add_argument("--run", action="store_true", help="Execute BoltzGen after generating YAML")
     parser.add_argument(
         "--heteromer_counter_screen",
@@ -304,6 +305,7 @@ def main():
     os.environ["MAT_TOPOLOGY"] = args.topology
     os.environ["MAT_COPIES"] = str(args.copies)
     os.environ["MAT_GUIDANCE_SCALE"] = str(args.guidance_scale)
+    os.environ["MAT_LIGAND_INCLUSION_BIAS"] = str(args.ligand_inclusion_bias)
     os.environ["MAT_ASYM_UNIT_SIZE"] = str(
         1 if args.heteromer_counter_screen else args.asym_unit_size
     )
