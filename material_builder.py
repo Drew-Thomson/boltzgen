@@ -7,7 +7,7 @@ import datetime
 from pathlib import Path
 from boltzgen.model.modules.material_layout import expand_material_spec, write_layout
 try:
-    from boltzgen.task.filter.material_presets import format_metrics_override
+    from boltzgen.task.filter.material_presets import format_metrics_override, format_additional_filters
 except ModuleNotFoundError as exc:
     # The presets module is optional in older/source-only BoltzGen installs.
     # Topologies without a custom ranking preset (such as cyclic) can still use
@@ -18,6 +18,8 @@ except ModuleNotFoundError as exc:
     def format_metrics_override(topology):
         # 2.0A is way too strict for multi-chain assemblies; 5.0A is more reasonable for global topology
         return "refolding_rmsd_threshold=5.0"
+    def format_additional_filters(topology):
+        return None
 try:
     import biotite.structure as struc
     import biotite.structure.io.pdb as pdb
@@ -120,6 +122,7 @@ def main():
     parser.add_argument("--inverse_temp", type=float, default=0.1, help="Sampling temperature for inverse folding (higher = more diverse)")
     parser.add_argument("--seqs_per_backbone", type=int, default=1, help="Number of sequences to generate per structural backbone")
     parser.add_argument("--avoid_aa", type=str, default="", help="String of amino acids to completely avoid (e.g. 'CWP')")
+    parser.add_argument("--aa_bias", type=str, default="", help="Amino acid bias string for ProteinMPNN (e.g. 'T:1.0,S:0.5,V:-0.5,I:-0.5')")
     parser.add_argument("--run", action="store_true", help="Execute BoltzGen after generating YAML")
     parser.add_argument(
         "--heteromer_counter_screen",
@@ -379,9 +382,15 @@ def main():
         material_filtering_override = format_metrics_override(args.topology)
         if material_filtering_override is not None:
             cmd.extend(["--config", "filtering", material_filtering_override])
+            
+        additional_filters_override = format_additional_filters(args.topology)
+        if additional_filters_override is not None:
+            cmd.extend(["--config", "filtering", additional_filters_override])
         
         if args.avoid_aa:
             cmd.extend(["--inverse_fold_avoid", args.avoid_aa])
+        if args.aa_bias:
+            cmd.append(f"override.inverse_fold_args.aa_bias={args.aa_bias}")
         
         try:
             subprocess.run(cmd, check=True)

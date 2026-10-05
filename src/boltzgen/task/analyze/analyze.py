@@ -732,6 +732,7 @@ class Analyze(Task):
                 delta_sasa_orig,
                 design_sasa_unbound,
                 design_sasa_bound,
+                contacts_orig,
             ) = get_delta_sasa(
                 path,
                 atom_target_mask=resolved_atoms_target_mask,
@@ -799,6 +800,17 @@ class Analyze(Task):
                 metrics["loop"] = (dssp == 0).float().mean().item()
                 metrics["helix"] = (dssp == 1).float().mean().item()
                 metrics["sheet"] = (dssp == 2).float().mean().item()
+                
+                max_run = 0
+                current_run = 0
+                for res, ss in zip(design_seq, dssp.cpu().numpy()):
+                    if ss == 2 and res in ["I", "L", "V"]:
+                        current_run += 1
+                        if current_run > max_run:
+                            max_run = current_run
+                    else:
+                        current_run = 0
+                metrics["max_consecutive_ilv_sheet"] = max_run
             except:
                 traceback.print_exc()
                 print(f"DSSP failed for {path}.")
@@ -1116,6 +1128,7 @@ class Analyze(Task):
                     delta_sasa_refolded,
                     design_sasa_unbound,
                     design_sasa_bound,
+                    contacts_refolded,
                 ) = get_delta_sasa(
                     cif_path_refolded,
                     atom_target_mask=resolved_atoms_target_mask,
@@ -1125,6 +1138,12 @@ class Analyze(Task):
                 metrics["delta_sasa_refolded"] = delta_sasa_refolded
                 metrics["design_sasa_unbound_refolded"] = design_sasa_unbound
                 metrics["design_sasa_bound_refolded"] = design_sasa_bound
+                if design_sasa_unbound > 0:
+                    metrics["ligand_burial_fraction"] = 1.0 - (design_sasa_bound / design_sasa_unbound)
+                else:
+                    metrics["ligand_burial_fraction"] = 0.0
+                metrics["neg_ligand_sasa_bound_refolded"] = -design_sasa_bound
+                metrics["ligand_coordination_contacts_refolded"] = contacts_refolded
 
             # noncovalents metrics for refolded structure
             if self.noncovalents_refolded:
@@ -1342,6 +1361,14 @@ class Analyze(Task):
                                             
                                     from boltzgen.task.analyze.analyze_utils import compute_chi_outward
                                     metrics["chi_outward"] = compute_chi_outward(torch.tensor(bb_out[:len(full_seq), 1, :]), full_seq, classifications)
+                                    
+                                    outward_res = [res for res, cls in zip(full_seq, classifications) if cls == "outward"]
+                                    if len(outward_res) > 0:
+                                        metrics["outward_ilv_fraction"] = sum(1 for r in outward_res if r in ["I", "L", "V"]) / len(outward_res)
+                                        metrics["outward_aromatic_fraction"] = sum(1 for r in outward_res if r in ["W", "Y", "F"]) / len(outward_res)
+                                    else:
+                                        metrics["outward_ilv_fraction"] = 0.0
+                                        metrics["outward_aromatic_fraction"] = 0.0
                         else:
                             rmsd = torch.sqrt(torch.mean((c_r_aligned - Q)**2)).item()
                             metrics["neg_lattice_rmsd_refolded"] = -rmsd

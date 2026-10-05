@@ -782,7 +782,21 @@ def get_delta_sasa(
         ignore_ions=False
     )
     delta = target_area.sum() - target_bound
-    return delta, target_area.sum(), target_bound
+    
+    # Compute ligand coordination contacts
+    target_coords = atoms.coord[atom_target_mask]
+    design_coords = atoms.coord[atom_design_mask]
+    design_elems = [e for e, m in zip(elem, atom_design_mask) if m]
+    contacts = 0
+    if len(target_coords) > 0 and len(design_coords) > 0:
+        import scipy.spatial
+        dist = scipy.spatial.distance.cdist(target_coords, design_coords)
+        close_mask = dist <= 3.0
+        for j in range(len(design_elems)):
+            if close_mask[:, j].any() and design_elems[j].upper() in ["O", "N", "S"]:
+                contacts += 1
+    
+    return delta, target_area.sum(), target_bound, contacts
 
 
 def compute_ss_metrics(dssp_pred, ss_conditioning_metricsed):

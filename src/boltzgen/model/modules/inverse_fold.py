@@ -507,6 +507,7 @@ class InverseFoldingDecoder(nn.Module):
         anti_correlation_strength: float = 2.0,
         double_tape_core_bias: float = 0.0,
         double_tape_aromatic_bias: float = 0.0,
+        aa_bias: str = "",
         **kwargs, # old checkpoint compatibility
     ):
         super().__init__()
@@ -533,6 +534,7 @@ class InverseFoldingDecoder(nn.Module):
         self.anti_correlation_strength = anti_correlation_strength
         self.double_tape_core_bias = double_tape_core_bias
         self.double_tape_aromatic_bias = double_tape_aromatic_bias
+        self.aa_bias = aa_bias
 
         self.decoder_layers = nn.ModuleList()
         self.inf = 10**6
@@ -646,6 +648,18 @@ class InverseFoldingDecoder(nn.Module):
             device=s.device,
         )
 
+        if self.aa_bias:
+            for term in self.aa_bias.split(","):
+                aa, val = term.split(":")
+                val = float(val)
+                # Map 1-letter code to canonical token index
+                token_name = const.prot_letter_to_token_name.get(aa)
+                if token_name and token_name in const.canonical_tokens:
+                    idx = const.canonical_tokens.index(token_name)
+                    # For the plan: 'favor Threonine/Serine substitution on solvent positions'
+                    # But ProteinMPNN global aa_bias applies to ALL positions!
+                    per_residue_mask[:, idx] += val
+        
         if self.double_tape_core_bias > 0 or self.double_tape_aromatic_bias > 0:
             token_bb4 = feats["token_to_bb4_atoms"].float()
             coords = feats["coords"]
