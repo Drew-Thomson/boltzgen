@@ -122,41 +122,48 @@ def main():
     parser.add_argument("--avoid_aa", type=str, default="", help="String of amino acids to completely avoid (e.g. 'CWP')")
     parser.add_argument("--run", action="store_true", help="Execute BoltzGen after generating YAML")
     parser.add_argument(
+        "--heteromer_counter_screen",
         "--heteromer-counter-screen",
         action="store_true",
         help="Design a two-chain heteromer with alternating partner identities and run homomer counter-screens",
     )
     parser.add_argument(
+        "--heteromer_charge_bias",
         "--heteromer-charge-bias",
         type=float,
         default=0.5,
         help="Strength of global charge complementarity bias applied to sequences during inverse folding (0 to disable)",
     )
     parser.add_argument(
+        "--max_partner_identity",
         "--max-partner-identity",
         type=float,
         default=0.5,
         help="Maximum allowed sequence identity between partners A and B before counter-screening (default: 0.5)",
     )
     parser.add_argument(
+        "--max_surviving_designs",
         "--max-surviving-designs",
         type=int,
         default=None,
         help="Maximum number of designs to keep after identity filtering to prevent expensive downstream counter-screening",
     )
     parser.add_argument(
+        "--anti_correlation_strength",
         "--anti-correlation-strength",
         type=float,
         default=2.0,
         help="Strength of cross-partner anti-correlation applied during inverse folding (default: 2.0)",
     )
     parser.add_argument(
+        "--double_tape_core_bias",
         "--double-tape-core-bias",
         type=float,
         default=1.0,
         help="Strength of penalty for T and boost for A in the core (inward-facing) of double-tape (default: 1.0)",
     )
     parser.add_argument(
+        "--double_tape_aromatic_bias",
         "--double-tape-aromatic-bias",
         type=float,
         default=1.0,
@@ -182,7 +189,7 @@ def main():
 
     if args.heteromer_counter_screen and "asym_unit" not in config:
         parser.error(
-            "--heteromer-counter-screen requires asym_unit with two distinct, fixed sequence entries"
+            "--heteromer_counter_screen requires asym_unit with two distinct, fixed sequence entries"
         )
 
     protein_templates = [
@@ -202,25 +209,25 @@ def main():
     if args.heteromer_counter_screen:
         if len(protein_templates) != 2:
             parser.error(
-                "--heteromer-counter-screen requires exactly two protein templates"
+                "--heteromer_counter_screen requires exactly two protein templates"
             )
         if any(
             str(item.get("type", "protein")).lower() == "ligand"
             for item in asym_unit_def
         ):
             parser.error(
-                "--heteromer-counter-screen does not support ligands in the asymmetric unit; "
+                "--heteromer_counter_screen does not support ligands in the asymmetric unit; "
                 "ligand-mediated assembly is a ternary system and is unsuitable for the "
                 "current protein-only homomer controls"
             )
         if args.topology not in supported_heteromer_topologies:
             parser.error(
-                "--heteromer-counter-screen supports cyclic, linear_tape, "
+                "--heteromer_counter_screen supports cyclic, linear_tape, "
                 "double_tape, open_arc, and helical topologies"
             )
         if args.copies % 2:
             parser.error(
-                "--heteromer-counter-screen requires an even number of placements"
+                "--heteromer_counter_screen requires an even number of placements"
             )
 
     if args.grid_dim_x < 1 or args.grid_dim_y < 1:
@@ -356,18 +363,18 @@ def main():
             "--config", "inverse_folding", f"override.inverse_fold_args.sampling_temperature={args.inverse_temp}"
         ]
         if args.heteromer_counter_screen:
-            cmd.append("--heteromer-counter-screen")
+            cmd.append("--heteromer_counter_screen")
             if hasattr(args, "max_partner_identity"):
-                cmd.extend(["--max-partner-identity", str(args.max_partner_identity)])
+                cmd.extend(["--max_partner_identity", str(args.max_partner_identity)])
             if hasattr(args, "max_surviving_designs") and args.max_surviving_designs is not None:
-                cmd.extend(["--max-surviving-designs", str(args.max_surviving_designs)])
+                cmd.extend(["--max_surviving_designs", str(args.max_surviving_designs)])
             if hasattr(args, "anti_correlation_strength"):
-                cmd.extend(["--anti-correlation-strength", str(args.anti_correlation_strength)])
+                cmd.extend(["--anti_correlation_strength", str(args.anti_correlation_strength)])
 
         if getattr(args, "double_tape_core_bias", 0.0) > 0.0:
-            cmd.extend(["--double-tape-core-bias", str(args.double_tape_core_bias)])
+            cmd.extend(["--double_tape_core_bias", str(args.double_tape_core_bias)])
         if getattr(args, "double_tape_aromatic_bias", 0.0) > 0.0:
-            cmd.extend(["--double-tape-aromatic-bias", str(args.double_tape_aromatic_bias)])
+            cmd.extend(["--double_tape_aromatic_bias", str(args.double_tape_aromatic_bias)])
 
         material_filtering_override = format_metrics_override(args.topology)
         if material_filtering_override is not None:

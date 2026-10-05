@@ -2,7 +2,7 @@
 
 ## Two-chain heteromer counter-screening
 
-`material_builder.py --heteromer-counter-screen` opts into homomer counter-screening for a two-protein asymmetric unit. The supported topologies are `cyclic`, `linear_tape`, `double_tape`, `open_arc`, and `helical`. The feature currently requires an even number of placements and a protein-only `asym_unit`; ligand-bearing heteromers are explicitly rejected as unsuitable because the metal/ligand can mediate assembly, making this a ternary interaction rather than a protein-only A/B comparison. Partner identity alternates around cyclic assemblies and along linear, arc, and helical position order. For `double_tape`, identity alternates along each side.
+`material_builder.py --heteromer_counter_screen` opts into homomer counter-screening for a two-protein asymmetric unit. The supported topologies are `cyclic`, `linear_tape`, `double_tape`, `open_arc`, and `helical`. The feature currently requires an even number of placements and a protein-only `asym_unit`; ligand-bearing heteromers are explicitly rejected as unsuitable because the metal/ligand can mediate assembly, making this a ternary interaction rather than a protein-only A/B comparison. Partner identity alternates around cyclic assemblies and along linear, arc, and helical position order. For `double_tape`, identity alternates along each side.
 
 After inverse folding, BoltzGen creates and folds N-copy homomers for each designed partner, where N is the total number of protein chains in the intended heteromer. This compares `A_N` and `B_N` with the intended equal-stoichiometry heteromer. The feature is disabled by default and is separate from `designfolding`. Confidence differences such as `delta_design_iptm_vs_homomer_max` are model-confidence proxies, not thermodynamic measurements or experimental evidence of specificity.
 
@@ -87,18 +87,18 @@ Places chains in two parallel layers, with chains advancing along the Z-axis. Wi
 
 - `--target_pitch` (default `4.8`): Spacing between neighboring chains along each tape.
 - `--layer_dist` (default `10.0`): Separation between layers.
-- `--double-tape-core-bias` (default `1.0`): Sequence generation bias for the inward-facing core. Decreases Threonine and increases Alanine probabilities at structurally inward-facing positions.
-- `--double-tape-aromatic-bias` (default `1.0`): Sequence generation bias for the outward-facing exterior. Increases Tryptophan and Tyrosine probabilities at outward-facing positions to promote stabilizing aromatic pairs.
+- `--double_tape_core_bias` (default `1.0`): Sequence generation bias for the inward-facing core. Decreases Threonine and increases Alanine probabilities at structurally inward-facing positions.
+- `--double_tape_aromatic_bias` (default `1.0`): Sequence generation bias for the outward-facing exterior. Increases Tryptophan and Tyrosine probabilities at outward-facing positions to promote stabilizing aromatic pairs.
 
 ## Sequence Biasing and Heteromer Design
 
 While `material_builder.py` primarily drives topology placement, it also exposes advanced flags for controlling the sequences during the inverse-folding stage:
 
-- `--heteromer-counter-screen`: Instructs the pipeline to design a two-chain heteromer with alternating partner identities (e.g. A-B-A-B). Includes A-only and B-only counter-screen folding steps to filter out designs that might form unintended homomers.
-- `--heteromer-charge-bias` (default `0.5`): Strength of global charge complementarity bias applied during inverse folding to enforce positive/negative charge pairing across partners.
-- `--anti-correlation-strength` (default `2.0`): Strength of cross-partner anti-correlation penalty applied during inverse folding to maximize sequence divergence between partners.
-- `--max-partner-identity` (default `0.5`): Maximum allowed sequence identity between partners A and B before running the expensive structural counter-screens.
-- `--max-surviving-designs`: Optional cap on the number of sequence designs to pass into the counter-screen folding step.
+- `--heteromer_counter_screen`: Instructs the pipeline to design a two-chain heteromer with alternating partner identities (e.g. A-B-A-B). Includes A-only and B-only counter-screen folding steps to filter out designs that might form unintended homomers.
+- `--heteromer_charge_bias` (default `0.5`): Strength of global charge complementarity bias applied during inverse folding to enforce positive/negative charge pairing across partners.
+- `--anti_correlation_strength` (default `2.0`): Strength of cross-partner anti-correlation penalty applied during inverse folding to maximize sequence divergence between partners.
+- `--max_partner_identity` (default `0.5`): Maximum allowed sequence identity between partners A and B before running the expensive structural counter-screens.
+- `--max_surviving_designs`: Optional cap on the number of sequence designs to pass into the counter-screen folding step.
 
 ### Tetrahedral cage (`cage_tetrahedral`)
 

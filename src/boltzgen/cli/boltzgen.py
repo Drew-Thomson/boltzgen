@@ -209,29 +209,34 @@ def add_configure_arguments(
         "needed to achieve the specified total number of designs.",
     )
     p.add_argument(
+        "--heteromer_counter_screen",
         "--heteromer-counter-screen",
         action="store_true",
         help="Run A-only and B-only homomer counter-screen folds for a two-chain heteromer design",
     )
     p.add_argument(
+        "--max_partner_identity",
         "--max-partner-identity",
         type=float,
         default=0.5,
         help="Maximum allowed sequence identity between partners A and B before counter-screening (default: 0.5)",
     )
     p.add_argument(
+        "--max_surviving_designs",
         "--max-surviving-designs",
         type=int,
         default=None,
         help="Maximum number of designs to keep after identity filtering to prevent expensive downstream counter-screening (default: keep all that pass)",
     )
     p.add_argument(
+        "--target_max_rmsd",
         "--target-max-rmsd",
         type=float,
         default=2.5,
         help="Maximum allowed target backbone RMSD for target models before discarding without running counter-screens (default: 2.5)",
     )
     p.add_argument(
+        "--target_min_plddt",
         "--target-min-plddt",
         type=float,
         default=75.0,
@@ -239,18 +244,21 @@ def add_configure_arguments(
     )
 
     p.add_argument(
+        "--anti_correlation_strength",
         "--anti-correlation-strength",
         type=float,
         default=2.0,
         help="Strength of cross-partner anti-correlation applied during inverse folding (default: 2.0)",
     )
     p.add_argument(
+        "--double_tape_core_bias",
         "--double-tape-core-bias",
         type=float,
         default=0.0,
         help="Strength of penalty for T and boost for A in the core (inward-facing) of double-tape (default: 0.0)",
     )
     p.add_argument(
+        "--double_tape_aromatic_bias",
         "--double-tape-aromatic-bias",
         type=float,
         default=0.0,
@@ -1222,7 +1230,7 @@ class BinderDesignPipeline:
             if not heteromer_meta.get("enabled"):
                 raise ValueError(
                     "design spec layout does not enable heteromer counter-screening; "
-                    "generate it with material_builder.py --heteromer-counter-screen"
+                    "generate it with material_builder.py --heteromer_counter_screen"
                 )
             topology_params = heteromer_meta.get("topology_params", {})
             topology = heteromer_meta.get("topology")

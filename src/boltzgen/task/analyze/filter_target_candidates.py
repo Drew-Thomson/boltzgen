@@ -115,8 +115,8 @@ class FilterTargetCandidates(Task):
         if not ids:
             raise RuntimeError(
                 "No target designs passed the structural thresholds; refusing to "
-                "generate counter-screens. Loosen --target-max-rmsd / "
-                "--target-min-plddt or inspect the aggregate metrics."
+                "generate counter-screens. Loosen --target_max_rmsd / "
+                "--target_min_plddt or inspect the aggregate metrics."
             )
         (self.design_dir / CANDIDATES_FILENAME).write_text(
             json.dumps(

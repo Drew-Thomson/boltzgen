@@ -215,7 +215,7 @@ Do not mark implementation complete until targeted tests pass, full-suite result
 
 ## Execution status
 
-- [x] Step 1 — Added opt-in `material_builder.py --heteromer-counter-screen`, supported-topology/two-template/even-placement validation, and deterministic partner assignment (including alternating identity along each `double_tape` side).
+- [x] Step 1 — Added opt-in `material_builder.py --heteromer_counter_screen`, supported-topology/two-template/even-placement validation, and deterministic partner assignment (including alternating identity along each `double_tape` side).
 - [x] Step 2 — Added partner/template/order/pattern and topology parameter metadata to the material layout sidecar.
 - [x] Step 3 — Added deterministic A/B homomer entity/spec helpers and a preparation task that extracts each partner from the inverse-folded assembly, places N homomer copies, writes paired CIF/NPZ inputs, and persists a parent-to-screen mapping.
 - [x] Step 4 — Added opt-in preparation and separate homomer folding pipeline stages; added stage-selection validation and output confidence keys. Counter-screening is rejected with `--skip_inverse_folding`.
