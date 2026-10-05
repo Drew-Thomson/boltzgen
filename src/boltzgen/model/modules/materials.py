@@ -41,6 +41,23 @@ def double_tape_layer_position(chain_index: int) -> tuple[int, int]:
     return chain_index % 2, chain_index // 2
 
 
+def double_tape_consensus_slot_indices_from_layout(layout: dict) -> list[int]:
+    """Map chains to their consensus slot based on symmetric_group in layout."""
+    slots = []
+    seen = {}
+    for entity in layout.get("entities", []):
+        protein = entity.get("protein")
+        if not protein:
+            continue
+        group = protein.get("symmetric_group")
+        if group is None:
+            raise ValueError("All proteins must have a symmetric_group for heteromer_screening")
+        if group not in seen:
+            seen[group] = len(seen)
+        slots.append(seen[group])
+    return slots
+
+
 def generate_ideal_lattice(
     topology: str,
     n_chains: int,
