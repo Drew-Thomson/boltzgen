@@ -1693,12 +1693,16 @@ def weighted_minimum_rmsd(
     )
     target_aligned_rmsd_design = torch.tensor(torch.nan)
     best_target_aligned_rmsd_design = torch.tensor(torch.nan)
+    target_atoms_resolved = (target_mask * atom_mask).sum()
     if (
-        torch.any(
-            feats["mol_type"][~feats["chain_design_mask"]]
-            != const.chain_type_ids["NONPOLYMER"]
+        target_atoms_resolved >= 3
+        and (
+            torch.any(
+                feats["mol_type"][~feats["chain_design_mask"]]
+                != const.chain_type_ids["NONPOLYMER"]
+            )
+            or (~feats["chain_design_mask"]).float().sum() > 3
         )
-        or (~feats["chain_design_mask"]).float().sum() > 3
     ):
         try:
             # align the whole complex and only compute RMSD for the designed part
@@ -1719,8 +1723,8 @@ def weighted_minimum_rmsd(
                     atom_coords,
                     pred_atom_coords,
                     atom_mask,
+                    align_weights,
                     target_mask,
-                    atom_mask,
                     multiplicity,
                     rmsd_mask=design_mask,
                 )
@@ -1753,8 +1757,13 @@ def compute_subset_rmsd(
 ):
     used_mask = atom_mask * subset_mask
     used_weights = align_weights * subset_mask
+    eff_weights = used_mask * used_weights
 
-    if used_mask.sum() == 0:
+    if (
+        used_mask.sum() == 0
+        or (eff_weights > 0).sum() < 3
+        or (eff_weights.sum(dim=-1) < 1e-7).any()
+    ):
         return torch.tensor(torch.nan), torch.tensor(torch.nan)
 
     with torch.no_grad():

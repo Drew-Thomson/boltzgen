@@ -53,13 +53,13 @@ def weighted_rigid_align(
     batch_size, num_points, dim = true_coords.shape
     weights = (mask * weights).unsqueeze(-1)
 
+    weight_sum = weights.sum(dim=1, keepdim=True)
+    if (weight_sum < 1e-7).any() or ((weights > 0).sum(dim=1) < dim).any():
+        return true_coords
+
     # Compute weighted centroids
-    true_centroid = (true_coords * weights).sum(dim=1, keepdim=True) / weights.sum(
-        dim=1, keepdim=True
-    )
-    pred_centroid = (pred_coords * weights).sum(dim=1, keepdim=True) / weights.sum(
-        dim=1, keepdim=True
-    )
+    true_centroid = (true_coords * weights).sum(dim=1, keepdim=True) / weight_sum
+    pred_centroid = (pred_coords * weights).sum(dim=1, keepdim=True) / weight_sum
 
     # Center the coordinates
     true_coords_centered = true_coords - true_centroid
