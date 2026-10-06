@@ -264,6 +264,36 @@ def add_configure_arguments(
         default=0.0,
         help="Strength of boost for W and Y on the outside (outward-facing) of double-tape (default: 0.0)",
     )
+    p.add_argument(
+        "--double_tape_polar_bias",
+        type=float,
+        default=0.0,
+        help="Strength of boost for R, K, D, E, N, Q, H on the outside (outward-facing) of double-tape (default: 0.0)",
+    )
+    p.add_argument(
+        "--backbone_noise",
+        type=float,
+        default=0.0,
+        help="Std (A) of Gaussian noise added to all backbone atoms (N, CA, C, O) during inverse folding inference (default: 0.0; ProteinMPNN uses ~0.1-0.2)",
+    )
+    p.add_argument(
+        "--background_unbias_strength",
+        type=float,
+        default=0.0,
+        help="Strength of removal of the natural amino acid background prior from inverse folding logits (default: 0.0; try 0.5-1.0)",
+    )
+    p.add_argument(
+        "--top_p",
+        type=float,
+        default=1.0,
+        help="Nucleus sampling threshold for inverse folding (default: 1.0 = disabled)",
+    )
+    p.add_argument(
+        "--repetition_penalty",
+        type=float,
+        default=0.0,
+        help="Logit penalty per prior occurrence of an amino acid within the same chain during inverse folding (default: 0.0)",
+    )
 
     # Design configuration options
     p = parser.add_argument_group("design")
@@ -1126,6 +1156,9 @@ class BinderDesignPipeline:
                 inverse_fold_args.append(f"override.inverse_fold_args.double_tape_core_bias={args.double_tape_core_bias}")
             if getattr(args, "double_tape_aromatic_bias", 0.0) > 0.0:
                 inverse_fold_args.append(f"override.inverse_fold_args.double_tape_aromatic_bias={args.double_tape_aromatic_bias}")
+            if getattr(args, "double_tape_polar_bias", 0.0) > 0.0:
+                inverse_fold_args.append(f"override.inverse_fold_args.double_tape_polar_bias={args.double_tape_polar_bias}")
+            inverse_fold_args.extend(_inverse_fold_diversity_args(args))
 
             self.steps.append(
                 PipelineStep(
@@ -1202,6 +1235,9 @@ class BinderDesignPipeline:
                     inverse_fold_args.append(f"override.inverse_fold_args.double_tape_core_bias={args.double_tape_core_bias}")
                 if getattr(args, "double_tape_aromatic_bias", 0.0) > 0.0:
                     inverse_fold_args.append(f"override.inverse_fold_args.double_tape_aromatic_bias={args.double_tape_aromatic_bias}")
+                if getattr(args, "double_tape_polar_bias", 0.0) > 0.0:
+                    inverse_fold_args.append(f"override.inverse_fold_args.double_tape_polar_bias={args.double_tape_polar_bias}")
+                inverse_fold_args.extend(_inverse_fold_diversity_args(args))
 
                 self.steps.append(
                     PipelineStep(
@@ -1461,6 +1497,24 @@ class BinderDesignPipeline:
 
 
 ### Misc utiltiies ###
+def _inverse_fold_diversity_args(args: argparse.Namespace) -> List[str]:
+    """Hydra overrides for the inverse folding diversity options (only non-default)."""
+    out = []
+    if getattr(args, "backbone_noise", 0.0) > 0.0:
+        out.append(f"override.inverse_fold_args.backbone_noise={args.backbone_noise}")
+    if getattr(args, "background_unbias_strength", 0.0) > 0.0:
+        out.append(
+            f"override.inverse_fold_args.background_unbias_strength={args.background_unbias_strength}"
+        )
+    if getattr(args, "top_p", 1.0) < 1.0:
+        out.append(f"override.inverse_fold_args.top_p={args.top_p}")
+    if getattr(args, "repetition_penalty", 0.0) > 0.0:
+        out.append(
+            f"override.inverse_fold_args.repetition_penalty={args.repetition_penalty}"
+        )
+    return out
+
+
 def check_design_specs(args: argparse.Namespace, moldir: Path, mols: Dict[str, Any]):
     last_banner = ""
     for design_spec in args.design_spec:

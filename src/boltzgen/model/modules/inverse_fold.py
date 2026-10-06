@@ -11,6 +11,17 @@ from boltzgen.data import const
 from boltzgen.model.modules.scatter_utils import scatter_sum, scatter_softmax
 import torch.nn.functional as F
 
+# Natural proteome background frequencies, ordered as const.canonical_tokens:
+# ALA ARG ASN ASP CYS GLN GLU GLY HIS ILE LEU LYS MET PHE PRO SER THR TRP TYR VAL
+BG_FREQ = torch.tensor(
+    [
+        0.0825, 0.0553, 0.0406, 0.0545, 0.0137, 0.0393, 0.0675, 0.0707, 0.0227, 0.0596,
+        0.0966, 0.0584, 0.0242, 0.0386, 0.0470, 0.0656, 0.0534, 0.0108, 0.0292, 0.0687,
+    ],
+    dtype=torch.float32,
+)
+
+
 
 class GaussianSmearing(torch.nn.Module):
     # used to embed the edge distances
@@ -273,6 +284,7 @@ class InverseFoldingEncoder(nn.Module):
         topk: int = 30,
         num_heads: int = 4,
         enable_input_embedder: bool = False,
+        backbone_noise: float = 0.0,
         **kwargs, # old checkpoint compatibility
     ):
         """Initialize the Inverse Folding Encoder."""
@@ -291,6 +303,7 @@ class InverseFoldingEncoder(nn.Module):
         self.transformation_scale_factor = transformation_scale_factor
         self.inverse_fold_noise = inverse_fold_noise
         self.topk = topk
+        self.backbone_noise = backbone_noise
         self.num_heads = num_heads
         self.r_max = 32
         self.enable_input_embedder = enable_input_embedder
@@ -333,6 +346,8 @@ class InverseFoldingEncoder(nn.Module):
         topk = min(self.topk, N)
 
         coords = feats["center_coords"]
+        if (not self.training) and self.backbone_noise > 0:
+            coords = coords + torch.randn_like(coords) * self.backbone_noise
         dists = torch.cdist(coords, coords)
         dists = dists.masked_fill(~valid_mask_pair, float("inf"))
         src_idx = torch.topk(dists, topk, largest=False).indices
@@ -373,9 +388,10 @@ class InverseFoldingEncoder(nn.Module):
         src_idx, dst_idx = edge_idx[0], edge_idx[1]
         token_to_bb4_atoms = feats["token_to_bb4_atoms"]
         r = feats["coords"]
-        if self.training and self.inverse_fold_noise > 0:
-            noise = torch.randn_like(r) * self.inverse_fold_noise
-            r = r + noise
+        noise_std = self.inverse_fold_noise if self.training else self.backbone_noise
+        if noise_std > 0:
+            # Independent Gaussian noise on every atom (incl. N, CA, C, O)
+            r = r + torch.randn_like(r) * noise_std
         B, N = valid_mask.shape
         r_repr = torch.bmm(
             token_to_bb4_atoms.float().view(B, N * 4, -1), r.view(B, -1, 3)
@@ -507,6 +523,10 @@ class InverseFoldingDecoder(nn.Module):
         anti_correlation_strength: float = 2.0,
         double_tape_core_bias: float = 0.0,
         double_tape_aromatic_bias: float = 0.0,
+        double_tape_polar_bias: float = 0.0,
+        background_unbias_strength: float = 0.0,
+        top_p: float = 1.0,
+        repetition_penalty: float = 0.0,
         aa_bias: str = "",
         **kwargs, # old checkpoint compatibility
     ):
@@ -534,6 +554,10 @@ class InverseFoldingDecoder(nn.Module):
         self.anti_correlation_strength = anti_correlation_strength
         self.double_tape_core_bias = double_tape_core_bias
         self.double_tape_aromatic_bias = double_tape_aromatic_bias
+        self.double_tape_polar_bias = double_tape_polar_bias
+        self.background_unbias_strength = background_unbias_strength
+        self.top_p = top_p
+        self.repetition_penalty = repetition_penalty
         self.aa_bias = aa_bias
 
         self.decoder_layers = nn.ModuleList()
@@ -660,7 +684,17 @@ class InverseFoldingDecoder(nn.Module):
                     # But ProteinMPNN global aa_bias applies to ALL positions!
                     per_residue_mask[:, idx] += val
         
-        if self.double_tape_core_bias > 0 or self.double_tape_aromatic_bias > 0:
+        if self.background_unbias_strength > 0:
+            # Remove the natural-proteome prior: penalize common residues, boost rare ones
+            log_prior = torch.log(BG_FREQ.to(device=s.device))
+            prior_offset = (log_prior - log_prior.mean()) * self.background_unbias_strength
+            per_residue_mask -= prior_offset.unsqueeze(0)
+
+        if (
+            self.double_tape_core_bias > 0
+            or self.double_tape_aromatic_bias > 0
+            or self.double_tape_polar_bias > 0
+        ):
             token_bb4 = feats["token_to_bb4_atoms"].float()
             coords = feats["coords"]
             
@@ -710,8 +744,15 @@ class InverseFoldingDecoder(nn.Module):
                 per_residue_mask[is_inward, idx_A] += self.double_tape_core_bias
             
             if self.double_tape_aromatic_bias > 0:
-                per_residue_mask[is_outward, idx_W] += self.double_tape_aromatic_bias
-                per_residue_mask[is_outward, idx_Y] += self.double_tape_aromatic_bias
+                for token in ("PHE", "TYR", "TRP"):
+                    idx_ar = const.canonical_tokens.index(token)
+                    per_residue_mask[is_outward, idx_ar] += self.double_tape_aromatic_bias
+
+            if self.double_tape_polar_bias > 0:
+                # Residues able to form salt bridges / H-bonds on the exterior
+                for token in ("ARG", "LYS", "ASP", "GLU", "ASN", "GLN", "HIS"):
+                    idx_po = const.canonical_tokens.index(token)
+                    per_residue_mask[is_outward, idx_po] += self.double_tape_polar_bias
 
         order = torch.randperm(num_nodes, device=s.device).cpu().numpy().tolist()
         # Non-design residues are not sampled and used as the condition. So the order should filter them out.
@@ -767,6 +808,16 @@ class InverseFoldingDecoder(nn.Module):
                         cross_partner_map[gid_b] = gid_a
         sampled_groups = set()
 
+        # Per-chain residue usage counts for the repetition penalty
+        chain_aa_counts = {}
+        node_chain = []
+        if self.repetition_penalty > 0:
+            node_chain = feats["feature_asym_id"][valid_mask].cpu().numpy().tolist()
+            for c in set(node_chain):
+                chain_aa_counts[c] = torch.zeros(
+                    len(const.canonical_tokens), device=s.device
+                )
+
         src_idx, dst_idx = edge_idx[0], edge_idx[1]
 
         # decoding in order
@@ -814,13 +865,29 @@ class InverseFoldingDecoder(nn.Module):
                 ]
                 + per_residue_mask[i : i + 1]  # Position-specific mask
             )
+
+            # Penalize amino acids already used within the same chain(s)
+            if self.repetition_penalty > 0:
+                rep_counts = torch.stack(
+                    [chain_aa_counts[node_chain[pos]] for pos in positions]
+                ).mean(dim=0)
+                pred_canonical = pred_canonical - self.repetition_penalty * rep_counts[None]
+
             if self.sampling_temperature is None:
                 ids_canonical = torch.argmax(pred_canonical, dim=-1)
             else:
-                ids_canonical = torch.multinomial(
-                    F.softmax(pred_canonical / self.sampling_temperature, dim=-1),
-                    num_samples=1,
-                ).squeeze(-1)
+                probs = F.softmax(pred_canonical / self.sampling_temperature, dim=-1)
+                if self.top_p < 1.0:
+                    sorted_probs, sorted_idx = torch.sort(probs, descending=True, dim=-1)
+                    cum_probs = torch.cumsum(sorted_probs, dim=-1)
+                    # Always keep the most probable residue
+                    remove_sorted = (cum_probs - sorted_probs) > self.top_p
+                    remove = torch.zeros_like(remove_sorted).scatter(
+                        1, sorted_idx, remove_sorted
+                    )
+                    probs = probs.masked_fill(remove, 0.0)
+                    probs = probs / probs.sum(dim=-1, keepdim=True)
+                ids_canonical = torch.multinomial(probs, num_samples=1).squeeze(-1)
 
             ids = ids_canonical + const.canonicals_offset
             pred_one_hot = F.one_hot(ids, num_classes=const.num_tokens)
@@ -831,6 +898,8 @@ class InverseFoldingDecoder(nn.Module):
                 logits[pos] = aggregated_logits
                 if self.tie_symmetric_sequences:
                     sampled.add(pos)
+                if self.repetition_penalty > 0:
+                    chain_aa_counts[node_chain[pos]][ids_canonical.item()] += 1.0
                     
             if self.heteromer_anti_correlation and i in position_to_group:
                 my_group_id = position_to_group[i]

@@ -1,0 +1,19 @@
+copies: 16
+topology: "double_tape"
+layer_dist: 7.5
+target_pitch: 4.8
+antiparallel_prob: 1.0
+spacing_noise: 0.5
+num_designs: 5
+seqs_per_backbone: 5
+inverse_temp: 0.3
+anti_correlation_strength: 100
+asym_unit:
+  - type: "protein"
+    length: 9
+    secondary_structure: "S"
+    symmetric_group: 1
+  - type: "protein"
+    length: 9
+    secondary_structure: "S"
+    symmetric_group: 2
