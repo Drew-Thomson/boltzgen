@@ -160,6 +160,18 @@ def main():
         help="Strength of cross-partner anti-correlation applied during inverse folding (default: 2.0)",
     )
     parser.add_argument(
+        "--target_max_rmsd",
+        type=float,
+        default=10.0,
+        help="Maximum allowed target backbone RMSD for target models before discarding without running counter-screens (default: 10.0)",
+    )
+    parser.add_argument(
+        "--target_min_plddt",
+        type=float,
+        default=0.0,
+        help="Minimum allowed average target pLDDT (0-1 scale) for target models before discarding (default: 0.0)",
+    )
+    parser.add_argument(
         "--double_tape_core_bias",
         "--double-tape-core-bias",
         type=float,
@@ -375,6 +387,10 @@ def main():
                 cmd.extend(["--max_surviving_designs", str(args.max_surviving_designs)])
             if hasattr(args, "anti_correlation_strength"):
                 cmd.extend(["--anti_correlation_strength", str(args.anti_correlation_strength)])
+            if hasattr(args, "target_max_rmsd"):
+                cmd.extend(["--target_max_rmsd", str(args.target_max_rmsd)])
+            if hasattr(args, "target_min_plddt"):
+                cmd.extend(["--target_min_plddt", str(args.target_min_plddt)])
 
         if getattr(args, "double_tape_core_bias", 0.0) > 0.0:
             cmd.extend(["--double_tape_core_bias", str(args.double_tape_core_bias)])
