@@ -57,6 +57,44 @@ def double_tape_consensus_slot_indices_from_layout(layout: dict) -> list[int]:
     return slots
 
 
+def double_tape_antiparallel_rotation(chain_index: int, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """Return local rotation matrix for antiparallel double tapes."""
+    layer, step = double_tape_layer_position(chain_index)
+    if (layer + step) % 2 == 1:
+        return torch.tensor(
+            [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
+            device=device,
+            dtype=dtype,
+        )
+    return torch.eye(3, device=device, dtype=dtype)
+
+
+def strand_direction(coords: torch.Tensor) -> torch.Tensor:
+    """Unit N->C direction of a chain (last quarter mean - first quarter mean)."""
+    k = max(1, coords.shape[0] // 4)
+    v = coords[-k:].mean(dim=0) - coords[:k].mean(dim=0)
+    return v / (v.norm() + 1e-8)
+
+
+def lock_slot_orientations(slot_coords: list[torch.Tensor]) -> list[torch.Tensor]:
+    """Rotate each consensus slot 180° about the layer axis (x) so that its strand
+    direction matches slot 0. With the (layer+step) parity flip this makes adjacent
+    different-partner strands in a sheet antiparallel."""
+    flip = torch.diag(
+        torch.tensor(
+            [1.0, -1.0, -1.0], dtype=slot_coords[0].dtype, device=slot_coords[0].device
+        )
+    )
+    ref = strand_direction(slot_coords[0])
+    out = [slot_coords[0]]
+    for coords in slot_coords[1:]:
+        if torch.dot(strand_direction(coords), ref) < 0:
+            out.append(torch.matmul(coords, flip))
+        else:
+            out.append(coords)
+    return out
+
+
 def generate_ideal_lattice(
     topology: str,
     n_chains: int,

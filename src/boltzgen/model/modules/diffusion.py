@@ -861,10 +861,7 @@ class AtomDiffusion(Module):
                                 elif heteromer_double_tape:
                                     n_consensus_slots = max(double_tape_slot_indices) + 1
                                 elif topology == "double_tape":
-                                    # Skip consensus averaging for double_tape; Kabsch COM alignment
-                                    # is sufficient to enforce the lattice geometry without introducing
-                                    # zig-zag artifacts from PCA frame alignment of antiparallel chains.
-                                    n_consensus_slots = 0
+                                    n_consensus_slots = 2  # one consensus per layer, matching c_idx = layer below
                                 else:
                                     n_consensus_slots = asym_unit_size
                                 if n_consensus_slots > 0:
@@ -1006,6 +1003,20 @@ class AtomDiffusion(Module):
                                         # Use averaged consensus coordinates directly, relying on
                                         # Kabsch COM alignment to enforce the lattice geometry.
                                         aligned_ref_coords_list.append(ref_coords)
+
+                                if (
+                                    topology == "double_tape"
+                                    and heteromer_double_tape
+                                    and len(aligned_ref_coords_list) > 1
+                                    and "is_antiparallel" in feats
+                                    and bool(feats["is_antiparallel"][batch_idx].item())
+                                ):
+                                    aligned_ref_coords_list = (
+                                        materials.lock_slot_orientations(
+                                            aligned_ref_coords_list
+                                        )
+                                    )
+
                             else:
                                 ref_coords = ref_coords_acc / N_chains
                                 ref_coords = ref_coords - ref_coords.mean(dim=0)
