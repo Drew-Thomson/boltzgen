@@ -18,6 +18,11 @@ class FilterHighIdentityPairs(Task):
         self.layout_path = Path(layout_path)
         self.moldir = moldir
         self.max_partner_identity = max_partner_identity
+        if isinstance(max_surviving_designs, str):
+            if max_surviving_designs.lower() == "none":
+                max_surviving_designs = None
+            else:
+                max_surviving_designs = int(max_surviving_designs)
         self.max_surviving_designs = max_surviving_designs
 
     def run(self, config=None):
