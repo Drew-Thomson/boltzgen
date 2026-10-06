@@ -728,7 +728,7 @@ def get_delta_sasa(
     atom_design_mask,           
 ):
     if not atom_target_mask.any():
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0
 
     stack = _load_stack(path)
     atoms = stack[0]
