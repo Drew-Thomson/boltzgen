@@ -80,6 +80,13 @@ class FilterHighIdentityPairs(Task):
 
         logger.info(f"Removed {removed} candidates with partner identity > {self.max_partner_identity}")
 
+        if len(survived) == 0:
+            raise RuntimeError(
+                f"All candidate designs were removed because partner identity exceeded "
+                f"max_partner_identity ({self.max_partner_identity}). "
+                f"Please relax --max_partner_identity or increase --anti_correlation_strength."
+            )
+
         if self.max_surviving_designs is not None and len(survived) > self.max_surviving_designs:
             # Sort by identity ascending (lower identity = more heterotypic = better)
             survived.sort(key=lambda x: x[0])
