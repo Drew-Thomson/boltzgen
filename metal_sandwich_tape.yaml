@@ -1,12 +1,17 @@
 num_designs: 20
 copies: 10
-topology: "linear_tape"
+seqs_per_backbone: 2
+topology: linear_tape
 target_pitch: 4.8
 antiparallel_prob: 0.0
+inverse_temp: 0.3
 asym_unit:
-  - type: "protein"
-    length: 15
-    secondary_structure: "S"
+  - type: protein
+    name: strand
+    length: 18
+    secondary_structure: S
     symmetric_group: 1
   - type: "ligand"
-    ccd: "ZN"
+    ccd: "CA"
+    ligands_per_peptide: 1
+    attach_to: strand
