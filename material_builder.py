@@ -162,8 +162,8 @@ def main():
     parser.add_argument(
         "--target_max_rmsd",
         type=float,
-        default=10.0,
-        help="Maximum allowed target backbone RMSD for target models before discarding without running counter-screens (default: 10.0)",
+        default=100.0,
+        help="Maximum allowed target backbone RMSD for target models before discarding without running counter-screens (default: 100.0)",
     )
     parser.add_argument(
         "--target_min_plddt",

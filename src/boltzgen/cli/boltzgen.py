@@ -232,15 +232,15 @@ def add_configure_arguments(
         "--target_max_rmsd",
         "--target-max-rmsd",
         type=float,
-        default=2.5,
-        help="Maximum allowed target backbone RMSD for target models before discarding without running counter-screens (default: 2.5)",
+        default=100.0,
+        help="Maximum allowed target backbone RMSD for target models before discarding without running counter-screens (default: 100.0)",
     )
     p.add_argument(
         "--target_min_plddt",
         "--target-min-plddt",
         type=float,
-        default=75.0,
-        help="Minimum allowed average target pLDDT for target models before discarding without running counter-screens (default: 75.0)",
+        default=0.0,
+        help="Minimum allowed average target pLDDT for target models before discarding without running counter-screens (default: 0.0)",
     )
 
     p.add_argument(

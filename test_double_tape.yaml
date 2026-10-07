@@ -3,11 +3,18 @@ topology: "double_tape"
 layer_dist: 7.5
 target_pitch: 4.8
 antiparallel_prob: 1.0
-spacing_noise: 0.5
-num_designs: 5
+spacing_noise: 0.25
+num_designs: 100
 seqs_per_backbone: 5
 inverse_temp: 0.3
-anti_correlation_strength: 100
+backbone_noise: 0.3
+background_unbias_strength: 0.3
+double_tape_polar_bias: 1.5
+double_tape_core_bias: 1.5
+double_tape_aromatic_bias: 1.0
+repetition_penalty: 0.5
+top_p: 0.95
+anti_correlation_strength: 2
 asym_unit:
   - type: "protein"
     length: 9

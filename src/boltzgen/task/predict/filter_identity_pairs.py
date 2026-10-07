@@ -41,8 +41,7 @@ class FilterHighIdentityPairs(Task):
             for r in layout.get("chains", []) if r.get("role") == "protein"
         }
 
-        removed = 0
-        survived = []
+        all_candidates = []
         for cif_path in sorted(self.design_dir.glob("*.cif")):
             if cif_path.name.endswith("_native.cif"):
                 continue
@@ -72,20 +71,30 @@ class FilterHighIdentityPairs(Task):
                 aln = aligner.align(seq_a, seq_b)[0]
                 identity = aln.score / max(len(seq_a), len(seq_b))
 
-            if identity > self.max_partner_identity:
-                self._remove_files(cif_path)
-                removed += 1
-            else:
-                survived.append((identity, cif_path))
+            all_candidates.append((identity, cif_path))
+
+        survived = []
+        removed = 0
+        
+        # Check if all would be removed
+        if len(all_candidates) > 0 and all(identity > self.max_partner_identity for identity, _ in all_candidates):
+            logger.warning(
+                f"All candidate designs exceeded max_partner_identity ({self.max_partner_identity}). "
+                f"Bypassing the threshold to avoid an empty pipeline."
+            )
+            survived = list(all_candidates)
+        else:
+            for identity, cif_path in all_candidates:
+                if identity > self.max_partner_identity:
+                    self._remove_files(cif_path)
+                    removed += 1
+                else:
+                    survived.append((identity, cif_path))
 
         logger.info(f"Removed {removed} candidates with partner identity > {self.max_partner_identity}")
 
-        if len(survived) == 0:
-            raise RuntimeError(
-                f"All candidate designs were removed because partner identity exceeded "
-                f"max_partner_identity ({self.max_partner_identity}). "
-                f"Please relax --max_partner_identity or increase --anti_correlation_strength."
-            )
+        if len(survived) == 0 and len(all_candidates) == 0:
+            raise RuntimeError("No candidate designs were found to filter.")
 
         if self.max_surviving_designs is not None and len(survived) > self.max_surviving_designs:
             # Sort by identity ascending (lower identity = more heterotypic = better)

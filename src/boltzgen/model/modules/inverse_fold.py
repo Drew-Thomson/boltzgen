@@ -734,17 +734,13 @@ class InverseFoldingDecoder(nn.Module):
             is_inward = dot > 0.0
             is_outward = ~is_inward
             
-            idx_T = const.canonical_tokens.index("THR")
-            idx_A = const.canonical_tokens.index("ALA")
-            idx_W = const.canonical_tokens.index("TRP")
-            idx_Y = const.canonical_tokens.index("TYR")
-            
             if self.double_tape_core_bias > 0:
-                per_residue_mask[is_inward, idx_T] -= self.double_tape_core_bias
-                per_residue_mask[is_inward, idx_A] += self.double_tape_core_bias
+                for token in ("ALA", "VAL", "ILE", "LEU", "MET", "PHE", "TRP"):
+                    idx_co = const.canonical_tokens.index(token)
+                    per_residue_mask[is_inward, idx_co] += self.double_tape_core_bias
             
             if self.double_tape_aromatic_bias > 0:
-                for token in ("PHE", "TYR", "TRP"):
+                for token in ("TYR", "TRP"):
                     idx_ar = const.canonical_tokens.index(token)
                     per_residue_mask[is_outward, idx_ar] += self.double_tape_aromatic_bias
 
@@ -906,9 +902,9 @@ class InverseFoldingDecoder(nn.Module):
                 sampled_groups.add(my_group_id)
                 partner_group_id = cross_partner_map.get(my_group_id)
                 if partner_group_id is not None and partner_group_id not in sampled_groups:
-                    # Penalize the same AA at the partner's corresponding position
+                    # Penalize the same AA at the partner's corresponding position (multiplied to overcome sharp logits)
                     for partner_pos in sym_groups[partner_group_id]:
-                        per_residue_mask[partner_pos, ids_canonical.item()] -= self.anti_correlation_strength
+                        per_residue_mask[partner_pos, ids_canonical.item()] -= (self.anti_correlation_strength * 10.0)
 
         n_tokens = valid_mask.shape[1]
         res_type = torch.zeros(1, n_tokens, self.num_res_type, device=s.device)
