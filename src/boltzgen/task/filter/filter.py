@@ -590,7 +590,7 @@ class Filter(Task):
             "helix",
             "sheet",
         ]
-        priority_cols = [c for c in priority_col_candidates if c in self.df.columns]
+        priority_cols = list(dict.fromkeys([c for c in priority_col_candidates if c in self.df.columns]))
 
         other_cols = [col for col in self.df.columns if col not in priority_cols]
         new_column_order = priority_cols + other_cols
@@ -868,7 +868,7 @@ class Filter(Task):
             summary_metrics.insert(2, "affinity_probability_binary1")
             hist_metrics.insert(2, "affinity_probability_binary1")
 
-        avail = [m for m in summary_metrics if m in self.df.columns]
+        avail = list(dict.fromkeys([m for m in summary_metrics if m in self.df.columns]))
         base_rows = [
             ["Num designs", len(self.df), "-"],
         ]
