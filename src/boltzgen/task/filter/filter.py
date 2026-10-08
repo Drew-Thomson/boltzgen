@@ -160,6 +160,7 @@ class Filter(Task):
         filter_target_aligned: bool = False,
         filter_biased: bool = True,  # This filters out sequences that are alanine rich, 30% alanine is threshold
         refolding_rmsd_threshold: float = 2.5,
+        global_rmsd_threshold: float = None,
         modality: str = "peptide",  # peptide, antibody
         peptide_type: str = "linear",  # linear, cyclic
         alpha: float = 0.1,  # 0 = quality-only, 1 = diversity-only
@@ -189,6 +190,11 @@ class Filter(Task):
         self.modality = modality
         self.peptide_type = peptide_type
         self.size_buckets = size_buckets
+        self.refolding_rmsd_threshold = refolding_rmsd_threshold
+        if global_rmsd_threshold is None:
+            self.global_rmsd_threshold = refolding_rmsd_threshold
+        else:
+            self.global_rmsd_threshold = global_rmsd_threshold
 
         if outdir is None:
             outdir = design_dir
@@ -231,22 +237,22 @@ class Filter(Task):
         self.filters = [
             {"feature": "has_x", "lower_is_better": True, "threshold": 0},
             {
-                "feature": "filter_rmsd",
+                "feature": "local_rmsd",
                 "lower_is_better": True,
-                "threshold": refolding_rmsd_threshold,
+                "threshold": self.refolding_rmsd_threshold,
             },
             {
-                "feature": "filter_rmsd_design",
+                "feature": "global_rmsd",
                 "lower_is_better": True,
-                "threshold": refolding_rmsd_threshold,
+                "threshold": self.global_rmsd_threshold,
             },
         ]
         if filter_designfolding:
             self.filters.append(
                 {
-                    "feature": "designfolding-filter_rmsd",
+                    "feature": "designfolding_rmsd",
                     "lower_is_better": True,
-                    "threshold": refolding_rmsd_threshold,
+                    "threshold": self.refolding_rmsd_threshold,
                 }
             )
         if filter_bindingsite:
@@ -364,31 +370,39 @@ class Filter(Task):
         ).any()
         has_ligand = "ligand_burial_fraction" in df
 
+        if self.from_inverse_folded:
+            df["global_rmsd"] = df["bb_rmsd"]
+        else:
+            df["global_rmsd"] = df["rmsd"]
+
         if lattice_informative:
-            df["filter_rmsd"] = -df["neg_lattice_rmsd_refolded"]
-            df["filter_rmsd_design"] = -df["neg_lattice_rmsd_refolded"]
+            df["local_rmsd"] = -df["neg_lattice_rmsd_refolded"]
+            self.global_rmsd_threshold = 15.0
+            for filter_dict in self.filters:
+                if filter_dict.get("feature") == "global_rmsd":
+                    filter_dict["threshold"] = self.global_rmsd_threshold
         elif (
             "local_double_tape_rmsd" in df
             and (df["local_double_tape_rmsd"].fillna(0) > 0).any()
         ):
-            # Legacy CSVs stored an all-zero placeholder lattice RMSD for
-            # double_tape; use the real local RMSD so the filter can cull.
-            df["filter_rmsd"] = df["local_double_tape_rmsd"]
-            df["filter_rmsd_design"] = df["local_double_tape_rmsd"]
+            df["local_rmsd"] = df["local_double_tape_rmsd"]
+            self.global_rmsd_threshold = 15.0
+            for filter_dict in self.filters:
+                if filter_dict.get("feature") == "global_rmsd":
+                    filter_dict["threshold"] = self.global_rmsd_threshold
         elif "neg_lattice_rmsd_refolded" in df:
-            df["filter_rmsd"] = -df["neg_lattice_rmsd_refolded"]
-            df["filter_rmsd_design"] = -df["neg_lattice_rmsd_refolded"]
-        elif self.from_inverse_folded:
-            df["filter_rmsd"] = df["bb_rmsd"]
-            df["filter_rmsd_design"] = df["bb_rmsd_design"]
+            df["local_rmsd"] = -df["neg_lattice_rmsd_refolded"]
+            self.global_rmsd_threshold = 15.0
+            for filter_dict in self.filters:
+                if filter_dict.get("feature") == "global_rmsd":
+                    filter_dict["threshold"] = self.global_rmsd_threshold
         else:
-            df["filter_rmsd"] = df["rmsd"]
-            df["filter_rmsd_design"] = df["rmsd_design"]
+            df["local_rmsd"] = df["global_rmsd"]
 
         if "designfolding-rmsd" in df:
-            df["designfolding-filter_rmsd"] = df["designfolding-rmsd"]
+            df["designfolding_rmsd"] = df["designfolding-rmsd"]
         if "designfolding-bb_rmsd" in df and self.from_inverse_folded:
-            df["designfolding-filter_rmsd"] = df["designfolding-bb_rmsd"]
+            df["designfolding_rmsd"] = df["designfolding-bb_rmsd"]
         if "min_design_to_target_pae" in df:
             df["neg_min_design_to_target_pae"] = -df["min_design_to_target_pae"]
 
@@ -399,8 +413,6 @@ class Filter(Task):
                 "design_largest_hydrophobic_patch_refolded"
             ]
         df["neg_min_interaction_pae"] = -df["min_interaction_pae"]
-        df["neg_filter_rmsd"] = -df["filter_rmsd"]
-        df["neg_filter_rmsd_design"] = -df["filter_rmsd_design"]
         df["has_x"] = df["designed_sequence"].str.contains("X")
         self.df = df
 
@@ -563,10 +575,11 @@ class Filter(Task):
             if "min_design_to_target_pae" in self.df
             else "min_interaction_pae",
             "design_ptm",
-            "filter_rmsd",
-            "designfolding-filter_rmsd"
-            if "designfolding-filter_rmsd" in self.df
-            else "filter_rmsd"
+            "local_rmsd",
+            "global_rmsd",
+            "designfolding_rmsd"
+            if "designfolding_rmsd" in self.df
+            else "local_rmsd",
             "plip_saltbridge" + ("_refolded" if self.from_inverse_folded else ""),
             "plip_hbonds" + ("_refolded" if self.from_inverse_folded else ""),
             "delta_sasa_refolded",
@@ -718,10 +731,11 @@ class Filter(Task):
     def prepare_visualization(self):
         summary_metrics = [
             "num_design",
-            "filter_rmsd",
-            "designfolding-filter_rmsd"
-            if "designfolding-filter_rmsd" in self.df
-            else "filter_rmsddesign_ptm",
+            "local_rmsd",
+            "global_rmsd",
+            "designfolding_rmsd"
+            if "designfolding_rmsd" in self.df
+            else "local_rmsd",
             "design_iptm",
             "design_to_target_iptm"
             if "design_to_target_iptm" in self.df
@@ -809,10 +823,11 @@ class Filter(Task):
         # Histograms with selected overlay
         hist_metrics = [
             "num_design",
-            "filter_rmsd",
-            "designfolding-filter_rmsd"
-            if "designfolding-filter_rmsd" in self.df
-            else "filter_rmsddesign_ptm",
+            "local_rmsd",
+            "global_rmsd",
+            "designfolding_rmsd"
+            if "designfolding_rmsd" in self.df
+            else "design_ptm",
             "design_to_target_iptm"
             if "design_to_target_iptm" in self.df
             else "design_iptm",
@@ -1264,10 +1279,10 @@ class Filter(Task):
             if x in self.df.columns and y in self.df.columns:
                 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8.5, 4.5))
                 self._scatter_plus(ax1, self.df, x, y, "All samples")
-                if self.df["pass_filter_rmsd_filter"].sum() > 0:
+                if self.df["pass_local_rmsd_filter"].sum() > 0:
                     self._scatter_plus(
                         ax2,
-                        self.df[self.df["pass_filter_rmsd_filter"]],
+                        self.df[self.df["pass_local_rmsd_filter"]],
                         x,
                         y,
                         "(Designs passing RMSD threshold)",
@@ -1289,10 +1304,10 @@ class Filter(Task):
             self._hist_plus(
                 ax1, self.df[m], self.df[: self.top_budget][m], self.df_div[m], m, ""
             )
-            if self.df["pass_filter_rmsd_filter"].sum() > 0:
+            if self.df["pass_local_rmsd_filter"].sum() > 0:
                 self._hist_plus(
                     ax2,
-                    self.df[self.df["pass_filter_rmsd_filter"]][m],
+                    self.df[self.df["pass_local_rmsd_filter"]][m],
                     self.df[: self.top_budget][m],
                     self.df_div[m],
                     m,

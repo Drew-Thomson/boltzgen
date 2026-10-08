@@ -67,5 +67,5 @@ def format_metrics_override(topology: str) -> str | None:
 
 def format_additional_filters(topology: str) -> str | None:
     if topology in {"linear_tape", "double_tape", "bilayer_sheet"}:
-        return "additional_filters=[{feature: max_consecutive_ilv_sheet, lower_is_better: True, threshold: 2}, {feature: ligand_burial_fraction, lower_is_better: False, threshold: 0.70}]"
+        return "additional_filters=[{feature: max_consecutive_ilv_sheet, lower_is_better: True, threshold: 2}]"
     return None
