@@ -221,3 +221,13 @@ test_material.yaml
 PEPTIDE_MATERIALS_TOPOLOGIES.md
 roadmap.md
 ROADMAP.md
+material_out_*/
+test_out*/
+*material_spec.yaml
+test_material.yaml
+.opencode/
+
+material_layout.json
+design_params.json
+material_spec.cif
+material_spec.yaml

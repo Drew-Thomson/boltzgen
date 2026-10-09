@@ -1235,15 +1235,25 @@ class Analyze(Task):
                     bb_mask = bb_mask[:L]
                     chains = torch.unique(chain_ids[bb_mask])
                     coms = []
+                    dirs = []
                     masks = []
                     for c in chains:
                         m = (chain_ids == c) & bb_mask
-                        coms.append(coords[m].mean(dim=0))
+                        chain_coords = coords[m]
+                        coms.append(chain_coords.mean(dim=0))
+                        if len(chain_coords) >= 2:
+                            d = chain_coords[-1] - chain_coords[0]
+                            d_norm = torch.linalg.norm(d)
+                            dirs.append(d / d_norm if d_norm > 1e-6 else torch.zeros(3, device=coords.device))
+                        else:
+                            dirs.append(torch.zeros(3, device=coords.device))
                         masks.append(m)
-                    return torch.stack(coms), chains, masks
+                    if not coms:
+                        return torch.empty((0, 3)), torch.empty((0, 3)), chains, masks
+                    return torch.stack(coms), torch.stack(dirs), chains, masks
                     
-                coms_ideal, chains_ideal, masks_ideal = get_coms(coords_ideal, atom_asym_id_ideal, bb_mask_ideal)
-                coms_refold, chains_refold, masks_refold = get_coms(coords_refold, atom_asym_id_refold, bb_mask_refold)
+                coms_ideal, dirs_ideal, chains_ideal, masks_ideal = get_coms(coords_ideal, atom_asym_id_ideal, bb_mask_ideal)
+                coms_refold, dirs_refold, chains_refold, masks_refold = get_coms(coords_refold, atom_asym_id_refold, bb_mask_refold)
                 
                 num_chains = len(chains_ideal)
                 
@@ -1278,35 +1288,52 @@ class Analyze(Task):
                         topology = os.environ.get("MAT_TOPOLOGY", "floating")
                         
                         if topology == "double_tape":
-                            # Sort by ideal index to group pairs correctly
-                            aligned_r_dict = {i_idx: coords_refold[masks_refold[r_idx]] for r_idx, i_idx in zip(row_ind, col_ind) if masks_refold[r_idx].sum() == masks_ideal[i_idx].sum()}
-                            aligned_i_dict = {i_idx: coords_ideal[masks_ideal[i_idx]] for r_idx, i_idx in zip(row_ind, col_ind) if masks_refold[r_idx].sum() == masks_ideal[i_idx].sum()}
-                            
-                            # check homomer (if all chains are the same length and we know from MAT_SCREEN_TYPE)
-                            # the prompt said "for homomers return 0.0"
                             screen_type = os.environ.get("MAT_SCREEN_TYPE", "")
                             if screen_type == "homomer" or len(coms_ideal) == 1:
                                 metrics["local_double_tape_rmsd"] = 0.0
                             else:
-                                rmsds = []
-                                for i in range(0, num_chains, 2):
-                                    if i in aligned_r_dict and (i+1) in aligned_r_dict:
-                                        cr = torch.cat([aligned_r_dict[i], aligned_r_dict[i+1]])
-                                        ci = torch.cat([aligned_i_dict[i], aligned_i_dict[i+1]])
+                                # 1. Partner mapping errors (Assuming A-B-A-B mapped to A:0,1,4,5... B:2,3,6,7...)
+                                seq_errors = sum(1 for u, ideal_u in enumerate(col_ind) if (u // 2) % 2 != (ideal_u // 2) % 2)
+                                
+                                # 2. Graph topology errors
+                                refold_edges = set()
+                                for u in range(num_chains):
+                                    for v in range(u + 1, num_chains):
+                                        if torch.linalg.norm(coms_refold[u] - coms_refold[v]).item() < 6.0:
+                                            refold_edges.add((u, v))
+                                            
+                                ideal_edges = set()
+                                for i in range(num_chains):
+                                    for j in range(i + 1, num_chains):
+                                        if torch.linalg.norm(coms_ideal[i] - coms_ideal[j]).item() < 6.0:
+                                            ideal_edges.add((i, j))
+                                            
+                                ideal_to_refold = {ideal_idx: refold_idx for refold_idx, ideal_idx in enumerate(col_ind)}
+                                mapped_ideal_edges = set()
+                                for i, j in ideal_edges:
+                                    u, v = ideal_to_refold.get(i), ideal_to_refold.get(j)
+                                    if u is not None and v is not None:
+                                        mapped_ideal_edges.add((min(u, v), max(u, v)))
+                                    
+                                missing_edges = len(mapped_ideal_edges - refold_edges)
+                                extra_edges = len(refold_edges - mapped_ideal_edges)
+                                
+                                # 3. Orientation errors for correctly formed edges
+                                orientation_errors = 0
+                                correct_edges = mapped_ideal_edges.intersection(refold_edges)
+                                for u, v in correct_edges:
+                                    dot_refold = torch.dot(dirs_refold[u], dirs_refold[v]).item()
+                                    # find the ideal indices for these refolded indices
+                                    # Since u, v are in mapped_ideal_edges, they MUST be in col_ind mapping
+                                    ideal_u = col_ind[list(row_ind).index(u)]
+                                    ideal_v = col_ind[list(row_ind).index(v)]
+                                    dot_ideal = torch.dot(dirs_ideal[ideal_u], dirs_ideal[ideal_v]).item()
+                                    if (dot_refold > 0) != (dot_ideal > 0):
+                                        orientation_errors += 1
                                         
-                                        P = cr - cr.mean(dim=0)
-                                        Q = ci - ci.mean(dim=0)
-                                        H = P.T @ Q
-                                        U, S, Vh = torch.linalg.svd(H)
-                                        d = torch.sign(torch.det(U @ Vh))
-                                        D = torch.eye(3, device=P.device, dtype=P.dtype)
-                                        D[2, 2] = d
-                                        R = U @ D @ Vh
-                                        cr_aligned = P @ R
-                                        
-                                        rmsd = torch.sqrt(torch.mean((cr_aligned - Q)**2)).item()
-                                        rmsds.append(rmsd)
-                                metrics["local_double_tape_rmsd"] = float(np.mean(rmsds)) if rmsds else 0.0
+                                total_error = seq_errors + missing_edges + extra_edges + orientation_errors
+                                metrics["local_double_tape_rmsd"] = float(total_error)
+                                
                             metrics["neg_lattice_rmsd_refolded"] = -metrics["local_double_tape_rmsd"]
                             
                             # Calculate chi_outward

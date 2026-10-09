@@ -413,6 +413,8 @@ class Filter(Task):
                 "design_largest_hydrophobic_patch_refolded"
             ]
         df["neg_min_interaction_pae"] = -df["min_interaction_pae"]
+        if "outward_ilv_fraction" in df:
+            df["neg_outward_ilv_fraction"] = -df["outward_ilv_fraction"]
         df["has_x"] = df["designed_sequence"].str.contains("X")
         self.df = df
 

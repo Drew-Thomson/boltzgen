@@ -1,0 +1,10 @@
+# Configuration for material_builder.py (not a direct boltzgen design spec).
+topology: cage_octahedral
+copies: 24
+asym_unit_size: 1
+length: 15
+secondary_structure: H
+target_cage_radius: 35.0
+guidance_scale: 1.0
+num_designs: 5
+output_dir: material_cage_octahedral_out

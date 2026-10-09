@@ -22,13 +22,13 @@ def material_filtering_overrides(topology: str) -> dict[str, Any] | None:
     if topology in {"linear_tape", "double_tape", "bilayer_sheet"}:
         overrides = {
             "ligand_burial_fraction": 1,
-            "neg_min_design_to_target_pae": 1,
+            "neg_min_interaction_pae": 1,
             "neg_outward_ilv_fraction": 1,
-            "neg_design_largest_hydrophobic_patch_refolded": 2,
+            "neg_design_hydrophobicity": 2,
             "neg_max_consecutive_ilv_sheet": 2,
             "complex_plddt": 1,
             "design_to_target_iptm": None,
-            "neg_lattice_rmsd_refolded": None,
+            "neg_lattice_rmsd_refolded": 1,
         }
         if topology == "bilayer_sheet":
             overrides.update({
