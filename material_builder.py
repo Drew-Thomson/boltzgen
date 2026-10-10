@@ -162,8 +162,8 @@ def main():
     parser.add_argument(
         "--target_max_rmsd",
         type=float,
-        default=100.0,
-        help="Maximum allowed target backbone RMSD for target models before discarding without running counter-screens (default: 100.0)",
+        default=None,
+        help="Optional maximum local RMSD for target models before counter-screening (default: use the filtering RMSD threshold)",
     )
     parser.add_argument(
         "--target_min_plddt",
@@ -417,7 +417,7 @@ def main():
                 cmd.extend(["--max_surviving_designs", str(args.max_surviving_designs)])
             if hasattr(args, "anti_correlation_strength"):
                 cmd.extend(["--anti_correlation_strength", str(args.anti_correlation_strength)])
-            if hasattr(args, "target_max_rmsd"):
+            if args.target_max_rmsd is not None:
                 cmd.extend(["--target_max_rmsd", str(args.target_max_rmsd)])
             if hasattr(args, "target_min_plddt"):
                 cmd.extend(["--target_min_plddt", str(args.target_min_plddt)])

@@ -163,6 +163,86 @@ def test_boltzgen_cli_underscore_flags_and_aliases():
     assert args_alias.double_tape_aromatic_bias == 0.9
 
 
+def test_counter_screen_rmsd_threshold_defaults_to_effective_filter_threshold():
+    from boltzgen.cli.boltzgen import _effective_refolding_rmsd_threshold
+
+    assert _effective_refolding_rmsd_threshold([], None) == 2.5
+    assert _effective_refolding_rmsd_threshold([], 4.0) == 4.0
+    # A per-step config override is appended after the CLI option and wins.
+    assert (
+        _effective_refolding_rmsd_threshold(
+            ["refolding_rmsd_threshold=3.5"], 4.0
+        )
+        == 3.5
+    )
+    assert (
+        _effective_refolding_rmsd_threshold(
+            ["other_option=true", "refolding_rmsd_threshold=5"], None
+        )
+        == 5.0
+    )
+
+
+def test_heteromer_pipeline_uses_local_filter_threshold_for_candidate_culling(
+    monkeypatch, tmp_path
+):
+    import json
+
+    import boltzgen.cli.boltzgen as boltzgen_cli
+
+    spec = tmp_path / "material.yaml"
+    spec.write_text("entities: []\n")
+    (tmp_path / "material_layout.json").write_text(
+        json.dumps(
+            {
+                "copies": 4,
+                "heteromer_screening": {
+                    "enabled": True,
+                    "topology": "double_tape",
+                    "topology_params": {},
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(boltzgen_cli.torch.cuda, "get_device_capability", lambda: (8, 0))
+    monkeypatch.setattr(
+        boltzgen_cli,
+        "get_artifact_path",
+        lambda *args, **kwargs: Path("dummy_checkpoint"),
+    )
+
+    parser = boltzgen_cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run",
+            str(spec),
+            "--protocol",
+            "peptide-anything",
+            "--heteromer_counter_screen",
+            "--use_kernels",
+            "false",
+        ]
+    )
+    args.output = tmp_path / "out"
+    args.config_dir = Path("test_config")
+    args.design_checkpoints = ["dummy_checkpoint"]
+
+    pipeline = boltzgen_cli.BinderDesignPipeline(args, Path("dummy_moldir"))
+    culling_step = next(step for step in pipeline.steps if step.name == "filter_target_candidates")
+    assert "max_rmsd=2.0" in culling_step.args
+
+    args.config = [["filtering", "refolding_rmsd_threshold=5.0"]]
+    pipeline = boltzgen_cli.BinderDesignPipeline(args, Path("dummy_moldir"))
+    culling_step = next(step for step in pipeline.steps if step.name == "filter_target_candidates")
+    assert "max_rmsd=5.0" in culling_step.args
+
+    args.config = None
+    args.target_max_rmsd = 8.0
+    pipeline = boltzgen_cli.BinderDesignPipeline(args, Path("dummy_moldir"))
+    culling_step = next(step for step in pipeline.steps if step.name == "filter_target_candidates")
+    assert "max_rmsd=8.0" in culling_step.args
+
+
 def test_material_builder_underscore_and_alias_args(monkeypatch, tmp_path):
     root_dir = Path(__file__).resolve().parent.parent
     if str(root_dir) not in sys.path:

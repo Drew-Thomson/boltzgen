@@ -225,6 +225,7 @@ Do not mark implementation complete until targeted tests pass, full-suite result
 - [x] Step 8 — Added focused tests and documented the supported feature in `topologies.md`.
 - [x] Policy safeguard — Ligand-bearing heteromer specs are rejected for this screen with an explicit ternary-assembly explanation; ligand-free heteromer designs remain supported.
 - [ ] Step 9 — Examples and full end-to-end validation remain pending.
+- [x] Step 10 — Counter-screen candidate culling now defaults to the effective final local RMSD threshold (including material topology presets and filtering config overrides); explicit `--target_max_rmsd` remains an override. Added regression tests for threshold resolution and double-tape local RMSD culling.
 
 ### Verification run
 
@@ -232,5 +233,7 @@ Do not mark implementation complete until targeted tests pass, full-suite result
 - Passed focused tests: 53 passed across material builder/layout, guidance masks, existing material metrics, counter-screen helpers, analysis, and filtering. One environment warning reports an older `numexpr` version than pandas recommends.
 - `python material_builder.py --help` confirms the new opt-in flag is registered.
 - `git diff --check` passed.
+- Passed counter-screen culling regression tests: `pytest tests/test_cli_sampling.py tests/test_filter_target_candidates.py -q` (8 passed), including pipeline threshold inheritance, explicit override, filtering config override, and double-tape local RMSD culling.
+- Passed Python compile checks for `material_builder.py`, CLI, culling task and its test.
 - Full `pytest tests/` collection is blocked by the pre-existing untracked `tests/test_materials.py`, which imports `OCTAHEDRAL_ROTATIONS` from the current `materials.py` implementation although that symbol is not present in the checked-in implementation. This task did not alter that untracked test or the topology implementation to satisfy it.
 - GPU end-to-end execution was not run. The counter-screen CIF/NPZ preparation path and pipeline orchestration still need runtime validation before this feature is considered complete.

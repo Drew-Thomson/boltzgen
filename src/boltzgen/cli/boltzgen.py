@@ -232,8 +232,8 @@ def add_configure_arguments(
         "--target_max_rmsd",
         "--target-max-rmsd",
         type=float,
-        default=100.0,
-        help="Maximum allowed target backbone RMSD for target models before discarding without running counter-screens (default: 100.0)",
+        default=None,
+        help="Optional maximum local RMSD for target models before counter-screening (default: use the filtering RMSD threshold)",
     )
     p.add_argument(
         "--target_min_plddt",
@@ -1054,6 +1054,17 @@ class BinderDesignPipeline:
             protocol_config, args.config, step_names
         )
 
+        # Counter-screen candidate culling must use the same local RMSD cutoff
+        # as final filtering unless the caller explicitly asks for a different
+        # target_max_rmsd. The filtering step consumes protocol/config overrides
+        # after the CLI filtering args, so its last configured value wins here.
+        target_max_rmsd = args.target_max_rmsd
+        if target_max_rmsd is None:
+            target_max_rmsd = _effective_refolding_rmsd_threshold(
+                config_args_by_step.get("filtering", []),
+                args.refolding_rmsd_threshold,
+            )
+
         devices = (
             args.devices if args.devices is not None else torch.cuda.device_count()
         )
@@ -1382,7 +1393,7 @@ class BinderDesignPipeline:
                     config_path=args.config_dir / "filter_target_candidates.yaml",
                     args=[
                         f"design_dir={input_dir}",
-                        f"max_rmsd={args.target_max_rmsd}",
+                        f"max_rmsd={target_max_rmsd}",
                         f"min_complex_plddt={args.target_min_plddt}",
                         f"topology={topology}",
                     ],
@@ -1676,6 +1687,23 @@ def parse_config_args(base_config, config_args, valid_step_names):
             key_value_pairs = config[1:]
             config_args_by_step[step_name].extend(key_value_pairs)
     return config_args_by_step
+
+
+def _effective_refolding_rmsd_threshold(
+    filtering_config_args: List[str], cli_threshold: float | None
+) -> float:
+    """Resolve the local RMSD cutoff used by final filtering.
+
+    The filtering task defaults to 2.5 A. The CLI RMSD option is appended
+    before per-step config overrides, so explicit filtering config arguments
+    take precedence over the CLI value, matching Hydra's actual merge order.
+    """
+    threshold = 2.5 if cli_threshold is None else cli_threshold
+    for override in filtering_config_args:
+        key, separator, value = override.partition("=")
+        if separator and key == "refolding_rmsd_threshold":
+            threshold = float(value)
+    return threshold
 
 
 ### Filtering argument parsing functions ####
