@@ -372,3 +372,27 @@ def test_material_builder_underscore_and_alias_args(monkeypatch, tmp_path):
     assert (
         cmd_args_alias[cmd_args_alias.index("--double_tape_aromatic_bias") + 1] == "0.7"
     )
+
+    # 3. Test running material_builder with anti_correlation_strength WITHOUT heteromer_counter_screen
+    cmd_args_no_cs = []
+    monkeypatch.setattr(
+        material_builder.subprocess,
+        "run",
+        lambda cmd, check=True: cmd_args_no_cs.extend(cmd),
+    )
+    test_args_no_cs = [
+        "material_builder.py",
+        "--config",
+        str(config_file),
+        "--anti_correlation_strength",
+        "2.5",
+        "--run",
+    ]
+    monkeypatch.setattr(sys, "argv", test_args_no_cs)
+    material_builder.main()
+
+    assert "--heteromer_counter_screen" not in cmd_args_no_cs
+    assert "--anti_correlation_strength" in cmd_args_no_cs
+    assert (
+        cmd_args_no_cs[cmd_args_no_cs.index("--anti_correlation_strength") + 1] == "2.5"
+    )

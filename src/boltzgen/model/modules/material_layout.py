@@ -146,6 +146,7 @@ def expand_material_spec(
 
     supported_heteromer_topologies = {
         "cyclic",
+        "cylindrical",
         "linear_tape",
         "double_tape",
         "open_arc",
@@ -484,7 +485,7 @@ def build_heteromer_counter_screen_specs(
         raise ValueError("both partner sequences must be non-empty strings")
     if isinstance(copies, bool) or not isinstance(copies, int) or copies < 2 or copies % 2:
         raise ValueError("heteromer counter-screen copies must be a positive even integer")
-    if topology not in {"cyclic", "linear_tape", "double_tape", "open_arc", "helical"}:
+    if topology not in {"cyclic", "cylindrical", "linear_tape", "double_tape", "open_arc", "helical"}:
         raise ValueError(f"Unsupported counter-screen topology: {topology}")
     if not isinstance(parent_design_id, str) or not parent_design_id:
         raise ValueError("parent_design_id must be a non-empty string")

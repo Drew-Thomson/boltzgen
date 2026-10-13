@@ -71,3 +71,70 @@ def test_simulated_heteromer_fold_flip_unfold():
         dir_1 = strand_direction(layer_chains[1][step])
         dot = torch.dot(dir_0, dir_1)
         assert dot < -0.99, f"Cross-layer parallel at step {step}"
+
+
+def test_align_consensus_to_double_tape_arbitrary_rotations():
+    from boltzgen.model.modules.materials import align_consensus_to_double_tape
+
+    # Synthetic 9-mer strand coordinates (~26 A long along an arbitrary axis)
+    torch.manual_seed(42)
+    coords = torch.zeros((9, 3))
+    coords[:, 0] = torch.linspace(-13.0, 13.0, 9)
+
+    # Apply random 3D rotation
+    q, _ = torch.linalg.qr(torch.randn(3, 3))
+    rotated_coords = torch.matmul(coords, q.T)
+
+    aligned = align_consensus_to_double_tape(rotated_coords)
+    assert aligned.shape == (9, 3)
+
+    # Check centered
+    assert torch.allclose(aligned.mean(dim=0), torch.zeros(3), atol=1e-5)
+
+    # Check primary PCA axis lies along Y
+    u_mat, _, _ = torch.linalg.svd(aligned.T @ aligned)
+    assert abs(float(u_mat[1, 0])) > 0.999
+
+    # Check N->C direction points along +Y
+    dir_aligned = strand_direction(aligned)
+    assert torch.allclose(dir_aligned, torch.tensor([0.0, 1.0, 0.0]), atol=1e-3)
+
+
+def test_align_consensus_to_double_tape_prevents_layer_overlap():
+    from boltzgen.model.modules.materials import (
+        align_consensus_to_double_tape,
+        generate_ideal_lattice,
+    )
+
+    # 9-residue extended strand (~26 A long, wider than 8.5 A layer spacing)
+    torch.manual_seed(42)
+    strand = torch.zeros((9, 3))
+    strand[:, 0] = torch.linspace(-13.0, 13.0, 9)  # Intentionally oriented along X (bilayer normal)
+
+    aligned = align_consensus_to_double_tape(strand)
+
+    # Verify extent along X is collapsed to 0 for linear model
+    assert float(aligned[:, 0].abs().max()) < 1e-4
+
+    # Generate ideal lattice for double_tape (16 chains, 8.5 A layer distance)
+    coms, _ = generate_ideal_lattice(
+        "double_tape",
+        16,
+        1,
+        {"layer_dist": 8.5, "target_pitch": 4.8},
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+
+    device = torch.device("cpu")
+    dtype = torch.float32
+
+    # Layer 0 (chain 0, X = -4.25) vs Layer 1 (chain 1, X = +4.25)
+    flip_0 = double_tape_antiparallel_rotation(0, device=device, dtype=dtype)
+    flip_1 = double_tape_antiparallel_rotation(1, device=device, dtype=dtype)
+
+    chain_0 = torch.matmul(aligned, flip_0.T) + coms[0]
+    chain_1 = torch.matmul(aligned, flip_1.T) + coms[1]
+
+    min_dist = float(torch.min(torch.cdist(chain_0, chain_1)))
+    assert min_dist >= 8.4, f"Expected clearance >= 8.4 A, got {min_dist:.2f} A"

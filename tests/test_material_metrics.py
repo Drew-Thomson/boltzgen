@@ -1,6 +1,6 @@
 """CPU tests for material analysis metrics and ranking presets."""
 
-# ruff: noqa: INP001
+# ruff: noqa: INP001, ANN201
 
 from __future__ import annotations
 
@@ -11,15 +11,16 @@ import pytest
 import torch
 
 from boltzgen.task.analyze.analyze import Analyze
+from boltzgen.task.analyze.analyze_utils import heteromer_counter_screen_contrasts
 from boltzgen.task.analyze.material_metrics import (
     backbone_ca_coords,
     cage_metrics,
     compute_material_metrics,
+    compute_two_chain_alternating_metrics,
     pore_aspect_ratio,
     sheet_planarity,
     void_radius,
 )
-from boltzgen.task.analyze.analyze_utils import heteromer_counter_screen_contrasts
 from boltzgen.task.filter.material_presets import (
     format_metrics_override,
     heteromer_filtering_overrides,
@@ -203,3 +204,164 @@ def test_filtering_presets_orient_metrics_and_exclude_cage_target_metrics() -> N
 def test_analyze_material_metric_toggle_defaults_on() -> None:
     parameter = inspect.signature(Analyze.__init__).parameters["material_metrics"]
     assert parameter.default is True
+
+
+def test_two_chain_alternating_metrics_perfect_and_parity_flip() -> None:
+    torch.manual_seed(42)
+    chains = 4
+    atoms_per_chain = 16
+    pitch = 4.8
+
+    base_chain = torch.tensor(
+        [
+            [0.0, 0.0, 0.0],
+            [1.4, 0.0, 0.0],
+            [2.0, 1.2, 0.0],
+            [1.5, 2.3, 0.0],
+        ]
+        * 4,
+        dtype=torch.float32,
+    )
+
+    ideal_coords_list = []
+    ideal_chain_ids_list = []
+    partner_slots_ideal = {}
+
+    for c in range(chains):
+        chain_coords = base_chain.clone()
+        chain_coords[:, 2] += c * pitch
+        ideal_coords_list.append(chain_coords)
+        ideal_chain_ids_list.append(torch.full((atoms_per_chain,), c, dtype=torch.long))
+        partner_slots_ideal[c] = c % 2
+
+    coords_ideal = torch.cat(ideal_coords_list)
+    chain_ids_ideal = torch.cat(ideal_chain_ids_list)
+    bb_mask = torch.ones(coords_ideal.shape[0], dtype=torch.bool)
+
+    # 1. Perfect matching (A-B-A-B)
+    res_perfect = compute_two_chain_alternating_metrics(
+        coords_refold=coords_ideal,
+        coords_ideal=coords_ideal,
+        chain_ids_refold=chain_ids_ideal,
+        chain_ids_ideal=chain_ids_ideal,
+        partner_slots_refold=partner_slots_ideal,
+        partner_slots_ideal=partner_slots_ideal,
+        bb_mask_refold=bb_mask,
+        bb_mask_ideal=bb_mask,
+    )
+    assert res_perfect["two_chain_alternation_ratio"] == pytest.approx(1.0)
+    assert res_perfect["lattice_rmsd_geom"] == pytest.approx(0.0, abs=1e-5)
+    assert res_perfect["lattice_rmsd_refolded"] == pytest.approx(0.0, abs=1e-5)
+
+    # 2. Parity flipped / shifted (B-A-B-A)
+    partner_slots_flipped = {c: (c + 1) % 2 for c in range(chains)}
+    res_flipped = compute_two_chain_alternating_metrics(
+        coords_refold=coords_ideal,
+        coords_ideal=coords_ideal,
+        chain_ids_refold=chain_ids_ideal,
+        chain_ids_ideal=chain_ids_ideal,
+        partner_slots_refold=partner_slots_flipped,
+        partner_slots_ideal=partner_slots_ideal,
+        bb_mask_refold=bb_mask,
+        bb_mask_ideal=bb_mask,
+    )
+    assert res_flipped["two_chain_alternation_ratio"] == pytest.approx(1.0)
+    assert res_flipped["lattice_rmsd_phase_1"] == pytest.approx(0.0, abs=1e-5)
+    assert res_flipped["lattice_rmsd_geom"] == pytest.approx(0.0, abs=1e-5)
+    assert res_flipped["lattice_rmsd_refolded"] == pytest.approx(0.0, abs=1e-5)
+
+
+def test_two_chain_alternating_metrics_homomeric_defect_penalized() -> None:
+    torch.manual_seed(42)
+    chains = 4
+    atoms_per_chain = 16
+    pitch = 4.8
+    base_chain = torch.tensor(
+        [
+            [0.0, 0.0, 0.0],
+            [1.4, 0.0, 0.0],
+            [2.0, 1.2, 0.0],
+            [1.5, 2.3, 0.0],
+        ]
+        * 4,
+        dtype=torch.float32,
+    )
+    coords_list = [base_chain.clone() for _ in range(chains)]
+    for c in range(chains):
+        coords_list[c][:, 2] += c * pitch
+    coords = torch.cat(coords_list)
+    chain_ids = torch.cat(
+        [torch.full((atoms_per_chain,), c, dtype=torch.long) for c in range(chains)]
+    )
+    bb_mask = torch.ones(coords.shape[0], dtype=torch.bool)
+
+    partner_slots_ideal = {0: 0, 1: 1, 2: 0, 3: 1}  # A-B-A-B
+    partner_slots_defective = {0: 0, 1: 0, 2: 1, 3: 1}  # A-A-B-B
+
+    res = compute_two_chain_alternating_metrics(
+        coords_refold=coords,
+        coords_ideal=coords,
+        chain_ids_refold=chain_ids,
+        chain_ids_ideal=chain_ids,
+        partner_slots_refold=partner_slots_defective,
+        partner_slots_ideal=partner_slots_ideal,
+        bb_mask_refold=bb_mask,
+        bb_mask_ideal=bb_mask,
+        lambda_penalty=5.0,
+    )
+    assert res["two_chain_homomeric_contacts"] > 0
+    assert res["two_chain_alternation_ratio"] < 1.0
+    assert res["lattice_rmsd_refolded"] > res["lattice_rmsd_geom"]
+
+
+def test_two_chain_alternating_metrics_se3_invariance() -> None:
+    torch.manual_seed(42)
+    chains = 4
+    atoms_per_chain = 16
+    pitch = 4.8
+    base_chain = torch.tensor(
+        [
+            [0.0, 0.0, 0.0],
+            [1.4, 0.0, 0.0],
+            [2.0, 1.2, 0.0],
+            [1.5, 2.3, 0.0],
+        ]
+        * 4,
+        dtype=torch.float32,
+    )
+    coords_list = [base_chain.clone() for _ in range(chains)]
+    for c in range(chains):
+        coords_list[c][:, 2] += c * pitch
+    coords_ideal = torch.cat(coords_list)
+    chain_ids = torch.cat(
+        [torch.full((atoms_per_chain,), c, dtype=torch.long) for c in range(chains)]
+    )
+    bb_mask = torch.ones(coords_ideal.shape[0], dtype=torch.bool)
+    partner_slots = {0: 0, 1: 1, 2: 0, 3: 1}
+
+    theta = math.pi / 2
+    r_mat = torch.tensor(
+        [
+            [math.cos(theta), -math.sin(theta), 0.0],
+            [math.sin(theta), math.cos(theta), 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=torch.float32,
+    )
+    t_vec = torch.tensor([15.0, -20.0, 30.0], dtype=torch.float32)
+    coords_rotated = (coords_ideal @ r_mat) + t_vec
+
+    res = compute_two_chain_alternating_metrics(
+        coords_refold=coords_rotated,
+        coords_ideal=coords_ideal,
+        chain_ids_refold=chain_ids,
+        chain_ids_ideal=chain_ids,
+        partner_slots_refold=partner_slots,
+        partner_slots_ideal=partner_slots,
+        bb_mask_refold=bb_mask,
+        bb_mask_ideal=bb_mask,
+    )
+    assert res["lattice_rmsd_geom"] == pytest.approx(0.0, abs=1e-4)
+    assert res["lattice_rmsd_refolded"] == pytest.approx(0.0, abs=1e-4)
+    assert res["two_chain_alternation_ratio"] == pytest.approx(1.0)
+

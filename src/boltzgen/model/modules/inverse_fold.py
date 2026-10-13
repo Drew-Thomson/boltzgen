@@ -520,7 +520,7 @@ class InverseFoldingDecoder(nn.Module):
         sampling_temperature: float = 0.1,
         tie_symmetric_sequences: bool = True,
         heteromer_anti_correlation: bool = False,
-        anti_correlation_strength: float = 2.0,
+        anti_correlation_strength: float = 0.0,
         double_tape_core_bias: float = 0.0,
         double_tape_aromatic_bias: float = 0.0,
         double_tape_polar_bias: float = 0.0,
@@ -550,7 +550,7 @@ class InverseFoldingDecoder(nn.Module):
         self.inverse_fold_restriction = inverse_fold_restriction
         self.sampling_temperature = sampling_temperature
         self.tie_symmetric_sequences = tie_symmetric_sequences
-        self.heteromer_anti_correlation = heteromer_anti_correlation
+        self.heteromer_anti_correlation = heteromer_anti_correlation or (anti_correlation_strength > 0.0)
         self.anti_correlation_strength = anti_correlation_strength
         self.double_tape_core_bias = double_tape_core_bias
         self.double_tape_aromatic_bias = double_tape_aromatic_bias

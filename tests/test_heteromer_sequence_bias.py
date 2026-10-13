@@ -62,14 +62,29 @@ def test_parse_residue_constraints_with_bias():
 
 
 def test_anti_correlation_decoder():
-    decoder = InverseFoldingDecoder(
+    decoder_default = InverseFoldingDecoder(
+        atom_s=1, atom_z=1, token_s=1, token_z=1,
+        node_dim=1, pair_dim=1, hidden_dim=1,
+    )
+    assert decoder_default.heteromer_anti_correlation is False
+    assert decoder_default.anti_correlation_strength == 0.0
+
+    decoder_auto = InverseFoldingDecoder(
+        atom_s=1, atom_z=1, token_s=1, token_z=1,
+        node_dim=1, pair_dim=1, hidden_dim=1,
+        anti_correlation_strength=2.0,
+    )
+    assert decoder_auto.heteromer_anti_correlation is True
+    assert decoder_auto.anti_correlation_strength == 2.0
+
+    decoder_explicit = InverseFoldingDecoder(
         atom_s=1, atom_z=1, token_s=1, token_z=1,
         node_dim=1, pair_dim=1, hidden_dim=1,
         heteromer_anti_correlation=True,
-        anti_correlation_strength=2.0
+        anti_correlation_strength=2.0,
     )
-    assert decoder.heteromer_anti_correlation is True
-    assert decoder.anti_correlation_strength == 2.0
+    assert decoder_explicit.heteromer_anti_correlation is True
+    assert decoder_explicit.anti_correlation_strength == 2.0
 
 
 def test_filter_identity_pairs_missing_dir():

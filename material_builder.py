@@ -97,13 +97,15 @@ def main():
     parser.add_argument("--num_designs", type=int, default=1, help="Number of design candidates to generate")
     parser.add_argument("--diffusion_batch_size", type=int, default=1, help="Number of diffusion samples per trunk run (default: 1)")
     parser.add_argument("--asym_unit_size", type=int, default=1, help="Number of chains in the asymmetric unit")
-    parser.add_argument("--topology", type=str, choices=["floating", "cyclic", "linear_tape", "double_tape", "helical", "open_arc", "cage_tetrahedral", "cage_octahedral", "bilayer_sheet", "hexagonal_mesh", "nanotube", "multi_helical"], default="floating", help="Topology constraint during diffusion")
+    parser.add_argument("--topology", type=str, choices=["floating", "cyclic", "cylindrical", "linear_tape", "double_tape", "helical", "open_arc", "cage_tetrahedral", "cage_octahedral", "bilayer_sheet", "hexagonal_mesh", "nanotube", "multi_helical"], default="floating", help="Topology constraint during diffusion")
     parser.add_argument("--guidance_scale", type=float, default=1.0, help="Strength of the shape guidance")
     parser.add_argument("--target_pitch", type=float, default=4.8, help="Target spacing between adjacent chains for tapes (A)")
     parser.add_argument("--layer_dist", type=float, default=10.0, help="Target distance between the two layers in double_tape (A)")
-    parser.add_argument("--target_radius", type=float, default=15.0, help="Target radius for cyclic/helical (A)")
-    parser.add_argument("--target_dz", type=float, default=None, help="Target axial translation per chain for helical / nanotube tier pitch (A)")
-    parser.add_argument("--target_angle", type=float, default=30.0, help="Target rotation angle per chain for helical (degrees)")
+    parser.add_argument("--target_radius", type=float, default=15.0, help="Target radius for cyclic/cylindrical/helical (A)")
+    parser.add_argument("--target_dz", type=float, default=None, help="Target axial translation per chain for helical / nanotube tier pitch / cylindrical intra-unit stagger (A)")
+    parser.add_argument("--target_angle", type=float, default=None, help="Target rotation angle per chain for helical / cylindrical (degrees)")
+    parser.add_argument("--radius_noise", type=float, default=None, help="Standard deviation of noise to add to the cylinder radius (A); defaults to spacing_noise")
+    parser.add_argument("--slide_noise", type=float, default=None, help="Standard deviation of noise to add to the intra-unit helix slide vector (A); defaults to spacing_noise")
     parser.add_argument("--arc_radius", type=float, default=100.0, help="Target radius of curvature for open_arc (A)")
     parser.add_argument("--target_arc_spacing", type=float, default=10.0, help="Target spacing between adjacent chains along the arc (A)")
     parser.add_argument("--target_cage_radius", type=float, default=None, help="Target cage radius (A); defaults to 20.0 for tetrahedral and 35.0 for octahedral cages")
@@ -156,8 +158,8 @@ def main():
         "--anti_correlation_strength",
         "--anti-correlation-strength",
         type=float,
-        default=2.0,
-        help="Strength of cross-partner anti-correlation applied during inverse folding (default: 2.0)",
+        default=0.0,
+        help="Strength of cross-partner anti-correlation applied during inverse folding (default: 0.0)",
     )
     parser.add_argument(
         "--target_max_rmsd",
@@ -247,6 +249,7 @@ def main():
 
     supported_heteromer_topologies = {
         "cyclic",
+        "cylindrical",
         "linear_tape",
         "double_tape",
         "open_arc",
@@ -268,7 +271,7 @@ def main():
             )
         if args.topology not in supported_heteromer_topologies:
             parser.error(
-                "--heteromer_counter_screen supports cyclic, linear_tape, "
+                "--heteromer_counter_screen supports cyclic, cylindrical, linear_tape, "
                 "double_tape, open_arc, and helical topologies"
             )
         if args.copies % 2:
@@ -280,7 +283,18 @@ def main():
         parser.error("--grid_dim_x and --grid_dim_y must be positive")
 
     if args.target_dz is None:
-        args.target_dz = 4.8 if args.topology == "nanotube" else 5.0
+        if args.topology == "nanotube":
+            args.target_dz = 4.8
+        elif args.topology == "cylindrical":
+            args.target_dz = 0.0
+        else:
+            args.target_dz = 5.0
+
+    if args.target_angle is None:
+        if args.topology == "cylindrical":
+            args.target_angle = 0.0
+        else:
+            args.target_angle = 30.0
 
     if args.ring_size < 1 or args.num_tiers < 1 or args.num_starts < 1:
         parser.error("--ring_size, --num_tiers, and --num_starts must be positive")
@@ -359,6 +373,14 @@ def main():
     os.environ["MAT_ARC_RADIUS"] = str(args.arc_radius)
     os.environ["MAT_TARGET_ARC_SPACING"] = str(args.target_arc_spacing)
     os.environ["MAT_SPACING_NOISE"] = str(args.spacing_noise)
+    if args.radius_noise is not None:
+        os.environ["MAT_RADIUS_NOISE"] = str(args.radius_noise)
+    else:
+        os.environ.pop("MAT_RADIUS_NOISE", None)
+    if args.slide_noise is not None:
+        os.environ["MAT_SLIDE_NOISE"] = str(args.slide_noise)
+    else:
+        os.environ.pop("MAT_SLIDE_NOISE", None)
     os.environ["MAT_ANTIPARALLEL_PROB"] = str(args.antiparallel_prob)
     os.environ["MAT_LAYER_DIST"] = str(args.layer_dist)
     os.environ["MAT_TARGET_CAGE_RADIUS"] = str(args.target_cage_radius)
@@ -389,6 +411,8 @@ def main():
             "arc_radius": args.arc_radius,
             "target_arc_spacing": args.target_arc_spacing,
             "layer_dist": args.layer_dist,
+            "radius_noise": args.radius_noise,
+            "slide_noise": args.slide_noise,
         },
         charge_bias_strength=args.heteromer_charge_bias,
     )
@@ -415,12 +439,13 @@ def main():
                 cmd.extend(["--max_partner_identity", str(args.max_partner_identity)])
             if hasattr(args, "max_surviving_designs") and args.max_surviving_designs is not None:
                 cmd.extend(["--max_surviving_designs", str(args.max_surviving_designs)])
-            if hasattr(args, "anti_correlation_strength"):
-                cmd.extend(["--anti_correlation_strength", str(args.anti_correlation_strength)])
             if args.target_max_rmsd is not None:
                 cmd.extend(["--target_max_rmsd", str(args.target_max_rmsd)])
             if hasattr(args, "target_min_plddt"):
                 cmd.extend(["--target_min_plddt", str(args.target_min_plddt)])
+
+        if getattr(args, "anti_correlation_strength", 0.0) > 0.0:
+            cmd.extend(["--anti_correlation_strength", str(args.anti_correlation_strength)])
 
         if getattr(args, "double_tape_core_bias", 0.0) > 0.0:
             cmd.extend(["--double_tape_core_bias", str(args.double_tape_core_bias)])

@@ -2,7 +2,7 @@
 
 ## Two-chain heteromer counter-screening
 
-`material_builder.py --heteromer_counter_screen` opts into homomer counter-screening for a two-protein asymmetric unit. The supported topologies are `cyclic`, `linear_tape`, `double_tape`, `open_arc`, and `helical`. The feature currently requires an even number of placements and a protein-only `asym_unit`; ligand-bearing heteromers are explicitly rejected as unsuitable because the metal/ligand can mediate assembly, making this a ternary interaction rather than a protein-only A/B comparison. Partner identity alternates around cyclic assemblies and along linear, arc, and helical position order. For `double_tape`, identity alternates along each side.
+`material_builder.py --heteromer_counter_screen` opts into homomer counter-screening for a two-protein asymmetric unit. The supported topologies are `cyclic`, `cylindrical`, `linear_tape`, `double_tape`, `open_arc`, and `helical`. The feature currently requires an even number of placements and a protein-only `asym_unit`; ligand-bearing heteromers are explicitly rejected as unsuitable because the metal/ligand can mediate assembly, making this a ternary interaction rather than a protein-only A/B comparison. Partner identity alternates around cyclic assemblies and along linear, arc, and helical position order. For `double_tape`, identity alternates along each side.
 
 After inverse folding, BoltzGen creates and folds N-copy homomers for each designed partner, where N is the total number of protein chains in the intended heteromer. This compares `A_N` and `B_N` with the intended equal-stoichiometry heteromer. The feature is disabled by default and is separate from `designfolding`. Confidence differences such as `delta_design_iptm_vs_homomer_max` are model-confidence proxies, not thermodynamic measurements or experimental evidence of specificity.
 
@@ -66,6 +66,19 @@ Places chains on a ring in the XY-plane. The angular interval is determined by t
 
 - `--target_radius` (default `15.0`): Ring radius.
 
+### Cylindrical (`cylindrical`)
+
+Variant of `cyclic` specialized for $\beta$-barrels and $\alpha$-helical barrels (coiled-coil barrels). While `cyclic` only constrains the aggregate center of mass of each chain to a circle in the XY-plane, `cylindrical` constrains the central helical axis (for $\alpha$-helices) or strand trace (for $\beta$-strands) of each peptide to lie on the surface of a cylinder with radius `--target_radius`, in accordance with the Crick parameterization. All internal 3D secondary-structure geometries and covalent bonds are preserved without flattening.
+
+Supports multi-helix symmetrical units (`--asym_unit_size 2` or higher) with axial and angular stagger (`--target_dz`), breaking the planar COM constraint while preserving $C_{N/U}$ symmetry (or $D_{N/U}$ dihedral symmetry for antiparallel barrels). When `--spacing_noise` is positive (or explicitly via `--slide_noise` and `--radius_noise`), zero-centered slide vectors perturb each helix along its helical geodesic trajectory ($\Delta z = s_u \cos\alpha, \Delta \phi = s_u \sin\alpha / R$), while cylinder radius perturbations explore varied barrel radii across designs, preserving exact group symmetry.
+
+- `--target_radius` (default `15.0`): Cylinder barrel radius.
+- `--target_dz` (default `0.0`): Intra-unit axial stagger height between helices/strands.
+- `--target_angle` (default `0.0`): Helix crossing/tilt angle relative to cylinder axis (degrees).
+- `--antiparallel_prob` (default `0.0`): Probability of alternating antiparallel barrel arrangement.
+- `--radius_noise` (defaults to `--spacing_noise`): Std of noise added to cylinder barrel radius across design samples.
+- `--slide_noise` (defaults to `--spacing_noise`): Std of noise added to the intra-unit helical axis slide vector.
+
 ### Helical (`helical`)
 
 Places chains on a helix about the Z-axis.
@@ -96,7 +109,7 @@ While `material_builder.py` primarily drives topology placement, it also exposes
 
 - `--heteromer_counter_screen`: Instructs the pipeline to design a two-chain heteromer with alternating partner identities (e.g. A-B-A-B). Includes A-only and B-only counter-screen folding steps to filter out designs that might form unintended homomers.
 - `--heteromer_charge_bias` (default `0.5`): Strength of global charge complementarity bias applied during inverse folding to enforce positive/negative charge pairing across partners.
-- `--anti_correlation_strength` (default `2.0`): Strength of cross-partner anti-correlation penalty applied during inverse folding to maximize sequence divergence between partners.
+- `--anti_correlation_strength` (default `0.0`): Strength of cross-partner anti-correlation penalty applied during inverse folding to maximize sequence divergence between partners (0.0 = inactive).
 - `--max_partner_identity` (default `0.5`): Maximum allowed sequence identity between partners A and B before running the expensive structural counter-screens.
 - `--max_surviving_designs`: Optional cap on the number of sequence designs to pass into the counter-screen folding step.
 
