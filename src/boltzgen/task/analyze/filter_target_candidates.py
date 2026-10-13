@@ -113,10 +113,20 @@ class FilterTargetCandidates(Task):
             f"(rmsd <= {self.max_rmsd}, min_complex_plddt={self.min_complex_plddt})"
         )
         if not ids:
-            raise RuntimeError(
-                "No target designs passed the structural thresholds; refusing to "
-                "generate counter-screens. Loosen --target_max_rmsd / "
-                "--target_min_plddt or inspect the aggregate metrics."
+            logger.warning(
+                "No target designs passed the structural thresholds; skipping counter-screens."
+            )
+            # Write empty candidate list to allow downstream steps to continue gracefully
+            (self.design_dir / CANDIDATES_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "max_rmsd": self.max_rmsd,
+                        "min_complex_plddt": self.min_complex_plddt,
+                        "candidate_ids": [],
+                    },
+                    indent=2,
+                )
+                + "\n"
             )
         (self.design_dir / CANDIDATES_FILENAME).write_text(
             json.dumps(
