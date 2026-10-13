@@ -1,18 +1,18 @@
 copies: 16
 topology: "double_tape"
-layer_dist: 9.0
+layer_dist: 8.5
 target_pitch: 4.8
 antiparallel_prob: 1.0
 spacing_noise: 0.25
-num_designs: 5
-seqs_per_backbone: 20
+num_designs: 50
+seqs_per_backbone: 1
 inverse_temp: 0.3
 backbone_noise: 0.2
-background_unbias_strength: 0.0
+background_unbias_strength: 0.5
 double_tape_polar_bias: 1.0
 double_tape_core_bias: 1.5
 double_tape_aromatic_bias: 1.5
-repetition_penalty: 0.4
+repetition_penalty: 0.5
 top_p: 1.0
 anti_correlation_strength: 2
 asym_unit:

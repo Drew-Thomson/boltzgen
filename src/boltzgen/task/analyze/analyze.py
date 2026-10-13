@@ -7,6 +7,7 @@ from concurrent.futures.process import BrokenProcessPool
 import copy
 import multiprocessing
 import numbers
+import os
 from pathlib import Path
 import traceback
 from typing import Optional, Dict, Any, List
@@ -1283,17 +1284,92 @@ class Analyze(Task):
                         D[2, 2] = d
                         R = U @ D @ Vh
                         c_r_aligned = P @ R
-                        
-                        import os
+
+                        partner_slots_ideal: dict[int, int] = {}
+                        partner_slots_refold: dict[int, int] = {}
+
+                        sym_group = feat.get("symmetric_group")
+                        if sym_group is not None:
+                            if sym_group.dim() == 2:
+                                sym_group = sym_group[0]
+                            chain_sym_groups: dict[int, int] = {}
+                            for c in chains_ideal:
+                                c_val = int(c.item() if isinstance(c, torch.Tensor) else c)
+                                m_tok = (c_id_ideal == c)
+                                if m_tok.any():
+                                    chain_sym_groups[c_val] = int(sym_group[m_tok][0].item())
+                            unique_sym = sorted(list(set(chain_sym_groups.values())))
+                            if len(unique_sym) == 2 and unique_sym[0] > 0:
+                                slot_map = {unique_sym[0]: 0, unique_sym[1]: 1}
+                                for c_val, g_val in chain_sym_groups.items():
+                                    partner_slots_ideal[c_val] = slot_map[g_val]
+                                    partner_slots_refold[c_val] = slot_map[g_val]
+
+                        if len(set(partner_slots_ideal.values())) < 2:
+                            chain_seqs: dict[int, str] = {}
+                            token_mask = feat.get("token_pad_mask")
+                            if token_mask is not None:
+                                token_mask = token_mask.bool()
+                                if token_mask.dim() == 2:
+                                    token_mask = token_mask[0]
+                            for c in chains_ideal:
+                                c_val = int(c.item() if isinstance(c, torch.Tensor) else c)
+                                m_tok = (c_id_ideal == c)
+                                if token_mask is not None:
+                                    m_tok = m_tok & token_mask[:m_tok.shape[0]]
+                                res_tok = res_type_argmax[m_tok] if res_type_argmax.dim() == 1 else res_type_argmax[0][m_tok]
+                                chain_seqs[c_val] = "".join([const.prot_token_to_letter.get(const.tokens[t], "X") for t in res_tok])
+                            unique_seqs = sorted(list(set(chain_seqs.values())))
+                            if len(unique_seqs) == 2:
+                                slot_map = {unique_seqs[0]: 0, unique_seqs[1]: 1}
+                                for c_val, s_val in chain_seqs.items():
+                                    partner_slots_ideal[c_val] = slot_map[s_val]
+                                    partner_slots_refold[c_val] = slot_map[s_val]
+                            elif os.environ.get("MAT_ASYM_UNIT_SIZE", "1") == "2":
+                                for ch_idx, c in enumerate(chains_ideal):
+                                    c_val = int(c.item() if isinstance(c, torch.Tensor) else c)
+                                    partner_slots_ideal[c_val] = ch_idx % 2
+                                    partner_slots_refold[c_val] = ch_idx % 2
+
+                        has_two_chain_asym_unit = len(set(partner_slots_ideal.values())) == 2
+                        two_chain_metrics = None
+                        if has_two_chain_asym_unit:
+                            try:
+                                from boltzgen.task.analyze.material_metrics import (
+                                    compute_two_chain_alternating_metrics,
+                                )
+                                two_chain_metrics = compute_two_chain_alternating_metrics(
+                                    coords_refold=coords_refold,
+                                    coords_ideal=coords_ideal,
+                                    chain_ids_refold=atom_asym_id_refold,
+                                    chain_ids_ideal=atom_asym_id_ideal,
+                                    partner_slots_refold=partner_slots_refold,
+                                    partner_slots_ideal=partner_slots_ideal,
+                                    bb_mask_refold=bb_mask_refold,
+                                    bb_mask_ideal=bb_mask_ideal,
+                                )
+                                metrics.update(two_chain_metrics)
+                                metrics["neg_lattice_rmsd_refolded"] = -two_chain_metrics["lattice_rmsd_refolded"]
+                            except Exception as metric_err:
+                                print("Error computing two-chain alternating metrics:", metric_err)
+
                         topology = os.environ.get("MAT_TOPOLOGY", "floating")
                         
                         if topology == "double_tape":
                             screen_type = os.environ.get("MAT_SCREEN_TYPE", "")
                             if screen_type == "homomer" or len(coms_ideal) == 1:
                                 metrics["local_double_tape_rmsd"] = 0.0
+                                if not has_two_chain_asym_unit:
+                                    metrics["neg_lattice_rmsd_refolded"] = 0.0
                             else:
-                                # 1. Partner mapping errors (Assuming A-B-A-B mapped to A:0,1,4,5... B:2,3,6,7...)
-                                seq_errors = sum(1 for u, ideal_u in enumerate(col_ind) if (u // 2) % 2 != (ideal_u // 2) % 2)
+                                if has_two_chain_asym_unit:
+                                    seq_errors = sum(
+                                        1 for u, ideal_u in enumerate(col_ind)
+                                        if partner_slots_refold.get(int(chains_refold[u].item() if isinstance(chains_refold[u], torch.Tensor) else u), u % 2)
+                                        != partner_slots_ideal.get(int(chains_ideal[ideal_u].item() if isinstance(chains_ideal[ideal_u], torch.Tensor) else ideal_u), ideal_u % 2)
+                                    )
+                                else:
+                                    seq_errors = sum(1 for u, ideal_u in enumerate(col_ind) if (u // 2) % 2 != (ideal_u // 2) % 2)
                                 
                                 # 2. Graph topology errors
                                 refold_edges = set()
@@ -1323,8 +1399,6 @@ class Analyze(Task):
                                 correct_edges = mapped_ideal_edges.intersection(refold_edges)
                                 for u, v in correct_edges:
                                     dot_refold = torch.dot(dirs_refold[u], dirs_refold[v]).item()
-                                    # find the ideal indices for these refolded indices
-                                    # Since u, v are in mapped_ideal_edges, they MUST be in col_ind mapping
                                     ideal_u = col_ind[list(row_ind).index(u)]
                                     ideal_v = col_ind[list(row_ind).index(v)]
                                     dot_ideal = torch.dot(dirs_ideal[ideal_u], dirs_ideal[ideal_v]).item()
@@ -1334,7 +1408,8 @@ class Analyze(Task):
                                 total_error = seq_errors + missing_edges + extra_edges + orientation_errors
                                 metrics["local_double_tape_rmsd"] = float(total_error)
                                 
-                            metrics["neg_lattice_rmsd_refolded"] = -metrics["local_double_tape_rmsd"]
+                            if not has_two_chain_asym_unit or two_chain_metrics is None:
+                                metrics["neg_lattice_rmsd_refolded"] = -metrics["local_double_tape_rmsd"]
                             
                             # Calculate chi_outward
                             if len(coms_ideal) > 1:
@@ -1399,7 +1474,8 @@ class Analyze(Task):
                                         metrics["outward_aromatic_fraction"] = 0.0
                         else:
                             rmsd = torch.sqrt(torch.mean((c_r_aligned - Q)**2)).item()
-                            metrics["neg_lattice_rmsd_refolded"] = -rmsd
+                            if not has_two_chain_asym_unit or two_chain_metrics is None:
+                                metrics["neg_lattice_rmsd_refolded"] = -rmsd
                         
                         # Twist angle roughly estimated by the angle of rotation matrix relative to identity 
                         # after aligning the primary axes. For simplicity, just use lattice_rmsd as primary geometry proxy.
@@ -1429,6 +1505,7 @@ class Analyze(Task):
                             "bilayer_sheet",
                             "hexagonal_mesh",
                             "nanotube",
+                            "cylindrical",
                         } and compute_material_metrics is not None:
                             backbone_coords = coords_refold[
                                 bb_mask_refold[: coords_refold.shape[0]]

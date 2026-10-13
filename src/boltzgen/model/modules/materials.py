@@ -2,12 +2,42 @@
 
 from __future__ import annotations
 
+from itertools import permutations, product
 import math
+from typing import Any
 
 import torch
 
 
-def _rotation_z(angle: float, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+def _signed_permutation_rotations(
+    *, tetrahedral: bool = False
+) -> tuple[tuple[tuple[int, ...], ...], ...]:
+    """Generate the 12 tetrahedral or 24 octahedral signed permutation matrices."""
+    rotations = []
+    even_perms = {(0, 1, 2), (1, 2, 0), (2, 0, 1)}
+    for p in permutations(range(3)):
+        if tetrahedral and p not in even_perms:
+            continue
+        parity = 1 if p in even_perms else -1
+        for signs in product([-1, 1], repeat=3):
+            if tetrahedral and (signs[0] * signs[1] * signs[2] != 1):
+                continue
+            det = parity * signs[0] * signs[1] * signs[2]
+            if det == 1:
+                mat = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]
+                for i in range(3):
+                    mat[i][p[i]] = signs[i]
+                rotations.append(tuple(tuple(row) for row in mat))
+    return tuple(rotations)
+
+
+TETRAHEDRAL_ROTATIONS = _signed_permutation_rotations(tetrahedral=True)
+OCTAHEDRAL_ROTATIONS = _signed_permutation_rotations(tetrahedral=False)
+
+
+def _rotation_z(
+    angle: float, *, device: torch.device, dtype: torch.dtype
+) -> torch.Tensor:
     """Return a row-vector-compatible rotation matrix about Z."""
     c, s = math.cos(angle), math.sin(angle)
     return torch.tensor(
@@ -17,7 +47,9 @@ def _rotation_z(angle: float, *, device: torch.device, dtype: torch.dtype) -> to
     )
 
 
-def _ring_points(count: int, radius: float, *, device: torch.device, dtype: torch.dtype):
+def _ring_points(
+    count: int, radius: float, *, device: torch.device, dtype: torch.dtype
+):
     angles = torch.arange(count, device=device, dtype=dtype) * (2.0 * math.pi / count)
     points = torch.zeros((count, 3), device=device, dtype=dtype)
     points[:, 0] = radius * torch.cos(angles)
@@ -57,7 +89,9 @@ def double_tape_consensus_slot_indices_from_layout(layout: dict) -> list[int]:
     return slots
 
 
-def double_tape_antiparallel_rotation(chain_index: int, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+def double_tape_antiparallel_rotation(
+    chain_index: int, *, device: torch.device, dtype: torch.dtype
+) -> torch.Tensor:
     """Return local rotation matrix for antiparallel double tapes."""
     layer, step = double_tape_layer_position(chain_index)
     if (layer + step) % 2 == 1:
@@ -100,9 +134,9 @@ def generate_ideal_lattice(
     n_chains: int,
     asym_unit_size: int,
     params: dict,
-    *,
-    device: torch.device,
-    dtype: torch.dtype,
+    device: torch.device | None = None,
+    dtype: torch.dtype | None = None,
+    **kwargs: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Create target COMs and per-copy rotations for a material topology.
 
@@ -110,6 +144,11 @@ def generate_ideal_lattice(
     lattice frame. COM and rotation arrays have shapes ``[n_chains, 3]`` and
     ``[n_chains, 3, 3]`` respectively.
     """
+    if device is None:
+        device = kwargs.get("device", torch.device("cpu"))
+    if dtype is None:
+        dtype = kwargs.get("dtype", torch.float32)
+
     if n_chains < 1:
         raise ValueError("n_chains must be positive")
 
@@ -120,9 +159,78 @@ def generate_ideal_lattice(
 
     if topology == "cyclic":
         coms, rotations = _ring_points(n_chains, radius, device=device, dtype=dtype)
+    elif topology == "cylindrical":
+        u_size = max(1, asym_unit_size)
+        if n_chains % u_size != 0:
+            msg = (
+                f"cylindrical requires n_chains divisible by asym_unit_size "
+                f"({u_size}), got {n_chains}"
+            )
+            raise ValueError(msg)
+        n_placements = n_chains // u_size
+        base_step = 2.0 * math.pi / n_placements
+        intra_angle_step = base_step / u_size
+
+        stagger_dz = (
+            float(params.get("target_dz") or 0.0)
+            if u_size > 1
+            else float(params.get("target_dz") or 0.0)
+        )
+        stagger_z_noise = float(params.get("stagger_z_noise") or 0.0)
+        stagger_phi_noise = float(params.get("stagger_phi_noise") or 0.0)
+
+        effective_dz = stagger_dz + stagger_z_noise
+        effective_dphi = intra_angle_step + stagger_phi_noise
+
+        target_angle_deg = float(params.get("target_angle") or 0.0)
+        target_angle_rad = math.radians(target_angle_deg)
+        raw_slide = params.get("slide_vector")
+        slide_vector: list[float] | None = None
+        if raw_slide is not None:
+            if isinstance(raw_slide, torch.Tensor):
+                slide_vector = [float(v.item()) for v in raw_slide]
+            elif isinstance(raw_slide, (list, tuple)):
+                slide_vector = [float(v) for v in raw_slide]
+
+        angles = torch.zeros(n_chains, device=device, dtype=dtype)
+        coms = torch.zeros((n_chains, 3), device=device, dtype=dtype)
+        for i in range(n_chains):
+            p = i // u_size
+            u = i % u_size
+            u_offset = (
+                (u - (u_size - 1) / 2.0)
+                if u_size > 1
+                else ((i % 2) - 0.5 if effective_dz != 0.0 else 0.0)
+            )
+            phi = p * base_step + (u_offset * effective_dphi if u_size > 1 else 0.0)
+            z = u_offset * effective_dz
+
+            if slide_vector is not None:
+                if u_size > 1 and u < len(slide_vector):
+                    s_u = slide_vector[u]
+                elif u_size == 1 and (i % 2) < len(slide_vector):
+                    s_u = slide_vector[i % 2]
+                else:
+                    s_u = 0.0
+
+                flip_sign = -1.0 if (i % 2 == 1 and target_angle_rad != 0.0) else 1.0
+                alpha_u = flip_sign * target_angle_rad
+
+                z = z + s_u * math.cos(alpha_u)
+                phi = phi + (s_u * math.sin(alpha_u)) / radius
+
+            angles[i] = phi
+            coms[i, 0] = radius * math.cos(phi)
+            coms[i, 1] = radius * math.sin(phi)
+            coms[i, 2] = z
+        rotations = torch.stack(
+            [_rotation_z(float(a), device=device, dtype=dtype) for a in angles]
+        )
     elif topology == "linear_tape":
         coms = torch.zeros((n_chains, 3), device=device, dtype=dtype)
-        coms[:, 2] = (torch.arange(n_chains, device=device, dtype=dtype) - (n_chains - 1) / 2) * pitch
+        coms[:, 2] = (
+            torch.arange(n_chains, device=device, dtype=dtype) - (n_chains - 1) / 2
+        ) * pitch
         rotations = identity.expand(n_chains, -1, -1).clone()
     elif topology == "helical":
         angles = torch.arange(n_chains, device=device, dtype=dtype) * math.radians(
@@ -131,7 +239,9 @@ def generate_ideal_lattice(
         coms = torch.zeros((n_chains, 3), device=device, dtype=dtype)
         coms[:, 0] = radius * torch.cos(angles)
         coms[:, 1] = radius * torch.sin(angles)
-        coms[:, 2] = (torch.arange(n_chains, device=device, dtype=dtype) - (n_chains - 1) / 2) * dz
+        coms[:, 2] = (
+            torch.arange(n_chains, device=device, dtype=dtype) - (n_chains - 1) / 2
+        ) * dz
         rotations = torch.stack(
             [_rotation_z(float(a), device=device, dtype=dtype) for a in angles]
         )
@@ -139,7 +249,9 @@ def generate_ideal_lattice(
         arc_radius = float(params.get("arc_radius", 100.0))
         spacing = float(params.get("target_arc_spacing", 10.0))
         step = 2.0 * math.asin(min(spacing / (2.0 * arc_radius), 1.0))
-        angles = (torch.arange(n_chains, device=device, dtype=dtype) - (n_chains - 1) / 2) * step
+        angles = (
+            torch.arange(n_chains, device=device, dtype=dtype) - (n_chains - 1) / 2
+        ) * step
         coms = torch.zeros((n_chains, 3), device=device, dtype=dtype)
         coms[:, 0] = arc_radius * torch.sin(angles)
         coms[:, 1] = arc_radius * (1.0 - torch.cos(angles))
@@ -165,7 +277,9 @@ def generate_ideal_lattice(
     elif topology == "bilayer_sheet":
         gx, gy = int(params.get("grid_dim_x", 2)), int(params.get("grid_dim_y", 2))
         if n_chains != 2 * gx * gy:
-            raise ValueError(f"bilayer_sheet requires {2 * gx * gy} copies, got {n_chains}")
+            raise ValueError(
+                f"bilayer_sheet requires {2 * gx * gy} copies, got {n_chains}"
+            )
         row_pitch = float(params.get("row_pitch", 10.0))
         layer_dist = float(params.get("layer_dist", 10.0))
         if params.get("layer_dist_noise") is not None:
@@ -191,7 +305,9 @@ def generate_ideal_lattice(
         ring_size = int(params.get("ring_size", 4))
         tiers = int(params.get("num_tiers", 4))
         if n_chains != ring_size * tiers:
-            raise ValueError(f"nanotube requires {ring_size * tiers} copies, got {n_chains}")
+            raise ValueError(
+                f"nanotube requires {ring_size * tiers} copies, got {n_chains}"
+            )
         stagger = math.radians(float(params.get("chiral_stagger", 0.0)))
         coms = torch.zeros((n_chains, 3), device=device, dtype=dtype)
         rotations = torch.empty((n_chains, 3, 3), device=device, dtype=dtype)
@@ -199,7 +315,11 @@ def generate_ideal_lattice(
             tier, slot = divmod(i, ring_size)
             angle = 2.0 * math.pi * slot / ring_size + tier * stagger
             coms[i] = torch.tensor(
-                [radius * math.cos(angle), radius * math.sin(angle), (tier - (tiers - 1) / 2) * dz],
+                [
+                    radius * math.cos(angle),
+                    radius * math.sin(angle),
+                    (tier - (tiers - 1) / 2) * dz,
+                ],
                 device=device,
                 dtype=dtype,
             )
@@ -207,7 +327,9 @@ def generate_ideal_lattice(
     elif topology == "multi_helical":
         starts = int(params.get("num_starts", 3))
         if n_chains % starts:
-            raise ValueError(f"multi_helical requires copies divisible by num_starts ({starts})")
+            raise ValueError(
+                f"multi_helical requires copies divisible by num_starts ({starts})"
+            )
         angle_step = math.radians(float(params.get("target_angle", 30.0)))
         coms = torch.zeros((n_chains, 3), device=device, dtype=dtype)
         rotations = torch.empty((n_chains, 3, 3), device=device, dtype=dtype)
@@ -215,7 +337,11 @@ def generate_ideal_lattice(
             strand, step = i % starts, i // starts
             angle = strand * 2.0 * math.pi / starts + step * angle_step
             coms[i] = torch.tensor(
-                [radius * math.cos(angle), radius * math.sin(angle), (step - (n_chains // starts - 1) / 2) * dz],
+                [
+                    radius * math.cos(angle),
+                    radius * math.sin(angle),
+                    (step - (n_chains // starts - 1) / 2) * dz,
+                ],
                 device=device,
                 dtype=dtype,
             )
@@ -227,12 +353,16 @@ def generate_ideal_lattice(
         if topology == "hexagonal_mesh":
             gx, gy = int(params.get("grid_dim_x", 2)), int(params.get("grid_dim_y", 2))
             if n_chains != 3 * gx * gy:
-                raise ValueError(f"hexagonal_mesh requires {3 * gx * gy} copies, got {n_chains}")
+                raise ValueError(
+                    f"hexagonal_mesh requires {3 * gx * gy} copies, got {n_chains}"
+                )
             lattice = params.get("lattice_constant")
             if lattice is None:
                 pore = params.get("pore_diameter")
                 if pore is None:
-                    raise ValueError("hexagonal_mesh requires pore_diameter or lattice_constant")
+                    raise ValueError(
+                        "hexagonal_mesh requires pore_diameter or lattice_constant"
+                    )
                 lattice = float(pore) + 10.0
             coms = torch.zeros((n_chains, 3), device=device, dtype=dtype)
             for i in range(n_chains):
@@ -242,13 +372,29 @@ def generate_ideal_lattice(
                 coms[i, 1] = y * float(lattice) * math.sqrt(3.0) / 2.0
                 coms[i, 2] = 0.0
             rotations = identity.expand(n_chains, -1, -1).clone()
-            angles = torch.arange(n_chains, device=device, dtype=dtype) % 3 * (math.pi / 3.0)
-            rotations = torch.stack([_rotation_z(float(a), device=device, dtype=dtype) for a in angles])
+            angles = (
+                torch.arange(n_chains, device=device, dtype=dtype) % 3 * (math.pi / 3.0)
+            )
+            rotations = torch.stack(
+                [_rotation_z(float(a), device=device, dtype=dtype) for a in angles]
+            )
         else:
-            angles = torch.arange(n_chains, device=device, dtype=dtype) * (math.pi * (3.0 - math.sqrt(5.0)))
-            y = 1.0 - 2.0 * (torch.arange(n_chains, device=device, dtype=dtype) + 0.5) / n_chains
+            angles = torch.arange(n_chains, device=device, dtype=dtype) * (
+                math.pi * (3.0 - math.sqrt(5.0))
+            )
+            y = (
+                1.0
+                - 2.0
+                * (torch.arange(n_chains, device=device, dtype=dtype) + 0.5)
+                / n_chains
+            )
             radial = torch.sqrt(torch.clamp(1.0 - y * y, min=0.0))
-            coms = torch.stack((radial * torch.cos(angles), radial * torch.sin(angles), y), dim=-1) * cage_radius
+            coms = (
+                torch.stack(
+                    (radial * torch.cos(angles), radial * torch.sin(angles), y), dim=-1
+                )
+                * cage_radius
+            )
             rotations = identity.expand(n_chains, -1, -1).clone()
     else:
         raise ValueError(f"Unsupported material topology: {topology}")
@@ -267,7 +413,9 @@ def unfold_from_consensus_frame(
     coords: torch.Tensor, ideal_com: torch.Tensor, ideal_rotation: torch.Tensor
 ) -> torch.Tensor:
     """Map coordinates from the shared local frame into an ideal placement."""
-    return torch.matmul(coords, ideal_rotation.transpose(-1, -2)) + ideal_com.unsqueeze(-2)
+    return torch.matmul(coords, ideal_rotation.transpose(-1, -2)) + ideal_com.unsqueeze(
+        -2
+    )
 
 
 def build_layout_guidance_masks(
@@ -300,9 +448,11 @@ def build_layout_guidance_masks(
             mask &= atom_valid_mask.bool()
         if record["role"] == "protein":
             if not torch.any(mask):
-                raise ValueError(
-                    f"Material layout protein asym_index {asym_index} has no valid atoms"
+                msg = (
+                    f"Material layout protein asym_index {asym_index} "
+                    "has no valid atoms"
                 )
+                raise ValueError(msg)
             protein_masks[asym_index] = mask
         elif torch.any(mask):
             ligand_masks.append((asym_index, record, mask))
@@ -310,11 +460,15 @@ def build_layout_guidance_masks(
     guidance_masks = []
     for placement in layout.get("placements", []):
         protein_indices = [int(index) for index in placement["protein_asym_indices"]]
-        if not protein_indices or any(index not in protein_masks for index in protein_indices):
-            raise ValueError(
-                f"Placement {placement.get('placement_index')} has no valid guided protein chain"
+        if not protein_indices or any(
+            index not in protein_masks for index in protein_indices
+        ):
+            msg = (
+                f"Placement {placement.get('placement_index')} has no valid guided "
+                "protein chain"
             )
-        if topology == "double_tape":
+            raise ValueError(msg)
+        if topology in ("double_tape", "cylindrical"):
             guidance_masks.extend(protein_masks[index] for index in protein_indices)
         else:
             unit_mask = torch.zeros_like(atom_asym_id, dtype=torch.bool)
@@ -341,3 +495,561 @@ def fit_rigid_transform(source: torch.Tensor, target: torch.Tensor):
     rotation = u @ correction @ vh
     translation = target_mean - source_mean @ rotation
     return rotation, translation
+
+
+def compute_element_trace(
+    ca_coords: torch.Tensor,
+    secondary_structure: str | None = None,
+) -> torch.Tensor:
+    r"""Extract helical axis or strand trace from CA coordinates.
+
+    For an $\alpha$-helix, CA atoms spiral around the central helical axis with
+    radius $r_1 \approx 2.3\,\text{\AA}$ and $3.6$ residues per turn. A rolling
+    4-residue filter filters out the helical oscillation to yield the exact central
+    helical axis (Crick parameterization):
+    $$\mathbf{t}_k = \frac{1}{4} \sum_{j=-1}^{2} \mathbf{c}_{k+j}$$
+    For a $\beta$-strand, a rolling 2-residue filter smooths pleating:
+    $$\mathbf{t}_k = \frac{1}{2} (\mathbf{c}_k + \mathbf{c}_{k+1})$$
+
+    Parameters
+    ----------
+    ca_coords : torch.Tensor
+        Residue CA coordinates with shape ``[L, 3]``.
+    secondary_structure : str | None
+        Secondary structure designation ('H' for helix, 'S' for sheet).
+        If None or 'H', uses a 4-residue rolling filter.
+        If 'S', uses a 2-residue rolling filter.
+
+    Returns
+    -------
+    torch.Tensor
+        Centerline trace coordinates with shape ``[L, 3]``.
+    """
+    l_res = ca_coords.shape[0]
+    if l_res <= 1:
+        return ca_coords.clone()
+
+    ss_char = (secondary_structure or "H").upper()
+    window = 2 if "S" in ss_char and "H" not in ss_char else min(4, l_res)
+
+    if window <= 1 or l_res < window:
+        return ca_coords.clone()
+
+    # ca_coords: [L, 3] -> [3, 1, L]
+    ca_t = ca_coords.T.unsqueeze(1)
+    pad_left = (window - 1) // 2
+    pad_right = window // 2
+    padded = torch.nn.functional.pad(ca_t, (pad_left, pad_right), mode="replicate")
+    kernel = torch.ones(
+        (1, 1, window), device=ca_coords.device, dtype=ca_coords.dtype
+    ) / float(window)
+    trace_t = torch.nn.functional.conv1d(padded, kernel)
+    return trace_t.squeeze(1).T
+
+
+def align_consensus_to_cylinder(ref_coords: torch.Tensor) -> torch.Tensor:
+    r"""Rigidly place the consensus element axis tangent to the cylinder.
+
+    With the monomer centred on the local frame origin (radial $\hat{x}$, tangent
+    $\hat{y}$, cylinder axis $\hat{z}$), the element axis $\mathbf{u}$ (PCA primary
+    axis, signed N$\to$C) is rotated by the *minimal* rotation onto
+
+    $$\mathbf{v} = \frac{(0, u_y, u_z)}{\lVert (0, u_y, u_z) \rVert},$$
+
+    i.e. radial component removed. Crossing angle
+    $\alpha = \arctan2(u_y, u_z)$, N$\to$C sense and roll about the axis are
+    preserved. After placement at radius $R$ the axis is tangent to the cylinder
+    (Crick parameterization); for $\alpha = 0$ it lies exactly on the surface.
+    Pure rigid rotation: all internal geometry is invariant.
+
+    Parameters
+    ----------
+    ref_coords : torch.Tensor
+        Consensus monomer atom coordinates, shape ``[N, 3]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Centred, rotated coordinates, shape ``[N, 3]``.
+    """
+    min_atoms = 3
+    eps = 1e-3
+    if ref_coords.shape[0] < min_atoms:
+        return ref_coords.clone()
+
+    centered = ref_coords - ref_coords.mean(dim=0)
+    u_mat, _, _ = torch.linalg.svd(centered.T @ centered)
+    u_axis = u_mat[:, 0] * torch.sign(
+        torch.dot(strand_direction(centered), u_mat[:, 0]) + 1e-6
+    )
+
+    v_axis = torch.stack([torch.zeros_like(u_axis[0]), u_axis[1], u_axis[2]])
+    if v_axis.norm() < eps:
+        # Axis (near) radial: fall back to cylinder axis, keep N->C sense.
+        v_axis = torch.zeros_like(u_axis)
+        v_axis[2] = torch.sign(u_axis[2] + 1e-6)
+    v_axis = v_axis / v_axis.norm()
+
+    # Rodrigues: R = I + [k]_x + [k]_x^2 / (1 + c), k = u x v, c = u . v
+    k_vec = torch.linalg.cross(u_axis, v_axis)
+    cos_t = torch.dot(u_axis, v_axis)
+    k_x = torch.zeros((3, 3), device=u_axis.device, dtype=u_axis.dtype)
+    k_x[0, 1], k_x[0, 2] = -k_vec[2], k_vec[1]
+    k_x[1, 0], k_x[1, 2] = k_vec[2], -k_vec[0]
+    k_x[2, 0], k_x[2, 1] = -k_vec[1], k_vec[0]
+    rot = (
+        torch.eye(3, device=u_axis.device, dtype=u_axis.dtype)
+        + k_x
+        + (k_x @ k_x) / (1.0 + cos_t)
+    )
+    return torch.matmul(centered, rot.T)
+
+
+def align_consensus_to_double_tape(ref_coords: torch.Tensor) -> torch.Tensor:
+    r"""Rigidly align the consensus monomer element axis with the in-sheet axis (+Y).
+
+    Centres the monomer at the origin and aligns its primary PCA axis $\mathbf{u}$
+    (signed N$\to$C) with $\hat{y} = (0, 1, 0)$ via minimal Rodrigues rotation:
+
+    $$\mathbf{k} = \mathbf{u} \times \hat{y}, \quad c = \mathbf{u} \cdot \hat{y}$$
+
+    This places the $\beta$-strand backbone parallel to the sheet direction ($Y$),
+    preventing inter-sheet clash along the bilayer normal ($X$), while preserving
+    internal monomer geometry.
+
+    Parameters
+    ----------
+    ref_coords : torch.Tensor
+        Consensus monomer atom coordinates, shape ``[N, 3]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Centred, aligned coordinates, shape ``[N, 3]``.
+    """
+    min_atoms = 3
+    eps = 1e-6
+    if ref_coords.shape[0] < min_atoms:
+        return ref_coords - ref_coords.mean(dim=0)
+
+    centered = ref_coords - ref_coords.mean(dim=0)
+    u_mat, _, _ = torch.linalg.svd(centered.T @ centered)
+    u_axis = u_mat[:, 0] * torch.sign(
+        torch.dot(strand_direction(centered), u_mat[:, 0]) + 1e-6
+    )
+
+    v_axis = torch.tensor([0.0, 1.0, 0.0], device=u_axis.device, dtype=u_axis.dtype)
+    k_vec = torch.linalg.cross(u_axis, v_axis)
+    cos_t = torch.dot(u_axis, v_axis)
+
+    if k_vec.norm() < eps:
+        if cos_t < 0:
+            rot = torch.diag(
+                torch.tensor([1.0, -1.0, -1.0], device=u_axis.device, dtype=u_axis.dtype)
+            )
+        else:
+            rot = torch.eye(3, device=u_axis.device, dtype=u_axis.dtype)
+    else:
+        k_x = torch.zeros((3, 3), device=u_axis.device, dtype=u_axis.dtype)
+        k_x[0, 1], k_x[0, 2] = -k_vec[2], k_vec[1]
+        k_x[1, 0], k_x[1, 2] = k_vec[2], -k_vec[0]
+        k_x[2, 0], k_x[2, 1] = -k_vec[1], k_vec[0]
+        rot = (
+            torch.eye(3, device=u_axis.device, dtype=u_axis.dtype)
+            + k_x
+            + (k_x @ k_x) / (1.0 + cos_t)
+        )
+    return torch.matmul(centered, rot.T)
+
+
+def wrap_consensus_to_cylinder(
+    coords: torch.Tensor,
+    ideal_com: torch.Tensor,
+    radius: float,
+    *,
+    atom_token_ids: torch.Tensor | None = None,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    r"""Wrap flat consensus element coordinates onto the cylinder surface.
+
+    Places the secondary structural element axis along a geodesic on the cylinder
+    $\rho = R$ (a straight line on the developed/unrolled cylinder surface), with
+    azimuth $\phi(s) = \phi_0 + \frac{s \sin\alpha}{R}$ and axial height
+    $z(s) = z_0 + s \cos\alpha$. Each residue is rotated rigidly by its local
+    azimuth $\phi_k$, preserving 100% of intra-residue 3D geometry while
+    constraining the helical axis to $\rho \equiv R$:
+
+    $$\phi_k = \phi_0 + \frac{a_{k, y}}{R}$$
+    $$\mathbf{r}_k = \left( R \cos\phi_k, R \sin\phi_k, z_0 + a_{k, z} \right)$$
+    $$\mathbf{X}_{j} = \mathbf{r}_k + \Delta \mathbf{x}_j \mathbf{R}_z(\phi_k)^T$$
+
+    Parameters
+    ----------
+    coords : torch.Tensor
+        Consensus monomer atom coordinates with shape ``[N, 3]``.
+    ideal_com : torch.Tensor
+        Ideal center of mass on the cylinder, shape ``[3]`` or ``[1, 3]``.
+    radius : float
+        Target cylinder radius $R > 0$ (Å).
+    atom_token_ids : torch.Tensor | None
+        Residue token ID for each atom with shape ``[N]``. If None, residues are
+        assumed to be 4-atom blocks (N, CA, C, O), or 1 CA atom per residue if N < 4.
+    eps : float
+        Small constant for numerical stability.
+
+    Returns
+    -------
+    torch.Tensor
+        Atomic coordinates on the cylinder with shape ``[N, 3]``.
+    """
+    n_atoms = coords.shape[0]
+    min_atoms = 3
+    if n_atoms < min_atoms or radius <= 0:
+        return coords
+
+    com_vec = ideal_com.squeeze()
+    phi_val = torch.atan2(com_vec[1], com_vec[0])
+    z_val = com_vec[2]
+
+    if atom_token_ids is not None and atom_token_ids.shape[0] == n_atoms:
+        _, inverse = torch.unique(atom_token_ids, return_inverse=True)
+        l_res = int(inverse.max().item()) + 1
+        first = torch.full((l_res,), n_atoms, dtype=torch.long, device=coords.device)
+        first = first.scatter_reduce(
+            0,
+            inverse,
+            torch.arange(n_atoms, device=coords.device),
+            reduce="amin",
+        )
+        counts = torch.bincount(inverse, minlength=l_res)
+        ca_idx = torch.where(counts > 1, first + 1, first)
+    elif n_atoms % 4 == 0:
+        l_res = n_atoms // 4
+        ca_idx = torch.arange(1, n_atoms, 4, device=coords.device)
+        inverse = torch.arange(l_res, device=coords.device).repeat_interleave(4)
+    else:
+        l_res = n_atoms
+        ca_idx = torch.arange(n_atoms, device=coords.device)
+        inverse = ca_idx
+
+    ca = coords[ca_idx]
+    centre = ca.mean(dim=0)
+    _, _, vh = torch.linalg.svd(ca - centre)
+    u_axis = vh[0]
+    if torch.dot(u_axis, ca[-1] - ca[0]) < 0:
+        u_axis = -u_axis
+
+    v_axis = torch.stack([torch.zeros_like(u_axis[0]), u_axis[1], u_axis[2]])
+    if v_axis.norm() > eps:
+        v_axis = v_axis / v_axis.norm()
+    else:
+        v_axis = torch.zeros_like(u_axis)
+        v_axis[2] = torch.sign(u_axis[2] + eps)
+
+    s_k = (ca - centre) @ v_axis
+    axis_pts = centre + torch.outer(s_k, v_axis)
+
+    phi_k = phi_val + axis_pts[:, 1] / radius
+    r_k = torch.stack(
+        [
+            radius * torch.cos(phi_k),
+            radius * torch.sin(phi_k),
+            z_val + axis_pts[:, 2],
+        ],
+        dim=1,
+    )
+
+    rel = coords - axis_pts[inverse]
+    phi_atoms = phi_k[inverse]
+    cos_p = torch.cos(phi_atoms).unsqueeze(1)
+    sin_p = torch.sin(phi_atoms).unsqueeze(1)
+
+    x_rot = rel[:, 0:1] * cos_p - rel[:, 1:2] * sin_p
+    y_rot = rel[:, 0:1] * sin_p + rel[:, 1:2] * cos_p
+    z_rot = rel[:, 2:3]
+    return r_k[inverse] + torch.cat([x_rot, y_rot, z_rot], dim=1)
+
+
+def unwrap_cylinder_to_consensus(
+    coords: torch.Tensor,
+    ideal_com: torch.Tensor,
+    radius: float,
+    *,
+    atom_token_ids: torch.Tensor | None = None,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    r"""Unroll coordinates from the cylinder surface into the flat consensus frame.
+
+    Inverse of :func:`wrap_consensus_to_cylinder`. Maps the curved cylinder surface
+    isometrically onto the flat $(u, v) = (R\phi, z)$ plane so consensus averaging
+    occurs in the developable 2D plane:
+
+    $$x_j = \rho_j - R,\quad y_j = R \cdot \Delta\phi_j,\quad z_j = Z_j - z_0$$
+
+    Parameters
+    ----------
+    coords : torch.Tensor
+        Atomic coordinates on the cylinder, shape ``[N, 3]``.
+    ideal_com : torch.Tensor
+        Ideal center of mass on the cylinder, shape ``[3]`` or ``[1, 3]``.
+    radius : float
+        Target cylinder radius $R > 0$ (Å).
+    atom_token_ids : torch.Tensor | None
+        Residue token ID for each atom with shape ``[N]``.
+    eps : float
+        Small constant for numerical stability.
+
+    Returns
+    -------
+    torch.Tensor
+        Atomic coordinates in the consensus frame with shape ``[N, 3]``.
+    """
+    n_atoms = coords.shape[0]
+    min_atoms = 3
+    if n_atoms < min_atoms or radius <= 0:
+        return coords
+
+    com_vec = ideal_com.squeeze()
+    phi_val = torch.atan2(com_vec[1], com_vec[0])
+    z_val = com_vec[2]
+
+    if atom_token_ids is not None and atom_token_ids.shape[0] == n_atoms:
+        _, inverse = torch.unique(atom_token_ids, return_inverse=True)
+        l_res = int(inverse.max().item()) + 1
+        first = torch.full((l_res,), n_atoms, dtype=torch.long, device=coords.device)
+        first = first.scatter_reduce(
+            0,
+            inverse,
+            torch.arange(n_atoms, device=coords.device),
+            reduce="amin",
+        )
+        counts = torch.bincount(inverse, minlength=l_res)
+        ca_idx = torch.where(counts > 1, first + 1, first)
+    elif n_atoms % 4 == 0:
+        l_res = n_atoms // 4
+        ca_idx = torch.arange(1, n_atoms, 4, device=coords.device)
+        inverse = torch.arange(l_res, device=coords.device).repeat_interleave(4)
+    else:
+        l_res = n_atoms
+        ca_idx = torch.arange(n_atoms, device=coords.device)
+        inverse = ca_idx
+
+    ca = coords[ca_idx]
+    centre = ca.mean(dim=0)
+    _, _, vh = torch.linalg.svd(ca - centre)
+    u_axis = vh[0]
+    if torch.dot(u_axis, ca[-1] - ca[0]) < 0:
+        u_axis = -u_axis
+
+    s_k = (ca - centre) @ u_axis
+    axis_3d = centre + torch.outer(s_k, u_axis)
+
+    rho_axis = torch.sqrt(axis_3d[:, 0] ** 2 + axis_3d[:, 1] ** 2 + eps)
+    phi_axis = torch.atan2(axis_3d[:, 1], axis_3d[:, 0])
+    dphi_axis = (
+        torch.remainder(phi_axis - phi_val + math.pi, 2 * math.pi) - math.pi
+    )
+
+    axis_flat = torch.stack(
+        [
+            rho_axis - radius,
+            radius * dphi_axis,
+            axis_3d[:, 2] - z_val,
+        ],
+        dim=1,
+    )
+
+    rel_3d = coords - axis_3d[inverse]
+    phi_atoms = phi_axis[inverse]
+    cos_p = torch.cos(phi_atoms).unsqueeze(1)
+    sin_p = torch.sin(phi_atoms).unsqueeze(1)
+
+    rel_x = rel_3d[:, 0:1] * cos_p + rel_3d[:, 1:2] * sin_p
+    rel_y = -rel_3d[:, 0:1] * sin_p + rel_3d[:, 1:2] * cos_p
+    rel_z = rel_3d[:, 2:3]
+    return axis_flat[inverse] + torch.cat([rel_x, rel_y, rel_z], dim=1)
+
+
+def project_axis_to_cylinder(
+    coords: torch.Tensor,
+    radius: float,
+    *,
+    atom_token_ids: torch.Tensor | None = None,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    r"""Move the element axis onto the cylinder $\rho = R$ by rigid residue shifts.
+
+    The axis is the least-squares line through the CA atoms,
+    $\mathbf{a}_k = \mathbf{c} + s_k \mathbf{u}$ with
+    $s_k = (\mathbf{x}^{CA}_k - \mathbf{c}) \cdot \mathbf{u}$ (smooth: no
+    helical-phase jitter). Every atom of residue $k$ is translated by
+
+    $$\Delta \mathbf{r}_k = (R - \rho_k)\,\hat{\boldsymbol{\rho}}_k,\quad
+    \rho_k = \lVert (a_{k,x}, a_{k,y}) \rVert,$$
+
+    so the axis wraps onto the surface (a helix on the cylinder for a tilted
+    element) while each residue stays rigid. The shifts vary slowly along the
+    axis, so inter-residue bonds change by $\ll 0.1$ Å for tangent axes.
+
+    Parameters
+    ----------
+    coords : torch.Tensor
+        Atom coordinates, shape ``[N, 3]``, cylinder axis = $z$ through origin.
+    radius : float
+        Target radius $R > 0$ (Å).
+    atom_token_ids : torch.Tensor | None
+        Residue id per atom, shape ``[N]``; atoms of a residue are contiguous with
+        CA second (N, CA, C, O, ...). ``None`` treats each atom as a CA.
+    eps : float
+        Numerical floor for $\rho_k$.
+
+    Returns
+    -------
+    torch.Tensor
+        Shifted coordinates, shape ``[N, 3]``.
+    """
+    n_atoms = coords.shape[0]
+    min_atoms = 3
+    if n_atoms < min_atoms or radius <= 0:
+        return coords
+
+    if atom_token_ids is not None and atom_token_ids.shape[0] == n_atoms:
+        _, inverse = torch.unique(atom_token_ids, return_inverse=True)
+        l_res = int(inverse.max().item()) + 1
+        first = torch.full((l_res,), n_atoms, dtype=torch.long, device=coords.device)
+        first = first.scatter_reduce(
+            0,
+            inverse,
+            torch.arange(n_atoms, device=coords.device),
+            reduce="amin",
+        )
+        counts = torch.bincount(inverse, minlength=l_res)
+        ca_idx = torch.where(counts > 1, first + 1, first)
+    else:
+        inverse = torch.arange(n_atoms, device=coords.device)
+        ca_idx = inverse
+
+    ca = coords[ca_idx]  # [L, 3]
+    centre = ca.mean(dim=0)
+    u_axis = torch.linalg.svd((ca - centre).T @ (ca - centre))[0][:, 0]  # [3]
+    s_k = (ca - centre) @ u_axis  # [L]
+    s_k = s_k / (s_k.abs().max() + eps)
+    # Quadratic axis a(s) = c0 + c1 s + c2 s^2 per coordinate: smooth, follows any
+    # existing curvature (so repeated projection is idempotent) and averages out the
+    # helical orbit of the CA atoms.
+    degree = min(2, ca.shape[0] - 1)
+    vander = torch.stack([s_k**p for p in range(degree + 1)], dim=1)  # [L, d+1]
+    coef = torch.linalg.lstsq(vander, ca).solution  # [d+1, 3]
+    axis_pts = vander @ coef  # [L, 3]
+
+    rho = torch.sqrt(axis_pts[:, 0] ** 2 + axis_pts[:, 1] ** 2 + eps)  # [L]
+    shift = torch.zeros_like(axis_pts)
+    shift[:, 0] = (radius - rho) * axis_pts[:, 0] / rho
+    shift[:, 1] = (radius - rho) * axis_pts[:, 1] / rho
+    return coords + shift[inverse]
+
+
+def constrain_trace_to_cylinder(
+    coords: torch.Tensor,
+    radius: float,
+    *,
+    atom_token_ids: torch.Tensor | None = None,
+    secondary_structure: str | None = None,
+    max_displacement: float | None = None,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    r"""Constrain peptide secondary structural element trace to lie on cylinder surface.
+
+    Translates each residue rigidly in the radial plane by the radial error of its
+    helical axis / strand trace, preserving internal 3D secondary structure geometry:
+    $$\rho_k = \sqrt{X_{\text{trace}, k}^2 + Y_{\text{trace}, k}^2 + \epsilon}$$
+    $$\Delta \mathbf{r}_k = (R - \rho_k) \hat{\boldsymbol{\rho}}_k$$
+    $$\mathbf{X}'_{k, \text{atom}} = \mathbf{X}_{k, \text{atom}} + \Delta \mathbf{r}_k$$
+
+    Parameters
+    ----------
+    coords : torch.Tensor
+        Atomic coordinates with shape ``[N, 3]`` in the cylinder-aligned frame.
+    radius : float
+        Target cylinder radius in Angstroms ($R > 0$).
+    atom_token_ids : torch.Tensor | None
+        Residue token ID for each atom with shape ``[N]``. If None, residues are
+        assumed to be 4-atom blocks (N, CA, C, O), or 1 CA atom per residue if N < 4.
+    secondary_structure : str | None
+        Secondary structure designation ('H' for helix, 'S' for sheet).
+    max_displacement : float | None
+        Optional maximum radial displacement per residue in Angstroms to clamp.
+    eps : float
+        Small constant for numerical stability (avoid division by zero).
+
+    Returns
+    -------
+    torch.Tensor
+        Constrained atomic coordinates with shape ``[N, 3]``.
+    """
+    n_atoms = coords.shape[0]
+    if n_atoms == 0 or radius <= 0:
+        return coords
+
+    out = coords.clone()
+
+    if atom_token_ids is not None and atom_token_ids.shape[0] == n_atoms:
+        unique_tokens, inverse_indices = torch.unique(
+            atom_token_ids, return_inverse=True
+        )
+        l_res = unique_tokens.shape[0]
+        ca_coords = torch.zeros((l_res, 3), device=coords.device, dtype=coords.dtype)
+        for r_idx in range(l_res):
+            atom_indices = (inverse_indices == r_idx).nonzero(as_tuple=True)[0]
+            ca_idx = atom_indices[1] if atom_indices.shape[0] > 1 else atom_indices[0]
+            ca_coords[r_idx] = coords[ca_idx]
+
+        trace = compute_element_trace(
+            ca_coords, secondary_structure=secondary_structure
+        )
+        rho = torch.sqrt(trace[:, 0] ** 2 + trace[:, 1] ** 2 + eps)
+        unit_radial = torch.zeros((l_res, 3), device=coords.device, dtype=coords.dtype)
+        unit_radial[:, 0] = trace[:, 0] / rho
+        unit_radial[:, 1] = trace[:, 1] / rho
+
+        delta_rho = radius - rho
+        if max_displacement is not None and max_displacement > 0.0:
+            delta_rho = torch.clamp(delta_rho, -max_displacement, max_displacement)
+
+        delta_r = unit_radial * delta_rho.unsqueeze(1)
+        out += delta_r[inverse_indices]
+    elif n_atoms % 4 == 0:
+        l_res = n_atoms // 4
+        ca_coords = coords.reshape(l_res, 4, 3)[:, 1, :]
+        trace = compute_element_trace(
+            ca_coords, secondary_structure=secondary_structure
+        )
+        rho = torch.sqrt(trace[:, 0] ** 2 + trace[:, 1] ** 2 + eps)
+        unit_radial = torch.zeros((l_res, 3), device=coords.device, dtype=coords.dtype)
+        unit_radial[:, 0] = trace[:, 0] / rho
+        unit_radial[:, 1] = trace[:, 1] / rho
+
+        delta_rho = radius - rho
+        if max_displacement is not None and max_displacement > 0.0:
+            delta_rho = torch.clamp(delta_rho, -max_displacement, max_displacement)
+
+        delta_r = unit_radial * delta_rho.unsqueeze(1)
+        delta_r_atoms = delta_r.unsqueeze(1).expand(-1, 4, -1).reshape(n_atoms, 3)
+        out += delta_r_atoms
+    else:
+        ca_coords = coords
+        trace = compute_element_trace(
+            ca_coords, secondary_structure=secondary_structure
+        )
+        rho = torch.sqrt(trace[:, 0] ** 2 + trace[:, 1] ** 2 + eps)
+        unit_radial = torch.zeros_like(coords)
+        unit_radial[:, 0] = trace[:, 0] / rho
+        unit_radial[:, 1] = trace[:, 1] / rho
+
+        delta_rho = radius - rho
+        if max_displacement is not None and max_displacement > 0.0:
+            delta_rho = torch.clamp(delta_rho, -max_displacement, max_displacement)
+
+        out += unit_radial * delta_rho.unsqueeze(1)
+
+    return out

@@ -247,8 +247,8 @@ def add_configure_arguments(
         "--anti_correlation_strength",
         "--anti-correlation-strength",
         type=float,
-        default=2.0,
-        help="Strength of cross-partner anti-correlation applied during inverse folding (default: 2.0)",
+        default=0.0,
+        help="Strength of cross-partner anti-correlation applied during inverse folding (default: 0.0)",
     )
     p.add_argument(
         "--double_tape_core_bias",
@@ -1159,9 +1159,11 @@ class BinderDesignPipeline:
                 f"data.cfg.moldir={moldir}",
                 f"override.inverse_fold_args.inverse_fold_restriction=[{', '.join(exclude_residues)}]",
             ]
-            if getattr(args, "heteromer_counter_screen", False):
+            anti_corr = getattr(args, "anti_correlation_strength", 0.0)
+            if anti_corr > 0.0 or getattr(args, "heteromer_counter_screen", False):
+                strength = anti_corr if anti_corr > 0.0 else 2.0
                 inverse_fold_args.append("override.inverse_fold_args.heteromer_anti_correlation=True")
-                inverse_fold_args.append(f"override.inverse_fold_args.anti_correlation_strength={args.anti_correlation_strength}")
+                inverse_fold_args.append(f"override.inverse_fold_args.anti_correlation_strength={strength}")
 
             if getattr(args, "double_tape_core_bias", 0.0) > 0.0:
                 inverse_fold_args.append(f"override.inverse_fold_args.double_tape_core_bias={args.double_tape_core_bias}")
@@ -1238,9 +1240,11 @@ class BinderDesignPipeline:
                     f"trainer.devices={devices}",
                     f"override.inverse_fold_args.inverse_fold_restriction=[{', '.join(exclude_residues)}]",
                 ]
-                if getattr(args, "heteromer_counter_screen", False):
+                anti_corr = getattr(args, "anti_correlation_strength", 0.0)
+                if anti_corr > 0.0 or getattr(args, "heteromer_counter_screen", False):
+                    strength = anti_corr if anti_corr > 0.0 else 2.0
                     inverse_fold_args.append("override.inverse_fold_args.heteromer_anti_correlation=True")
-                    inverse_fold_args.append(f"override.inverse_fold_args.anti_correlation_strength={args.anti_correlation_strength}")
+                    inverse_fold_args.append(f"override.inverse_fold_args.anti_correlation_strength={strength}")
 
                 if getattr(args, "double_tape_core_bias", 0.0) > 0.0:
                     inverse_fold_args.append(f"override.inverse_fold_args.double_tape_core_bias={args.double_tape_core_bias}")

@@ -42,6 +42,13 @@ def material_filtering_overrides(topology: str) -> dict[str, Any] | None:
             "neg_pore_aspect_ratio": 1,
             "h_bonds_per_interface_refolded": 1,
         }
+    if topology == "cylindrical":
+        return {
+            "complex_plddt": 1,
+            "neg_min_interaction_pae": 1,
+            "neg_cylinder_radius_rmsd": 2,
+            "cylinder_pore_radius": 1,
+        }
     return None
 
 
