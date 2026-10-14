@@ -89,7 +89,6 @@ protocol_configs = {
         # Note that in inverse folding step we also avoid cysteines by default; this is implemented elsewhere.
         "analysis": ["largest_hydrophobic=false", "largest_hydrophobic_refolded=false"],
         "filtering": [
-            "filter_cysteine=true",
             "alpha=0.01",
             "refolding_rmsd_threshold=2",
         ],
@@ -100,11 +99,11 @@ protocol_configs = {
     },
     "nanobody-anything": {
         "analysis": ["largest_hydrophobic=false", "largest_hydrophobic_refolded=false"],
-        "filtering": ["filter_cysteine=true"],
+        "filtering": [],
     },
     "antibody-anything": {
         "analysis": ["largest_hydrophobic=false", "largest_hydrophobic_refolded=false"],
-        "filtering": ["filter_cysteine=true"],
+        "filtering": [],
     },
     "protein-redesign": {
         # For redesigning/optimizing existing proteins (e.g., symmetric dimers)
@@ -402,8 +401,8 @@ def add_configure_arguments(
     p.add_argument(
         "--filter_biased",
         choices=["true", "false"],
-        help="Remove amino-acid composition outliers (default caps on ALA/GLY/GLU/LEU/VAL). Default: %(default)s.",
-        default="true",
+        help="Remove amino-acid composition outliers (deprecated). Default: %(default)s.",
+        default="false",
     )
     p.add_argument(
         "--metrics_override",

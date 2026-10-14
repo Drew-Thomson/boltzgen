@@ -11,10 +11,10 @@ def test_absolute_metrics_skips_optional_metrics_without_normalized_column():
             "design_ptm": [0.7],
             "min_design_to_target_pae": [4.0],
             "num_design": [8],
-            "pass_has_x_filter": [True],
+            "pass_local_rmsd_filter": [True],
         }
     )
-    task.filters = [{"feature": "has_x"}]
+    task.filters = [{"feature": "local_rmsd"}]
 
     task.absolute_metrics()
 

@@ -3,7 +3,6 @@ _target_: boltzgen.task.filter.filter.Filter
 budget:  30
 top_budget:  10
 use_affinity:  false  # This changes the filtering metrics to metrics more amenable to small molecule binder design
-filter_cysteine:  false  # [different from peptide-protein] This filters out all designs that have designed cysteins in them (prespecified cysteins in the design are not counted)
 from_inverse_folded:  false  # This makes it so that we use the backbone refolding rmsd instead of the all-atom RMSD
 filter_bindingsite:  false  # This filters out everything that does not have a residue within 4A of a binding site residue
 modality: "peptide"  # peptide or antibody
@@ -19,9 +18,8 @@ plot_seq_logos:  false  # make sequence logo diagrams of designed sequence
 #   nanocages: {design_to_target_iptm: null, neg_min_design_to_target_pae: null,
 #               neg_cage_sphericity_rmsd: 1, cage_void_radius: 1,
 #               neg_lattice_rmsd_refolded: 1}
-#   bilayer_sheet: {sheet_planarity: 1, h_bonds_per_interface_refolded: 1}
-#   hexagonal_mesh: {sheet_planarity: 1, neg_pore_aspect_ratio: 1,
-#                    h_bonds_per_interface_refolded: 1}
+#   bilayer_sheet: {sheet_planarity: 1}
+#   hexagonal_mesh: {sheet_planarity: 1, neg_pore_aspect_ratio: 1}
 # `neg_*` material metrics are oriented so Filter's maximize ranking prefers
 # lower RMSD/aspect ratio. Higher cavity radius remains preferred.
 # Heteromer counter-screen metrics are only added when enabled with

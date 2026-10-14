@@ -190,7 +190,6 @@ def test_filtering_presets_orient_metrics_and_exclude_cage_target_metrics() -> N
     assert mesh == {
         "sheet_planarity": 1,
         "neg_pore_aspect_ratio": 1,
-        "h_bonds_per_interface_refolded": 1,
     }
     assert material_filtering_overrides("floating") is None
     assert format_metrics_override("cage_tetrahedral") == (

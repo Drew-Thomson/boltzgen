@@ -207,22 +207,20 @@ class Filter(Task):
 
         # we want to maximize all these metrics
         self.metrics: dict = {
-            "design_to_target_iptm": 1,
+            "complex_plddt": 1,
             "design_ptm": 1,
-            "neg_min_design_to_target_pae": 1,
-            "neg_lattice_rmsd_refolded": 4,  # Negative weight to minimize! Wait, rank method handles direction?
-            "h_bonds_per_interface_refolded": 1,
-            "packing_density_refolded": 1,
+            "neg_min_interaction_pae": 1,
+            "neg_local_rmsd": 1,
+            "neg_global_rmsd": 2,
         }
         if use_affinity:
             self.metrics: dict = {
-                "design_to_target_iptm": 1,
+                "complex_plddt": 1,
                 "design_ptm": 1,
-                "neg_min_design_to_target_pae": 1,
+                "neg_min_interaction_pae": 1,
                 "affinity_probability_binary1": 1,
-                "neg_lattice_rmsd_refolded": 4,
-                "h_bonds_per_interface_refolded": 1,
-                "packing_density_refolded": 1,
+                "neg_local_rmsd": 1,
+                "neg_global_rmsd": 2,
             }
 
         # override metrics
@@ -233,9 +231,8 @@ class Filter(Task):
                 else:
                     self.metrics[k] = metrics_override[k]
 
-        # Define how to Filter
+        # Define how to Filter (RMSD and structural similarity only)
         self.filters = [
-            {"feature": "has_x", "lower_is_better": True, "threshold": 0},
             {
                 "feature": "local_rmsd",
                 "lower_is_better": True,
@@ -269,44 +266,6 @@ class Filter(Task):
                     "feature": "bb_target_aligned<2.5",
                     "lower_is_better": False,
                 }
-            )
-        if filter_cysteine:
-            self.filters.append(
-                {
-                    "feature": "CYS_fraction",
-                    "lower_is_better": True,
-                    "threshold": 0,
-                },
-            )
-        if filter_biased:
-            self.filters.extend(
-                [
-                    {
-                        "feature": "ALA_fraction",
-                        "lower_is_better": True,
-                        "threshold": 0.3,
-                    },
-                    {
-                        "feature": "GLY_fraction",
-                        "lower_is_better": True,
-                        "threshold": 0.3,
-                    },
-                    {
-                        "feature": "GLU_fraction",
-                        "lower_is_better": True,
-                        "threshold": 0.3,
-                    },
-                    {
-                        "feature": "LEU_fraction",
-                        "lower_is_better": True,
-                        "threshold": 0.3,
-                    },
-                    {
-                        "feature": "VAL_fraction",
-                        "lower_is_better": True,
-                        "threshold": 0.3,
-                    },
-                ]
             )
         self.filters.extend(additional_filters)
 
@@ -365,17 +324,23 @@ class Filter(Task):
         self.df_in = df_in.copy()
         df = df_in.copy()
 
-        lattice_informative = "neg_lattice_rmsd_refolded" in df and (
-            df["neg_lattice_rmsd_refolded"].fillna(0) != 0
-        ).any()
-        has_ligand = "ligand_burial_fraction" in df
-
         if self.from_inverse_folded:
             df["global_rmsd"] = df["bb_rmsd"]
         else:
             df["global_rmsd"] = df["rmsd"]
 
-        if lattice_informative:
+        lattice_informative = "neg_lattice_rmsd_refolded" in df and (
+            df["neg_lattice_rmsd_refolded"].fillna(0) != 0
+        ).any()
+
+        # Multi-chain / two-chain material case: lattice alternating RMSD
+        if "lattice_rmsd_refolded" in df and df["lattice_rmsd_refolded"].notna().any():
+            df["local_rmsd"] = df["lattice_rmsd_refolded"]
+            self.global_rmsd_threshold = 15.0
+            for filter_dict in self.filters:
+                if filter_dict.get("feature") == "global_rmsd":
+                    filter_dict["threshold"] = self.global_rmsd_threshold
+        elif lattice_informative:
             df["local_rmsd"] = -df["neg_lattice_rmsd_refolded"]
             self.global_rmsd_threshold = 15.0
             for filter_dict in self.filters:
@@ -396,26 +361,30 @@ class Filter(Task):
             for filter_dict in self.filters:
                 if filter_dict.get("feature") == "global_rmsd":
                     filter_dict["threshold"] = self.global_rmsd_threshold
+        # Multi-chain per-chain local RMSD
+        elif "bb_rmsd_design" in df and self.from_inverse_folded:
+            df["local_rmsd"] = df["bb_rmsd_design"]
+        elif "rmsd_design" in df and not self.from_inverse_folded:
+            df["local_rmsd"] = df["rmsd_design"]
+        # Single-chain homomer / tape fallback
         else:
             df["local_rmsd"] = df["global_rmsd"]
+
+        df["neg_local_rmsd"] = -df["local_rmsd"]
+        df["neg_global_rmsd"] = -df["global_rmsd"]
 
         if "designfolding-rmsd" in df:
             df["designfolding_rmsd"] = df["designfolding-rmsd"]
         if "designfolding-bb_rmsd" in df and self.from_inverse_folded:
             df["designfolding_rmsd"] = df["designfolding-bb_rmsd"]
+        if "designfolding_rmsd" in df:
+            df["neg_designfolding_rmsd"] = -df["designfolding_rmsd"]
+
         if "min_design_to_target_pae" in df:
             df["neg_min_design_to_target_pae"] = -df["min_design_to_target_pae"]
+        if "min_interaction_pae" in df:
+            df["neg_min_interaction_pae"] = -df["min_interaction_pae"]
 
-        if "design_hydrophobicity" in df:
-            df["neg_design_hydrophobicity"] = -df["design_hydrophobicity"]
-        if "design_largest_hydrophobic_patch_refolded" in df:
-            df["neg_design_largest_hydrophobic_patch_refolded"] = -df[
-                "design_largest_hydrophobic_patch_refolded"
-            ]
-        df["neg_min_interaction_pae"] = -df["min_interaction_pae"]
-        if "outward_ilv_fraction" in df:
-            df["neg_outward_ilv_fraction"] = -df["outward_ilv_fraction"]
-        df["has_x"] = df["designed_sequence"].str.contains("X")
         self.df = df
 
         print(f"Total number of designs: {len(self.df):>5}")
@@ -473,15 +442,13 @@ class Filter(Task):
                 self.df[col + "_z"] = (self.df[col] - mean) / std
 
         importances = {
-            "affinity_probability_binary1": 1.5,
             "design_iiptm": 1.0,
-            "design_ptm": 0.5,
+            "design_ptm": 1.0,
+            "complex_plddt": 1.0,
+            "min_interaction_pae": -1.0,  # lower is better
             "min_design_to_target_pae": -1.0,  # lower is better
-            "design_hydrophobicity": -0.125,  # lower is better
-            "design_largest_hydrophobic_patch_refolded": -0.15,  # lower is better
-            "delta_sasa_refolded": 0.25,
-            "plip_saltbridge_refolded": 0.25,
-            "plip_hbonds_refolded": 0.25,
+            "local_rmsd": -2.0,  # lower is better
+            "global_rmsd": -1.0,  # lower is better
         }
 
         self.df["absolute_score"] = 0.0
@@ -494,7 +461,9 @@ class Filter(Task):
 
         self.df["structure_confidence"] = 0.0
         weight_sum = 0
-        for col in ["design_iiptm", "design_ptm", "min_design_to_target_pae"]:
+        for col in ["design_iiptm", "design_ptm", "complex_plddt", "min_design_to_target_pae", "min_interaction_pae"]:
+            if col not in importances:
+                continue
             weight = importances[col]
             norm_col = col + "_z"
             if norm_col not in self.df.columns:
@@ -511,12 +480,7 @@ class Filter(Task):
             if filter_col not in self.df.columns:
                 continue
 
-            if "fraction" in feat:
-                # If this is a "fraction" feature, meaning a res_type fraction filter, only apply the penalty if num_design > 8
-                mask_fail = (self.df["num_design"] > 8) & (self.df[filter_col] == False)
-            else:
-                mask_fail = self.df[filter_col] == False
-
+            mask_fail = self.df[filter_col] == False
             self.df.loc[mask_fail, "absolute_score"] *= 0.1
 
 
@@ -548,15 +512,23 @@ class Filter(Task):
         self.df = self.df.sort_values("max_rank")
         self.df["secondary_rank"] = self.df["max_rank"].rank(method="dense").astype(int)
 
-        # sort by ranking and resolve ties via design_iptm
+        # sort by ranking and resolve ties via complex_plddt / design_ptm / design_iptm
+        tie_col = (
+            "complex_plddt"
+            if "complex_plddt" in self.df
+            else (
+                "design_ptm"
+                if "design_ptm" in self.df
+                else (
+                    "design_to_target_iptm"
+                    if "design_to_target_iptm" in self.df
+                    else "design_iptm"
+                )
+            )
+        )
         self.df = self.df.sort_values(
-            by=[
-                "secondary_rank",
-                "design_to_target_iptm"
-                if "design_to_target_iptm" in self.df
-                else "design_iptm",
-            ],
-            ascending=[True, False],
+            by=["secondary_rank", tie_col] if tie_col in self.df else ["secondary_rank"],
+            ascending=[True, False] if tie_col in self.df else [True],
         )
 
         self.df["final_rank"] = np.arange(1, len(self.df) + 1)
@@ -569,25 +541,20 @@ class Filter(Task):
             "designed_sequence",
             "designed_chain_sequence",
             "num_design",
-            "affinity_probability_binary1",
-            "design_to_target_iptm"
-            if "design_to_target_iptm" in self.df
-            else "design_iptm",
-            "min_design_to_target_pae"
-            if "min_design_to_target_pae" in self.df
-            else "min_interaction_pae",
+            "complex_plddt",
             "design_ptm",
             "local_rmsd",
             "global_rmsd",
             "designfolding_rmsd"
             if "designfolding_rmsd" in self.df
             else "local_rmsd",
-            "plip_saltbridge" + ("_refolded" if self.from_inverse_folded else ""),
-            "plip_hbonds" + ("_refolded" if self.from_inverse_folded else ""),
+            "min_interaction_pae",
+            "affinity_probability_binary1",
+            "design_to_target_iptm"
+            if "design_to_target_iptm" in self.df
+            else "design_iptm",
+            "min_design_to_target_pae",
             "delta_sasa_refolded",
-            "design_largest_hydrophobic_patch_refolded",
-            "design_chain_hydrophobicity",
-            "design_hydrophobicity",
             "loop",
             "helix",
             "sheet",
@@ -738,6 +705,9 @@ class Filter(Task):
             "designfolding_rmsd"
             if "designfolding_rmsd" in self.df
             else "local_rmsd",
+            "complex_plddt",
+            "design_ptm",
+            "min_interaction_pae",
             "design_iptm",
             "design_to_target_iptm"
             if "design_to_target_iptm" in self.df
@@ -745,82 +715,25 @@ class Filter(Task):
             "min_design_to_target_pae"
             if "min_design_to_target_pae" in self.df
             else "min_interaction_pae",
-            "design_ipsae_min"
-            if "design_ipsae_min" in self.df
-            else "design_iptm",
-            "design_to_target_ipsae"
-            if "design_to_target_ipsae" in self.df
-            else "design_iptm",
             "delta_sasa_refolded"
             if self.from_inverse_folded
             else "delta_sasa_original",
-            "plip_saltbridge" + ("_refolded" if self.from_inverse_folded else ""),
-            "plip_hbonds" + ("_refolded" if self.from_inverse_folded else ""),
         ]
 
         # Scatter pairs (each will be one page)
         extra_pairs = [
             ("num_design", "rank"),
-            (
-                "num_design",
-                "plip_saltbridge" + ("_refolded" if self.from_inverse_folded else ""),
-            ),
-            (
-                "num_design",
-                "plip_hbonds" + ("_refolded" if self.from_inverse_folded else ""),
-            ),
-            (
-                "num_design",
-                "delta_sasa" + ("_refolded" if self.from_inverse_folded else ""),
-            ),
-            (
-                "num_design",
-                "design_ptm",
-            ),
+            ("num_design", "local_rmsd"),
+            ("num_design", "global_rmsd"),
+            ("num_design", "complex_plddt"),
+            ("num_design", "design_ptm"),
             (
                 "num_design",
                 "min_design_to_target_pae"
                 if "min_design_to_target_pae" in self.df
                 else "min_interaction_pae",
             ),
-            (
-                "num_design",
-                "design_to_target_iptm"
-                if "design_to_target_iptm" in self.df
-                else "design_iptm",
-            ),
-            (
-                "num_design",
-                "design_iptm",
-            ),
-            (
-                "num_design",
-                "design_ipsae_min" if "design_ipsae_min" in self.df else "design_iptm",
-            ),
-            (
-                "num_design",
-                "design_to_target_ipsae" if "design_to_target_ipsae" in self.df else "design_iptm",
-            ),
-            (
-                "num_design",
-                "design_iiptm" if "design_iiptm" in self.df else "design_iptm",
-            ),
-            (
-                "num_design",
-                "design_largest_hydrophobic_patch_refolded"
-                if "design_largest_hydrophobic_patch_refolded" in self.df
-                else "design_iptm",
-            ),
-            (
-                "num_design",
-                "design_hydrophobicity"
-                if "design_hydrophobicity" in self.df
-                else "design_iptm",
-            ),
         ]
-        if not self.from_inverse_folded:
-            extra_pairs.append(("delta_sasa_refolded", "delta_sasa_original"))
-            extra_pairs.append(("plip_saltbridge", "delta_sasa_original"))
 
         # Histograms with selected overlay
         hist_metrics = [
@@ -830,32 +743,14 @@ class Filter(Task):
             "designfolding_rmsd"
             if "designfolding_rmsd" in self.df
             else "design_ptm",
+            "complex_plddt",
+            "design_ptm",
+            "min_interaction_pae",
             "design_to_target_iptm"
             if "design_to_target_iptm" in self.df
             else "design_iptm",
             "design_iptm",
-            "design_ipsae_min"
-            if "design_ipsae_min" in self.df
-            else "design_iptm",
-            "design_to_target_ipsae"
-            if "design_to_target_ipsae" in self.df
-            else "design_iptm",
-            "min_design_to_target_pae"
-            if "min_design_to_target_pae" in self.df
-            else "min_interaction_pae",
-            "plip_saltbridge" + ("_refolded" if self.from_inverse_folded else ""),
-            "plip_hbonds" + ("_refolded" if self.from_inverse_folded else ""),
-            "plip_hydrophobic" + ("_refolded" if self.from_inverse_folded else ""),
-            "delta_sasa_refolded",
-            "design_largest_hydrophobic_patch_refolded"
-            if "design_largest_hydrophobic_patch_refolded" in self.df
-            else "delta_sasa_refolded",
-            "design_hydrophobicity"
-            if "design_hydrophobicity" in self.df
-            else "delta_sasa_refolded",
         ]
-        if not self.from_inverse_folded:
-            hist_metrics.append("delta_sasa_original")
 
         hist_metrics = list(dict.fromkeys(hist_metrics))
         extra_pairs = list(dict.fromkeys(extra_pairs))

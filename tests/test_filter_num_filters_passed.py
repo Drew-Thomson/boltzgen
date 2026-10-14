@@ -15,16 +15,17 @@ def test_num_filters_passed_independent_evaluation():
     task.df = pd.DataFrame(
         {
             "id": ["design_1", "design_2"],
-            "has_x": [0, 0],              # Both pass (<=0)
-            "filter_rmsd": [16.0, 16.0],  # Both fail (<=2.5)
-            "max_consecutive_ilv_sheet": [1, 4], "design_iptm": [0.8, 0.8]
+            "designfolding_rmsd": [1.0, 1.0],  # Both pass (<=2.5)
+            "global_rmsd": [16.0, 16.0],       # Both fail (<=2.5)
+            "local_rmsd": [1.5, 4.0],          # design_1 passes (<=2.5), design_2 fails
+            "design_iptm": [0.8, 0.8],
         }
     )
     
     task.filters = [
-        {"feature": "has_x", "lower_is_better": True, "threshold": 0},
-        {"feature": "filter_rmsd", "lower_is_better": True, "threshold": 2.5},
-        {"feature": "max_consecutive_ilv_sheet", "lower_is_better": True, "threshold": 2},
+        {"feature": "designfolding_rmsd", "lower_is_better": True, "threshold": 2.5},
+        {"feature": "global_rmsd", "lower_is_better": True, "threshold": 2.5},
+        {"feature": "local_rmsd", "lower_is_better": True, "threshold": 2.5},
     ]
     
     # Initialize necessary columns
@@ -46,8 +47,8 @@ def test_num_filters_passed_independent_evaluation():
         task.df["num_filters_passed"] += task.df[filter_col].astype(int)
         task.df["pass_filters"] = task.df[filter_cols].all(axis=1)
         
-    assert task.df.loc[0, "num_filters_passed"] == 2  # Passes has_x and max_consecutive_ilv_sheet
-    assert task.df.loc[1, "num_filters_passed"] == 1  # Passes only has_x
+    assert task.df.loc[0, "num_filters_passed"] == 2  # Passes designfolding_rmsd and local_rmsd
+    assert task.df.loc[1, "num_filters_passed"] == 1  # Passes only designfolding_rmsd
     
     # Now verify the ranking sorts properly via sort_df using this tuple setup
     task.metrics = {"complex_plddt": 1}

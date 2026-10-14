@@ -21,11 +21,7 @@ def material_filtering_overrides(topology: str) -> dict[str, Any] | None:
         }
     if topology in {"linear_tape", "double_tape", "bilayer_sheet"}:
         overrides = {
-            "ligand_burial_fraction": 1,
             "neg_min_interaction_pae": 1,
-            "neg_outward_ilv_fraction": 1,
-            "neg_design_hydrophobicity": 2,
-            "neg_max_consecutive_ilv_sheet": 2,
             "complex_plddt": 1,
             "design_to_target_iptm": None,
             "neg_lattice_rmsd_refolded": 1,
@@ -33,14 +29,12 @@ def material_filtering_overrides(topology: str) -> dict[str, Any] | None:
         if topology == "bilayer_sheet":
             overrides.update({
                 "sheet_planarity": 1,
-                "h_bonds_per_interface_refolded": 1,
             })
         return overrides
     if topology == "hexagonal_mesh":
         return {
             "sheet_planarity": 1,
             "neg_pore_aspect_ratio": 1,
-            "h_bonds_per_interface_refolded": 1,
         }
     if topology == "cylindrical":
         return {
@@ -72,7 +66,18 @@ def format_metrics_override(topology: str) -> str | None:
     )
     return f"metrics_override={{{values}}}"
 
-def format_additional_filters(topology: str) -> str | None:
-    if topology in {"linear_tape", "double_tape", "bilayer_sheet"}:
-        return "additional_filters=[{feature: max_consecutive_ilv_sheet, lower_is_better: True, threshold: 2}]"
+def format_additional_filters(
+    topology: str, enable_consecutive_hydrophobics: bool = False
+) -> str | None:
+    """Format optional additional hard filters for material topologies.
+
+    Consecutive hydrophobic filtering (max_consecutive_ilv_sheet <= 2) is
+    inactivated by default but can be enabled via enable_consecutive_hydrophobics.
+    """
+    valid_topologies = {"linear_tape", "double_tape", "bilayer_sheet"}
+    if enable_consecutive_hydrophobics and topology in valid_topologies:
+        return (
+            "additional_filters=[{feature: max_consecutive_ilv_sheet, "
+            "lower_is_better: True, threshold: 2}]"
+        )
     return None
