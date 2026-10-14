@@ -292,10 +292,25 @@ def main():
     is_heteromer_assembly = args.heteromer_counter_screen or (
         len(protein_templates) == 2 and args.topology in supported_heteromer_topologies
     )
-    if is_heteromer_assembly and args.copies % 2:
-        parser.error(
-            f"{args.topology} with two protein templates requires an even number of placements"
-        )
+    if is_heteromer_assembly:
+        if args.topology == "double_tape":
+            if args.copies % 4 != 0:
+                parser.error(
+                    f"double_tape with two protein templates requires --copies to be a multiple of 4; got {args.copies}"
+                )
+        elif args.copies % 2 != 0:
+            parser.error(
+                f"{args.topology} with two protein templates requires --copies to be an even number (multiple of 2); got {args.copies}"
+            )
+    else:
+        if args.asym_unit_size > 1 and args.copies % args.asym_unit_size != 0:
+            parser.error(
+                f"--copies ({args.copies}) must be a multiple of the asymmetric unit protein count ({args.asym_unit_size})"
+            )
+        if args.topology == "double_tape" and args.copies % 2 != 0:
+            parser.error(
+                f"double_tape requires --copies to be an even number (multiple of 2); got {args.copies}"
+            )
 
     if args.grid_dim_x < 1 or args.grid_dim_y < 1:
         parser.error("--grid_dim_x and --grid_dim_y must be positive")
@@ -449,10 +464,11 @@ def main():
     
     if args.run:
         asym_size = 1 if is_heteromer_assembly else args.asym_unit_size
+        n_units = args.copies if is_heteromer_assembly else args.copies // args.asym_unit_size
         if "asym_unit" in config:
-            print(f"Running BoltzGen with {args.copies} copies of an asymmetric unit of size {asym_size}...")
+            print(f"Running BoltzGen with {args.copies} total chains ({n_units} asymmetric units of size {asym_size})...")
         else:
-            print(f"Running BoltzGen with {args.copies} copies of length {args.length}...")
+            print(f"Running BoltzGen with {args.copies} total chains of length {args.length}...")
         print(f"Topology constraint: {args.topology} (Asym Unit Size: {asym_size})")
         
         cmd = [

@@ -166,19 +166,97 @@ def expand_material_spec(
                 "asymmetric units containing ligands; ligand-mediated assembly is "
                 "a ternary interaction and is not screened by the current protein-only controls"
             )
-        if copies % 2:
-            raise ValueError(
-                "heteromer counter-screening requires an even number of placements"
-            )
         if topology not in supported_heteromer_topologies:
             raise ValueError(
                 "heteromer counter-screening supports only cyclic, linear_tape, "
                 "double_tape, open_arc, and helical topologies"
             )
-    elif is_heteromer_assembly and copies % 2:
-        raise ValueError(
-            f"{topology} with alternating partner templates requires an even number of placements"
-        )
+        if topology == "double_tape":
+            if copies % 4 != 0:
+                raise ValueError(
+                    f"heteromer counter-screening with double_tape requires copies to be a multiple of 4; got {copies}"
+                )
+        elif copies % 2 != 0:
+            raise ValueError(
+                f"heteromer counter-screening requires an even number of copies (multiple of 2); got {copies}"
+            )
+    elif is_heteromer_assembly:
+        if topology == "double_tape":
+            if copies % 4 != 0:
+                raise ValueError(
+                    f"double_tape with alternating partner templates requires copies to be a multiple of 4; got {copies}"
+                )
+        elif copies % 2 != 0:
+            raise ValueError(
+                f"{topology} with alternating partner templates requires copies to be an even number (multiple of 2); got {copies}"
+            )
+    else:
+        if len(proteins) > 1 and copies % len(proteins) != 0:
+            raise ValueError(
+                f"copies ({copies}) must be a multiple of the asymmetric unit protein count ({len(proteins)})"
+            )
+        if topology == "double_tape" and copies % 2 != 0:
+            raise ValueError(
+                f"double_tape requires copies to be an even number (multiple of 2); got {copies}"
+            )
+        if topology == "cage_tetrahedral" and copies != 12:
+            raise ValueError(
+                f"cage_tetrahedral requires copies to be 12; got {copies}"
+            )
+        if topology == "cage_octahedral" and copies != 24:
+            raise ValueError(
+                f"cage_octahedral requires copies to be 24; got {copies}"
+            )
+        if topology_params is not None:
+            if (
+                topology == "bilayer_sheet"
+                and "grid_dim_x" in topology_params
+                and "grid_dim_y" in topology_params
+            ):
+                expected = (
+                    2
+                    * int(topology_params["grid_dim_x"])
+                    * int(topology_params["grid_dim_y"])
+                )
+                if copies != expected:
+                    raise ValueError(
+                        f"bilayer_sheet requires copies to be {expected}; got {copies}"
+                    )
+            elif (
+                topology == "hexagonal_mesh"
+                and "grid_dim_x" in topology_params
+                and "grid_dim_y" in topology_params
+            ):
+                expected = (
+                    3
+                    * int(topology_params["grid_dim_x"])
+                    * int(topology_params["grid_dim_y"])
+                )
+                if copies != expected:
+                    raise ValueError(
+                        f"hexagonal_mesh requires copies to be {expected}; got {copies}"
+                    )
+            elif (
+                topology == "nanotube"
+                and "ring_size" in topology_params
+                and "num_tiers" in topology_params
+            ):
+                expected = int(topology_params["ring_size"]) * int(
+                    topology_params["num_tiers"]
+                )
+                if copies != expected:
+                    raise ValueError(
+                        f"nanotube requires copies to be {expected}; got {copies}"
+                    )
+            elif topology == "multi_helical" and "num_starts" in topology_params:
+                starts = int(topology_params["num_starts"])
+                if copies % starts != 0:
+                    raise ValueError(
+                        f"multi_helical requires copies to be a multiple of num_starts "
+                        f"({starts}); got {copies}"
+                    )
+
+    n_placements = copies if is_heteromer_assembly else copies // len(proteins)
 
     normalized_ligands: list[tuple[int, dict[str, Any], str, int | None, int | Fraction]] = []
     for template_idx, ligand in ligands:
@@ -225,7 +303,7 @@ def expand_material_spec(
     entities: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []
     unit_records: list[dict[str, Any]] = []
-    for placement_idx in range(copies):
+    for placement_idx in range(n_placements):
         if is_heteromer_assembly:
             partner_slot, side = _heteromer_partner_slot(topology, placement_idx)
             emitted_proteins = [(partner_slot, proteins[partner_slot], side)]
@@ -305,11 +383,12 @@ def expand_material_spec(
 
         for template_idx, ligand, scope, parent_slot, multiplicity in normalized_ligands:
             if scope == "per_peptide":
-                total = copies * multiplicity
+                parent_count = n_placements
+                total = parent_count * multiplicity
                 if total.denominator != 1:
                     raise ValueError(
                         f"ligands_per_peptide={multiplicity} for template {template_idx} does not "
-                        f"produce an integer ligand count across {copies} peptides"
+                        f"produce an integer ligand count across {parent_count} peptides"
                     )
                 ligand_count = (
                     (placement_idx + 1) * multiplicity.numerator // multiplicity.denominator

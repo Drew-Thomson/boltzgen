@@ -104,7 +104,7 @@ def test_fractional_ligand_ratio_requires_integral_total():
 
 def test_attach_to_can_select_a_named_protein_template():
     _, layout = expand_material_spec(
-        1,
+        2,
         [
             {"type": "protein", "name": "a", "length": 10},
             {"type": "protein", "name": "b", "length": 12},
@@ -292,7 +292,7 @@ def test_default_double_tape_alternating_sheets_ungated():
     assert sheet_0 == ["A", "B", "A", "B"]
     assert sheet_1 == ["A", "B", "A", "B"]
 
-    with pytest.raises(ValueError, match="requires an even number of placements"):
+    with pytest.raises(ValueError, match="requires copies to be a multiple of 4"):
         expand_material_spec(
             7,
             [
@@ -302,3 +302,58 @@ def test_default_double_tape_alternating_sheets_ungated():
             heteromer_screening=False,
             topology="double_tape",
         )
+
+    with pytest.raises(ValueError, match="requires copies to be a multiple of 4"):
+        expand_material_spec(
+            6,
+            [
+                {"type": "protein", "name": "partner_a", "length": 9},
+                {"type": "protein", "name": "partner_b", "length": 9},
+            ],
+            heteromer_screening=False,
+            topology="double_tape",
+        )
+
+
+def test_copies_divisibility_by_asym_unit_size_enforced() -> None:
+    msg = r"copies \(5\) must be a multiple of the asymmetric unit protein count \(2\)"
+    with pytest.raises(ValueError, match=msg):
+        expand_material_spec(
+            5,
+            [
+                {"type": "protein", "name": "a", "length": 10},
+                {"type": "protein", "name": "b", "length": 12},
+            ],
+        )
+
+    entities, layout = expand_material_spec(
+        6,
+        [
+            {"type": "protein", "name": "a", "length": 10},
+            {"type": "protein", "name": "b", "length": 12},
+        ],
+    )
+    assert len(entities) == 6
+    assert layout["copies"] == 6
+    assert len(layout["placements"]) == 3
+    assert all(len(p["protein_asym_indices"]) == 2 for p in layout["placements"])
+
+
+def test_double_tape_copies_parity_enforced() -> None:
+    with pytest.raises(
+        ValueError, match="double_tape requires copies to be an even number"
+    ):
+        expand_material_spec(
+            5,
+            [{"type": "protein", "length": 10}],
+            topology="double_tape",
+        )
+
+    entities, layout = expand_material_spec(
+        6,
+        [{"type": "protein", "length": 10}],
+        topology="double_tape",
+    )
+    assert len(entities) == 6
+    assert layout["copies"] == 6
+    assert len(layout["placements"]) == 6
