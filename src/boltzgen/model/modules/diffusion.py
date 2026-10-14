@@ -631,14 +631,20 @@ class AtomDiffusion(Module):
             cylinder_stagger_z_noise = None
             cylinder_stagger_phi_noise = None
 
-        if topology in ("double_tape", "bilayer_sheet") and spacing_noise > 0:
-            # Symmetric noise for the double_tape lattice:
-            # - layer_dist_noise perturbs the inter-sheet distance (applied equally to both
-            #   sheets via the existing (layer_idx - 0.5) * layer_dist formula), encouraging
-            #   sampling of different hydrophobic core packing distances.
-            # - layer_offset_y/z_noise perturb the *relative* in-plane registry between the two
-            #   sheets, split symmetrically (+/- half) so the lattice stays centered and neither
-            #   sheet is treated as a fixed reference.
+        if topology == "double_tape" and spacing_noise > 0:
+            # For double_tape, spacing_noise modulates:
+            # - layer_dist_noise: inter-sheet distance (X-axis)
+            # - layer_offset_y_noise: relative lateral in-plane registry (Y-axis)
+            # - layer_offset_z_noise: relative longitudinal offset between sheets (Z-axis)
+            # Inter-strand spacing along Z within each sheet remains fixed to target_pitch.
+            layer_dist_noise = torch.randn(shape[0], device=self.device) * spacing_noise
+            layer_offset_y_noise = (
+                torch.randn(shape[0], device=self.device) * spacing_noise
+            )
+            layer_offset_z_noise = (
+                torch.randn(shape[0], device=self.device) * spacing_noise
+            )
+        elif topology == "bilayer_sheet" and spacing_noise > 0:
             layer_dist_noise = torch.randn(shape[0], device=self.device) * spacing_noise
             layer_offset_y_noise = (
                 torch.randn(shape[0], device=self.device) * spacing_noise
@@ -650,6 +656,14 @@ class AtomDiffusion(Module):
             layer_dist_noise = None
             layer_offset_y_noise = None
             layer_offset_z_noise = None
+
+        twist_noise_scale = float(os.environ.get("MAT_TWIST_NOISE", "0.0"))
+        if topology in ("double_tape", "linear_tape") and twist_noise_scale > 0:
+            twist_offsets = (
+                torch.randn(shape[0], device=self.device) * twist_noise_scale
+            )
+        else:
+            twist_offsets = None
 
         antiparallel_prob = float(os.environ.get("MAT_ANTIPARALLEL_PROB", "0.0"))
         if antiparallel_prob > 0:
@@ -720,7 +734,13 @@ class AtomDiffusion(Module):
             ]
             if topology in guided_topologies:
                 guidance_scale = float(os.environ.get("MAT_GUIDANCE_SCALE", "1.0"))
-                target_pitch = float(os.environ.get("MAT_TARGET_PITCH", "10.0"))
+                default_pitch = (
+                    "4.8" if topology in ("double_tape", "linear_tape") else "10.0"
+                )
+                target_pitch = float(
+                    os.environ.get("MAT_STRAND_SPACING")
+                    or os.environ.get("MAT_TARGET_PITCH", default_pitch)
+                )
                 target_radius = float(os.environ.get("MAT_TARGET_RADIUS", "15.0"))
                 asym_unit_size = int(os.environ.get("MAT_ASYM_UNIT_SIZE", "1"))
                 if topology in ("cage_tetrahedral", "cage_octahedral"):
@@ -862,10 +882,18 @@ class AtomDiffusion(Module):
                             )
 
                             # 2. Generate ideal COMs and full copy rotations.
+                            default_pitch = (
+                                "4.8"
+                                if topology in ("double_tape", "linear_tape")
+                                else "10.0"
+                            )
+                            pitch_val = float(
+                                os.environ.get("MAT_STRAND_SPACING")
+                                or os.environ.get("MAT_TARGET_PITCH", default_pitch)
+                            )
                             params = {
-                                "target_pitch": float(
-                                    os.environ.get("MAT_TARGET_PITCH", "10.0")
-                                ),
+                                "target_pitch": pitch_val,
+                                "strand_spacing": pitch_val,
                                 "target_radius": sample_radius,
                                 "layer_dist": float(
                                     os.environ.get("MAT_LAYER_DIST", "10.0")
@@ -929,6 +957,19 @@ class AtomDiffusion(Module):
                                 "layer_offset_z_noise": (
                                     layer_offset_z_noise[batch_idx].item()
                                     if layer_offset_z_noise is not None
+                                    else None
+                                ),
+                                "layer_offset_z": (
+                                    float(os.environ["MAT_LAYER_OFFSET_Z"])
+                                    if "MAT_LAYER_OFFSET_Z" in os.environ
+                                    else None
+                                ),
+                                "target_twist": float(
+                                    os.environ.get("MAT_TARGET_TWIST", "0.0")
+                                ),
+                                "twist_offset": (
+                                    twist_offsets[batch_idx].item()
+                                    if twist_offsets is not None
                                     else None
                                 ),
                                 "grid_dim_x": int(

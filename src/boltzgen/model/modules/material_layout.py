@@ -152,6 +152,9 @@ def expand_material_spec(
         "open_arc",
         "helical",
     }
+    is_heteromer_assembly = heteromer_screening or (
+        len(proteins) == 2 and topology in supported_heteromer_topologies
+    )
     if heteromer_screening:
         if len(proteins) != 2:
             raise ValueError(
@@ -172,6 +175,10 @@ def expand_material_spec(
                 "heteromer counter-screening supports only cyclic, linear_tape, "
                 "double_tape, open_arc, and helical topologies"
             )
+    elif is_heteromer_assembly and copies % 2:
+        raise ValueError(
+            f"{topology} with alternating partner templates requires an even number of placements"
+        )
 
     normalized_ligands: list[tuple[int, dict[str, Any], str, int | None, int | Fraction]] = []
     for template_idx, ligand in ligands:
@@ -219,7 +226,7 @@ def expand_material_spec(
     records: list[dict[str, Any]] = []
     unit_records: list[dict[str, Any]] = []
     for placement_idx in range(copies):
-        if heteromer_screening:
+        if is_heteromer_assembly:
             partner_slot, side = _heteromer_partner_slot(topology, placement_idx)
             emitted_proteins = [(partner_slot, proteins[partner_slot], side)]
         else:
@@ -239,7 +246,7 @@ def expand_material_spec(
             chain_id = _chain_id(asym_index)
             entity = _make_entity("protein", protein, chain_id, protein_slot + 1)
             
-            if heteromer_screening and charge_bias_strength is not None and float(charge_bias_strength) != 0:
+            if is_heteromer_assembly and charge_bias_strength is not None and float(charge_bias_strength) != 0:
                 partner_label = "A" if protein_slot == 0 else "B"
                 bias = float(charge_bias_strength)
                 if partner_label == "A":
@@ -279,18 +286,18 @@ def expand_material_spec(
                         {
                             "partner_label": "A" if protein_slot == 0 else "B",
                             "topology_order_index": placement_idx,
-                            "topology_pattern": "double_tape_side_alternating"
+                            "topology_pattern": "alternating_along_each_side"
                             if topology == "double_tape"
-                            else "alternating",
+                            else "alternating_in_topology_order",
                             **(
                                 {
-                            "double_tape_side": side
+                                    "double_tape_side": side
                                 }
                                 if topology == "double_tape"
                                 else {}
                             ),
                         }
-                        if heteromer_screening
+                        if is_heteromer_assembly
                         else {}
                     ),
                 }
@@ -336,7 +343,7 @@ def expand_material_spec(
     layout = {
         "version": 1,
         "copies": copies,
-        "guided_proteins_per_unit": 1 if heteromer_screening else len(proteins),
+        "guided_proteins_per_unit": 1 if is_heteromer_assembly else len(proteins),
         "chains": records,
         "placements": unit_records,
     }
@@ -360,26 +367,6 @@ def expand_material_spec(
             "counter_screen_supported": True,
             "topology_params": dict(topology_params or {}),
         }
-        for record in records:
-            if record["role"] == "protein":
-                record.update(
-                    {
-                        "partner_label": (
-                            "A"
-                            if record["protein_template_index"] == proteins[0][0]
-                            else "B"
-                        ),
-                        "topology_order_index": int(record["placement_index"]),
-                        "topology_pattern": layout["heteromer_screening"]["placement_pattern"],
-                        **(
-                            {"double_tape_side": _heteromer_partner_slot(
-                                topology, int(record["placement_index"])
-                            )[1]}
-                            if topology == "double_tape"
-                            else {}
-                        ),
-                    }
-                )
     return entities, layout
 
 

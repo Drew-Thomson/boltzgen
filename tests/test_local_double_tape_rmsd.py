@@ -32,16 +32,16 @@ def test_two_chain_double_tape_partner_mapping() -> None:
         {"type": "protein", "length": 9, "symmetric_group": 1},
         {"type": "protein", "length": 9, "symmetric_group": 2},
     ]
-    entities, layout = expand_material_spec(4, asym_unit, topology="double_tape")
-    # 4 placements * 2 chains = 8 chains
+    entities, layout = expand_material_spec(8, asym_unit, topology="double_tape")
+    # 8 placements = 8 chains (4 per sheet)
     assert len(entities) == 8
-    # Partners alternate 0, 1, 0, 1, 0, 1, 0, 1
+    # Partners alternate along each sheet: 0, 0, 1, 1, 0, 0, 1, 1
     partner_slots = {
         idx: record["protein_slot_index"]
         for idx, record in enumerate(layout["chains"])
         if record["role"] == "protein"
     }
-    assert partner_slots == {0: 0, 1: 1, 2: 0, 3: 1, 4: 0, 5: 1, 6: 0, 7: 1}
+    assert partner_slots == {0: 0, 1: 0, 2: 1, 3: 1, 4: 0, 5: 0, 6: 1, 7: 1}
 
     # Verify that identical ideal/refold yields zero RMSD and 1.0 alternation ratio
     num_atoms = 8 * 9 * 4

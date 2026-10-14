@@ -99,8 +99,23 @@ def main():
     parser.add_argument("--asym_unit_size", type=int, default=1, help="Number of chains in the asymmetric unit")
     parser.add_argument("--topology", type=str, choices=["floating", "cyclic", "cylindrical", "linear_tape", "double_tape", "helical", "open_arc", "cage_tetrahedral", "cage_octahedral", "bilayer_sheet", "hexagonal_mesh", "nanotube", "multi_helical"], default="floating", help="Topology constraint during diffusion")
     parser.add_argument("--guidance_scale", type=float, default=1.0, help="Strength of the shape guidance")
-    parser.add_argument("--target_pitch", type=float, default=4.8, help="Target spacing between adjacent chains for tapes (A)")
+    parser.add_argument(
+        "--strand_spacing",
+        "--target_pitch",
+        dest="strand_spacing",
+        type=float,
+        default=4.8,
+        help="Target spacing between adjacent strands for tapes (default: 4.8 A)",
+    )
     parser.add_argument("--layer_dist", type=float, default=10.0, help="Target distance between the two layers in double_tape (A)")
+    parser.add_argument(
+        "--layer_offset_z",
+        type=float,
+        default=None,
+        help="Target longitudinal offset between the two layers in double_tape (A); defaults to 0.5 * strand_spacing",
+    )
+    parser.add_argument("--target_twist", type=float, default=0.0, help="Target axial twist per step for double_tape / linear_tape (degrees)")
+    parser.add_argument("--twist_noise", type=float, default=0.0, help="Standard deviation of noise to add to the axial twist (degrees)")
     parser.add_argument("--target_radius", type=float, default=15.0, help="Target radius for cyclic/cylindrical/helical (A)")
     parser.add_argument("--target_dz", type=float, default=None, help="Target axial translation per chain for helical / nanotube tier pitch / cylindrical intra-unit stagger (A)")
     parser.add_argument("--target_angle", type=float, default=None, help="Target rotation angle per chain for helical / cylindrical (degrees)")
@@ -274,10 +289,13 @@ def main():
                 "--heteromer_counter_screen supports cyclic, cylindrical, linear_tape, "
                 "double_tape, open_arc, and helical topologies"
             )
-        if args.copies % 2:
-            parser.error(
-                "--heteromer_counter_screen requires an even number of placements"
-            )
+    is_heteromer_assembly = args.heteromer_counter_screen or (
+        len(protein_templates) == 2 and args.topology in supported_heteromer_topologies
+    )
+    if is_heteromer_assembly and args.copies % 2:
+        parser.error(
+            f"{args.topology} with two protein templates requires an even number of placements"
+        )
 
     if args.grid_dim_x < 1 or args.grid_dim_y < 1:
         parser.error("--grid_dim_x and --grid_dim_y must be positive")
@@ -363,10 +381,12 @@ def main():
     os.environ["MAT_GUIDANCE_SCALE"] = str(args.guidance_scale)
     os.environ["MAT_LIGAND_INCLUSION_BIAS"] = str(args.ligand_inclusion_bias)
     os.environ["MAT_ASYM_UNIT_SIZE"] = str(
-        1 if args.heteromer_counter_screen else args.asym_unit_size
+        1 if is_heteromer_assembly else args.asym_unit_size
     )
+    args.target_pitch = getattr(args, "strand_spacing", getattr(args, "target_pitch", 4.8))
     os.environ["MAT_HETEROMER_SCREEN"] = str(args.heteromer_counter_screen).lower()
     os.environ["MAT_TARGET_PITCH"] = str(args.target_pitch)
+    os.environ["MAT_STRAND_SPACING"] = str(args.target_pitch)
     os.environ["MAT_TARGET_RADIUS"] = str(args.target_radius)
     os.environ["MAT_TARGET_DZ"] = str(args.target_dz)
     os.environ["MAT_TARGET_ANGLE"] = str(args.target_angle)
@@ -383,6 +403,12 @@ def main():
         os.environ.pop("MAT_SLIDE_NOISE", None)
     os.environ["MAT_ANTIPARALLEL_PROB"] = str(args.antiparallel_prob)
     os.environ["MAT_LAYER_DIST"] = str(args.layer_dist)
+    if args.layer_offset_z is not None:
+        os.environ["MAT_LAYER_OFFSET_Z"] = str(args.layer_offset_z)
+    else:
+        os.environ.pop("MAT_LAYER_OFFSET_Z", None)
+    os.environ["MAT_TARGET_TWIST"] = str(args.target_twist)
+    os.environ["MAT_TWIST_NOISE"] = str(args.twist_noise)
     os.environ["MAT_TARGET_CAGE_RADIUS"] = str(args.target_cage_radius)
     os.environ["MAT_GRID_DIM_X"] = str(args.grid_dim_x)
     os.environ["MAT_GRID_DIM_Y"] = str(args.grid_dim_y)
@@ -405,24 +431,29 @@ def main():
         topology=args.topology,
         topology_params={
             "target_pitch": args.target_pitch,
+            "strand_spacing": args.target_pitch,
             "target_radius": args.target_radius,
             "target_dz": args.target_dz,
             "target_angle": args.target_angle,
             "arc_radius": args.arc_radius,
             "target_arc_spacing": args.target_arc_spacing,
             "layer_dist": args.layer_dist,
+            "layer_offset_z": args.layer_offset_z,
             "radius_noise": args.radius_noise,
             "slide_noise": args.slide_noise,
+            "target_twist": args.target_twist,
+            "twist_noise": args.twist_noise,
         },
         charge_bias_strength=args.heteromer_charge_bias,
     )
     
     if args.run:
+        asym_size = 1 if is_heteromer_assembly else args.asym_unit_size
         if "asym_unit" in config:
-            print(f"Running BoltzGen with {args.copies} copies of an asymmetric unit of size {args.asym_unit_size}...")
+            print(f"Running BoltzGen with {args.copies} copies of an asymmetric unit of size {asym_size}...")
         else:
             print(f"Running BoltzGen with {args.copies} copies of length {args.length}...")
-        print(f"Topology constraint: {args.topology} (Asym Unit Size: {args.asym_unit_size})")
+        print(f"Topology constraint: {args.topology} (Asym Unit Size: {asym_size})")
         
         cmd = [
             "boltzgen", "run", yaml_file,

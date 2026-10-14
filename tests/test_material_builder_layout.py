@@ -261,3 +261,44 @@ def test_build_heteromer_counter_screen_specs_rejects_invalid_inputs(
         build_heteromer_counter_screen_specs(
             sequences, copies, topology, {}, "parent"
         )
+
+
+def test_default_double_tape_alternating_sheets_ungated():
+    copies = 8
+    entities, layout = expand_material_spec(
+        copies,
+        [
+            {"type": "protein", "name": "partner_a", "length": 9},
+            {"type": "protein", "name": "partner_b", "length": 9},
+        ],
+        heteromer_screening=False,
+        topology="double_tape",
+    )
+    assert len(entities) == copies
+    assert layout["guided_proteins_per_unit"] == 1
+    assert "heteromer_screening" not in layout
+    assert [record["partner_label"] for record in layout["chains"]] == [
+        "A", "A", "B", "B", "A", "A", "B", "B"
+    ]
+    assert [record["double_tape_side"] for record in layout["chains"]] == [
+        0, 1, 0, 1, 0, 1, 0, 1
+    ]
+    sheet_0 = [
+        rec["partner_label"] for rec in layout["chains"] if rec["double_tape_side"] == 0
+    ]
+    sheet_1 = [
+        rec["partner_label"] for rec in layout["chains"] if rec["double_tape_side"] == 1
+    ]
+    assert sheet_0 == ["A", "B", "A", "B"]
+    assert sheet_1 == ["A", "B", "A", "B"]
+
+    with pytest.raises(ValueError, match="requires an even number of placements"):
+        expand_material_spec(
+            7,
+            [
+                {"type": "protein", "name": "partner_a", "length": 9},
+                {"type": "protein", "name": "partner_b", "length": 9},
+            ],
+            heteromer_screening=False,
+            topology="double_tape",
+        )

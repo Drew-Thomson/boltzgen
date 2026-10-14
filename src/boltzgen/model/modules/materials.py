@@ -138,11 +138,39 @@ def generate_ideal_lattice(
     dtype: torch.dtype | None = None,
     **kwargs: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Create target COMs and per-copy rotations for a material topology.
+    r"""Create target COMs and per-copy rotations for a material topology.
 
     Rotations map coordinates in the consensus/local frame into the ideal
-    lattice frame. COM and rotation arrays have shapes ``[n_chains, 3]`` and
-    ``[n_chains, 3, 3]`` respectively.
+    lattice frame. For tape topologies with axial supercoiling/twist angle per
+    step $\Delta\theta$, step $s$ has rotation:
+    $$\mathbf{R}_z(\theta_s) = \begin{bmatrix}
+    \cos\theta_s & -\sin\theta_s & 0 \\
+    \sin\theta_s & \cos\theta_s & 0 \\
+    0 & 0 & 1
+    \end{bmatrix}$$
+    with $\theta_s = (s - \frac{S-1}{2}) \Delta\theta$.
+
+    Parameters
+    ----------
+    topology : str
+        Topology type (e.g. ``'double_tape'``, ``'linear_tape'``).
+    n_chains : int
+        Number of protein chain copies.
+    asym_unit_size : int
+        Number of chains in the asymmetric unit.
+    params : dict
+        Topology parameters including ``target_pitch``, ``layer_dist``,
+        ``layer_offset_z``, ``target_twist``, and optional noise offsets.
+    device : torch.device | None
+        Torch device.
+    dtype : torch.dtype | None
+        Torch floating point dtype.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Target COMs with shape ``[n_chains, 3]`` and copy rotations with shape
+        ``[n_chains, 3, 3]``.
     """
     if device is None:
         device = kwargs.get("device", torch.device("cpu"))
@@ -154,7 +182,7 @@ def generate_ideal_lattice(
 
     radius = float(params.get("target_radius", 15.0))
     dz = float(params.get("target_dz", 5.0))
-    pitch = float(params.get("target_pitch", 4.8))
+    pitch = float(params.get("strand_spacing") or params.get("target_pitch") or 4.8)
     identity = torch.eye(3, device=device, dtype=dtype)
 
     if topology == "cyclic":
@@ -227,11 +255,16 @@ def generate_ideal_lattice(
             [_rotation_z(float(a), device=device, dtype=dtype) for a in angles]
         )
     elif topology == "linear_tape":
+        target_twist = float(params.get("target_twist", 0.0))
+        twist_offset = float(params.get("twist_offset") or 0.0)
+        step_angle = math.radians(target_twist + twist_offset)
+        steps = torch.arange(n_chains, device=device, dtype=dtype) - (n_chains - 1) / 2
+        angles = steps * step_angle
         coms = torch.zeros((n_chains, 3), device=device, dtype=dtype)
-        coms[:, 2] = (
-            torch.arange(n_chains, device=device, dtype=dtype) - (n_chains - 1) / 2
-        ) * pitch
-        rotations = identity.expand(n_chains, -1, -1).clone()
+        coms[:, 2] = steps * pitch
+        rotations = torch.stack(
+            [_rotation_z(float(a), device=device, dtype=dtype) for a in angles]
+        )
     elif topology == "helical":
         angles = torch.arange(n_chains, device=device, dtype=dtype) * math.radians(
             float(params.get("target_angle", 30.0))
@@ -264,16 +297,35 @@ def generate_ideal_lattice(
         if params.get("layer_dist_noise") is not None:
             layer_dist = max(4.8, layer_dist + float(params["layer_dist_noise"]))
         offset_y = float(params.get("layer_offset_y_noise") or 0.0)
-        offset_z = float(params.get("layer_offset_z_noise") or 0.0)
+        nominal_offset_z = params.get("layer_offset_z")
+        if nominal_offset_z is None:
+            nominal_offset_z = 0.5 * pitch
+        else:
+            nominal_offset_z = float(nominal_offset_z)
+        offset_z_noise = float(params.get("layer_offset_z_noise") or 0.0)
+        offset_z = nominal_offset_z + offset_z_noise
+        target_twist = float(params.get("target_twist", 0.0))
+        twist_offset = float(params.get("twist_offset") or 0.0)
+        step_angle = math.radians(target_twist + twist_offset)
         units = math.ceil(n_chains / 2)
+        chain_idx = torch.arange(n_chains, device=device)
+        layers = chain_idx % 2
+        steps = chain_idx // 2
+        layer_signs = layers.to(dtype=dtype) - 0.5
+        step_offsets = steps.to(dtype=dtype) - (units - 1) / 2
+        x_u = layer_signs * layer_dist
+        y_u = layer_signs * offset_y
+        z_u = step_offsets * pitch + layer_signs * offset_z
+        theta_s = step_offsets * step_angle
+        cos_theta = torch.cos(theta_s)
+        sin_theta = torch.sin(theta_s)
         coms = torch.zeros((n_chains, 3), device=device, dtype=dtype)
-        for i in range(n_chains):
-            layer, step = double_tape_layer_position(i)
-            layer_sign = layer - 0.5
-            coms[i, 0] = layer_sign * layer_dist
-            coms[i, 1] = layer_sign * offset_y
-            coms[i, 2] = (step - (units - 1) / 2) * pitch + layer_sign * offset_z
-        rotations = identity.expand(n_chains, -1, -1).clone()
+        coms[:, 0] = x_u * cos_theta - y_u * sin_theta
+        coms[:, 1] = x_u * sin_theta + y_u * cos_theta
+        coms[:, 2] = z_u
+        rotations = torch.stack(
+            [_rotation_z(float(a), device=device, dtype=dtype) for a in theta_s]
+        )
     elif topology == "bilayer_sheet":
         gx, gy = int(params.get("grid_dim_x", 2)), int(params.get("grid_dim_y", 2))
         if n_chains != 2 * gx * gy:

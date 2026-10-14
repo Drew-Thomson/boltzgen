@@ -379,3 +379,121 @@ def test_fold_and_unfold_round_trip() -> None:
     coords = unfold_from_consensus_frame(consensus, centers, rotations)
     folded = fold_to_consensus_frame(coords, centers, rotations)
     torch.testing.assert_close(folded, consensus.expand_as(folded))
+
+
+def test_double_tape_supercoiling() -> None:
+    torch.manual_seed(42)
+    n_chains = 8
+    pitch = 4.8
+    layer_dist = 10.0
+    twist_deg = 5.0
+
+    # 1. Zero twist matches planar layout
+    _, rots_flat = generate_ideal_lattice(
+        "double_tape",
+        n_chains,
+        1,
+        {"target_pitch": pitch, "layer_dist": layer_dist, "target_twist": 0.0},
+        torch.device("cpu"),
+        torch.float64,
+    )
+    torch.testing.assert_close(
+        rots_flat, torch.eye(3, dtype=torch.float64).expand(n_chains, 3, 3)
+    )
+
+    # 2. Non-zero twist
+    coms_twisted, rots_twisted = generate_ideal_lattice(
+        "double_tape",
+        n_chains,
+        1,
+        {"target_pitch": pitch, "layer_dist": layer_dist, "target_twist": twist_deg},
+        torch.device("cpu"),
+        torch.float64,
+    )
+
+    # Distance across each pair at step s must be exactly layer_dist
+    for s in range(n_chains // 2):
+        c0 = coms_twisted[2 * s]
+        c1 = coms_twisted[2 * s + 1]
+        dist_xy = torch.norm((c1 - c0)[:2])
+        torch.testing.assert_close(dist_xy, torch.tensor(layer_dist, dtype=torch.float64))
+        torch.testing.assert_close((c1 - c0)[2], torch.tensor(0.5 * pitch, dtype=torch.float64))
+
+        # Radius from z-axis for both layers must be layer_dist / 2
+        torch.testing.assert_close(
+            torch.norm(c0[:2]), torch.tensor(layer_dist / 2, dtype=torch.float64)
+        )
+        torch.testing.assert_close(
+            torch.norm(c1[:2]), torch.tensor(layer_dist / 2, dtype=torch.float64)
+        )
+
+        # Rotation matrix must be SO(3)
+        torch.testing.assert_close(
+            rots_twisted[2 * s] @ rots_twisted[2 * s].T,
+            torch.eye(3, dtype=torch.float64),
+            atol=1e-12,
+            rtol=0,
+        )
+        torch.testing.assert_close(
+            torch.linalg.det(rots_twisted[2 * s]),
+            torch.tensor(1.0, dtype=torch.float64),
+        )
+
+    # Verify linear increment in twist angle
+    angles_step = [
+        math.atan2(coms_twisted[2 * s + 1, 1], coms_twisted[2 * s + 1, 0])
+        for s in range(n_chains // 2)
+    ]
+    diffs = [
+        math.degrees(angles_step[i + 1] - angles_step[i])
+        for i in range(len(angles_step) - 1)
+    ]
+    for d in diffs:
+        assert math.isclose(d, twist_deg, rel_tol=1e-5)
+
+    # 3. Consensus fold/unfold round-trip
+    consensus = torch.randn((10, 3), dtype=torch.float64)
+    unfolded = unfold_from_consensus_frame(consensus, coms_twisted, rots_twisted)
+    folded = fold_to_consensus_frame(unfolded, coms_twisted, rots_twisted)
+    torch.testing.assert_close(folded, consensus.expand_as(folded))
+
+
+def test_linear_tape_supercoiling() -> None:
+    torch.manual_seed(42)
+    n_chains = 6
+    pitch = 4.8
+    twist_deg = 7.5
+
+    coms, rots = generate_ideal_lattice(
+        "linear_tape",
+        n_chains,
+        1,
+        {"target_pitch": pitch, "target_twist": twist_deg},
+        torch.device("cpu"),
+        torch.float64,
+    )
+
+    # COMs must remain along z-axis
+    torch.testing.assert_close(
+        coms[:, :2], torch.zeros((n_chains, 2), dtype=torch.float64)
+    )
+
+    # Rotations must be valid SO(3)
+    for i in range(n_chains):
+        torch.testing.assert_close(
+            rots[i] @ rots[i].T,
+            torch.eye(3, dtype=torch.float64),
+            atol=1e-12,
+            rtol=0,
+        )
+        torch.testing.assert_close(
+            torch.linalg.det(rots[i]),
+            torch.tensor(1.0, dtype=torch.float64),
+        )
+
+    # Consensus fold/unfold round-trip
+    consensus = torch.randn((8, 3), dtype=torch.float64)
+    unfolded = unfold_from_consensus_frame(consensus, coms, rots)
+    folded = fold_to_consensus_frame(unfolded, coms, rots)
+    torch.testing.assert_close(folded, consensus.expand_as(folded))
+
