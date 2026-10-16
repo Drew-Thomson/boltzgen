@@ -6,16 +6,17 @@ antiparallel_prob: 1.0
 spacing_noise: 0.2
 num_designs: 20
 seqs_per_backbone: 5
-inverse_temp: 0.5
+inverse_temp: 0.8
 backbone_noise: 0.2
 twist_noise: 5
 background_unbias_strength: 0.7
-double_tape_polar_bias: 2.0
-double_tape_core_bias: 2.0
-double_tape_aromatic_bias: 2.0
-repetition_penalty: 0.5
-top_p: 0.95
-anti_correlation_strength: 2
+double_tape_polar_bias: 1.0
+double_tape_core_bias: 1.0
+double_tape_aromatic_bias: 1.0
+repetition_penalty: 1.0
+top_p: 0.9
+heteromer_charge_bias: 0.5
+anti_correlation_strength: 0.0
 asym_unit:
   - type: "protein"
     length: 9
