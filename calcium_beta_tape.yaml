@@ -1,0 +1,20 @@
+copies: 8
+num_designs: 10
+seqs_per_backbone: 10
+topology: "linear_tape"
+target_pitch: 4.8
+antiparallel_prob: 0.0
+spacing_noise: 0.2
+inverse_temp: 1.2
+backbone_noise: 0.2
+ligand_inclusion_bias: 0.0
+background_unbias_strength: 0.7
+twist_noise: 5
+top_p: 0.95
+asym_unit:
+  - type: "protein"
+    sequence: "7,GTGND,5"
+    secondary_structure: S
+    symmetric_group: 1
+  - type: "ligand"
+    ccd: "CA"

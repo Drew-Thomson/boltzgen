@@ -1488,8 +1488,6 @@ class Analyze(Task):
                     metrics["packing_density_refolded"] = packing / max(1, num_chains)
 
                     if self.material_metrics:
-                        import os
-
                         try:
                             from boltzgen.task.analyze.material_metrics import (
                                 backbone_ca_coords,
