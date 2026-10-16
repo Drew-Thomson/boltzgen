@@ -84,3 +84,38 @@ def test_decoder_accepts_new_options():
     assert dec.background_unbias_strength == 0.5
     assert dec.top_p == 0.9
     assert dec.repetition_penalty == 0.5
+
+
+def test_windowed_repetition_penalty():
+    torch.manual_seed(42)
+    dec = InverseFoldingDecoder(
+        atom_s=8,
+        atom_z=8,
+        token_s=8,
+        token_z=8,
+        node_dim=8,
+        pair_dim=8,
+        hidden_dim=8,
+        num_decoder_layers=1,
+        repetition_penalty=10.0,
+    )
+    dec.eval()
+    n = 3
+    valid_mask = torch.ones(1, n, dtype=torch.bool)
+    s = torch.zeros(n, 8)
+    src, dst = torch.meshgrid(torch.arange(n), torch.arange(n), indexing="ij")
+    edge_idx = torch.stack([src.flatten(), dst.flatten()])
+    z = torch.zeros(n * n, 8)
+    feats = {
+        "design_mask": torch.ones(1, n, dtype=torch.bool),
+        "symmetric_group": torch.zeros(1, n, dtype=torch.long),
+        "feature_res_idx": torch.arange(n).unsqueeze(0),
+        "feature_asym_id": torch.zeros(1, n, dtype=torch.long),
+        "feature_residue_index": torch.arange(n).unsqueeze(0),
+        "token_to_bb4_atoms": torch.eye(n * 4).unsqueeze(0),
+        "coords": torch.zeros(1, n * 4, 3),
+        "res_type_clone": torch.zeros(1, n, const.num_tokens),
+    }
+    out = dec.sample(s, z, edge_idx, valid_mask, feats)
+    assert "res_type" in out
+    assert out["res_type"].shape == (1, n, const.num_tokens)

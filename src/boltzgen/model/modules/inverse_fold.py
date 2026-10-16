@@ -804,15 +804,16 @@ class InverseFoldingDecoder(nn.Module):
                         cross_partner_map[gid_b] = gid_a
         sampled_groups = set()
 
-        # Per-chain residue usage counts for the repetition penalty
-        chain_aa_counts = {}
+        # Track sampled residues for windowed repetition penalty (penalizing consecutive identical residues)
+        sampled_by_chain_res = {}
         node_chain = []
+        node_res_idx = []
         if self.repetition_penalty > 0:
             node_chain = feats["feature_asym_id"][valid_mask].cpu().numpy().tolist()
-            for c in set(node_chain):
-                chain_aa_counts[c] = torch.zeros(
-                    len(const.canonical_tokens), device=s.device
-                )
+            if "feature_residue_index" in feats:
+                node_res_idx = feats["feature_residue_index"][valid_mask].cpu().numpy().tolist()
+            else:
+                node_res_idx = list(range(len(node_chain)))
 
         src_idx, dst_idx = edge_idx[0], edge_idx[1]
 
@@ -862,12 +863,19 @@ class InverseFoldingDecoder(nn.Module):
                 + per_residue_mask[i : i + 1]  # Position-specific mask
             )
 
-            # Penalize amino acids already used within the same chain(s)
+            # Windowed repetition penalty: penalize consecutive identical residues (|r - r'| == 1)
+            # while allowing alternating amphipathic patterns (i, i+2)
             if self.repetition_penalty > 0:
-                rep_counts = torch.stack(
-                    [chain_aa_counts[node_chain[pos]] for pos in positions]
-                ).mean(dim=0)
-                pred_canonical = pred_canonical - self.repetition_penalty * rep_counts[None]
+                rep_pen = torch.zeros(len(const.canonical_tokens), device=s.device)
+                for pos in positions:
+                    c = node_chain[pos]
+                    r = node_res_idx[pos]
+                    for neighbor_r in (r - 1, r + 1):
+                        if (c, neighbor_r) in sampled_by_chain_res:
+                            rep_pen[sampled_by_chain_res[(c, neighbor_r)]] += self.repetition_penalty
+                if len(positions) > 0:
+                    rep_pen = rep_pen / len(positions)
+                pred_canonical = pred_canonical - rep_pen[None]
 
             if self.sampling_temperature is None:
                 ids_canonical = torch.argmax(pred_canonical, dim=-1)
@@ -895,16 +903,16 @@ class InverseFoldingDecoder(nn.Module):
                 if self.tie_symmetric_sequences:
                     sampled.add(pos)
                 if self.repetition_penalty > 0:
-                    chain_aa_counts[node_chain[pos]][ids_canonical.item()] += 1.0
+                    sampled_by_chain_res[(node_chain[pos], node_res_idx[pos])] = ids_canonical.item()
                     
             if self.heteromer_anti_correlation and i in position_to_group:
                 my_group_id = position_to_group[i]
                 sampled_groups.add(my_group_id)
                 partner_group_id = cross_partner_map.get(my_group_id)
                 if partner_group_id is not None and partner_group_id not in sampled_groups:
-                    # Penalize the same AA at the partner's corresponding position (multiplied to overcome sharp logits)
+                    # Penalize the same AA at the partner's corresponding position
                     for partner_pos in sym_groups[partner_group_id]:
-                        per_residue_mask[partner_pos, ids_canonical.item()] -= (self.anti_correlation_strength * 10.0)
+                        per_residue_mask[partner_pos, ids_canonical.item()] -= self.anti_correlation_strength
 
         n_tokens = valid_mask.shape[1]
         res_type = torch.zeros(1, n_tokens, self.num_res_type, device=s.device)

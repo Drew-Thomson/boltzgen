@@ -35,28 +35,28 @@ def test_lock_slot_orientations():
 def test_simulated_heteromer_fold_flip_unfold():
     device = torch.device("cpu")
     dtype = torch.float32
-    
+
     n_chains = 16
-    
+
+    # Strand runs along Y (the strand axis in double_tape)
     M_A = torch.zeros((10, 3))
-    M_A[:, 2] = torch.linspace(0, 10, 10)
+    M_A[:, 1] = torch.linspace(0, 10, 10)
     M_B = torch.zeros((10, 3))
-    M_B[:, 2] = torch.linspace(0, 10, 10)
-    
+    M_B[:, 1] = torch.linspace(0, 10, 10)
+
     slots = [M_A, M_B]
     locked_slots = lock_slot_orientations(slots)
-    
+
     layer_chains = {0: {}, 1: {}}
-    
+
     for i in range(n_chains):
         layer, step = double_tape_layer_position(i)
-        # Heteromer slot logic: even step -> slot 0, odd step -> slot 1
         slot_idx = step % 2
-        
+
         flip = double_tape_antiparallel_rotation(i, device=device, dtype=dtype)
         unfolded_coords = torch.matmul(locked_slots[slot_idx], flip.transpose(-1, -2))
         layer_chains[layer][step] = unfolded_coords
-    
+
     # Check in-sheet neighbors alternate
     for layer in (0, 1):
         for step in range(7):
@@ -64,7 +64,7 @@ def test_simulated_heteromer_fold_flip_unfold():
             dir_j = strand_direction(layer_chains[layer][step + 1])
             dot = torch.dot(dir_i, dir_j)
             assert dot < -0.99, f"Layer {layer} in-sheet parallel at step {step}"
-            
+
     # Check cross-layer pairs are antiparallel
     for step in range(8):
         dir_0 = strand_direction(layer_chains[0][step])
@@ -73,7 +73,65 @@ def test_simulated_heteromer_fold_flip_unfold():
         assert dot < -0.99, f"Cross-layer parallel at step {step}"
 
 
-def test_align_consensus_to_double_tape_arbitrary_rotations():
+def test_double_tape_even_inside_odd_outside() -> None:
+    """Verify that residues 2, 4, 6, 8 point inward (toward center) and
+    residues 1, 3, 5, 7, 9 point outward for all chains in both layers."""
+    from boltzgen.model.modules.materials import align_consensus_to_double_tape
+
+    # 9-residue beta strand with alternating sidechain pleating
+    bb_coords = []
+    for i in range(9):
+        y = i * 3.5
+        sign = 1.0 if i % 2 == 0 else -1.0
+        n = [0.2 * sign, y - 1.2, 0.0]
+        ca = [0.0, y, 0.2 * sign]
+        c = [-0.2 * sign, y + 1.2, 0.0]
+        o = [-0.5 * sign, y + 1.2, 0.5 * sign]
+        bb_coords.extend([n, ca, c, o])
+
+    coords = torch.tensor(bb_coords, dtype=torch.float32)
+    aligned = align_consensus_to_double_tape(coords)
+    l_res = 9
+    bb = aligned.view(l_res, 4, 3)
+
+    for chain_idx in range(16):
+        layer, _ = double_tape_layer_position(chain_idx)
+        r_rot = double_tape_antiparallel_rotation(
+            chain_idx, device=torch.device("cpu"), dtype=torch.float32
+        )
+        assert torch.isclose(torch.det(r_rot), torch.tensor(1.0))
+
+        unfolded_bb = bb @ r_rot.T
+        n_p, ca_p, c_p = unfolded_bb[:, 0], unfolded_bb[:, 1], unfolded_bb[:, 2]
+        b_u = ca_p - n_p
+        c_u = c_p - ca_p
+        b_n = torch.linalg.norm(b_u - c_u, dim=-1, keepdim=True) + 1e-8
+        cr_u = torch.linalg.cross(b_u, c_u)
+        c_n = torch.linalg.norm(cr_u, dim=-1, keepdim=True) + 1e-8
+        v_u = -0.531018 * ((b_u - c_u) / b_n) + 1.20673 * (cr_u / c_n)
+        v_u = v_u / (torch.linalg.norm(v_u, dim=-1, keepdim=True) + 1e-8)
+
+        # Inward normal points toward center (X=0): Layer 0 (+X), Layer 1 (-X)
+        inward_normal = (
+            torch.tensor([1.0, 0.0, 0.0])
+            if layer == 0
+            else torch.tensor([-1.0, 0.0, 0.0])
+        )
+        dots = v_u @ inward_normal
+        odd_dots = dots[0::2]  # residues 1, 3, 5, 7, 9
+        even_dots = dots[1::2]  # residues 2, 4, 6, 8
+
+        # Odd residues must point outward (away from center -> dot < 0)
+        assert (odd_dots < 0).all(), (
+            f"Chain {chain_idx} (layer {layer}) odd residues not outward: {odd_dots}"
+        )
+        # Even residues must point inward (toward center -> dot > 0)
+        assert (even_dots > 0).all(), (
+            f"Chain {chain_idx} (layer {layer}) even residues not inward: {even_dots}"
+        )
+
+
+def test_align_consensus_to_double_tape_arbitrary_rotations() -> None:
     from boltzgen.model.modules.materials import align_consensus_to_double_tape
 
     # Synthetic 9-mer strand coordinates (~26 A long along an arbitrary axis)
@@ -100,7 +158,7 @@ def test_align_consensus_to_double_tape_arbitrary_rotations():
     assert torch.allclose(dir_aligned, torch.tensor([0.0, 1.0, 0.0]), atol=1e-3)
 
 
-def test_align_consensus_to_double_tape_prevents_layer_overlap():
+def test_align_consensus_to_double_tape_prevents_layer_overlap() -> None:
     from boltzgen.model.modules.materials import (
         align_consensus_to_double_tape,
         generate_ideal_lattice,
@@ -109,7 +167,8 @@ def test_align_consensus_to_double_tape_prevents_layer_overlap():
     # 9-residue extended strand (~26 A long, wider than 8.5 A layer spacing)
     torch.manual_seed(42)
     strand = torch.zeros((9, 3))
-    strand[:, 0] = torch.linspace(-13.0, 13.0, 9)  # Intentionally oriented along X (bilayer normal)
+    # Intentionally oriented along X (bilayer normal)
+    strand[:, 0] = torch.linspace(-13.0, 13.0, 9)
 
     aligned = align_consensus_to_double_tape(strand)
 

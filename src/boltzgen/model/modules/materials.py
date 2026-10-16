@@ -90,17 +90,29 @@ def double_tape_consensus_slot_indices_from_layout(layout: dict) -> list[int]:
 
 
 def double_tape_antiparallel_rotation(
-    chain_index: int, *, device: torch.device, dtype: torch.dtype
+    chain_index: int,
+    *,
+    device: torch.device | None = None,
+    dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    """Return local rotation matrix for antiparallel double tapes."""
+    """Return local rotation matrix for antiparallel double tapes.
+
+    Preserves antiparallel polarity both within sheets (along the tape axis) and
+    across sheets at the same axial step, while inverting the transverse axis (x)
+    in Layer 1 so that odd-numbered residues face outward into solvent and even-numbered
+    residues face inward toward the bilayer core in both sheets.
+    """
+    if device is None:
+        device = torch.device("cpu")
+    if dtype is None:
+        dtype = torch.float32
     layer, step = double_tape_layer_position(chain_index)
-    if (layer + step) % 2 == 1:
-        return torch.tensor(
-            [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
-            device=device,
-            dtype=dtype,
-        )
-    return torch.eye(3, device=device, dtype=dtype)
+    r_xx = 1.0 if layer == 0 else -1.0
+    r_yy = -1.0 if (layer + step) % 2 == 1 else 1.0
+    r_zz = r_xx * r_yy
+    return torch.diag(
+        torch.tensor([r_xx, r_yy, r_zz], device=device, dtype=dtype)
+    )
 
 
 def strand_direction(coords: torch.Tensor) -> torch.Tensor:
@@ -657,17 +669,78 @@ def align_consensus_to_cylinder(ref_coords: torch.Tensor) -> torch.Tensor:
     return torch.matmul(centered, rot.T)
 
 
+def beta_strand_pleating_direction(coords: torch.Tensor) -> torch.Tensor:
+    r"""Return transverse unit vector pointing towards odd-numbered sidechains.
+
+    For a beta-strand, odd residues (1, 3, 5, ...) pleat towards one side of the
+    sheet, and even residues (2, 4, ...) pleat towards the opposite side.
+    Extracts C-beta vectors from backbone atoms (N, CA, C) if available, or CA pleating
+    vectors $\mathbf{p}_i = \mathbf{c}_i - \frac{1}{2}(\mathbf{c}_{i-1} +
+    \mathbf{c}_{i+1})$. Returns a unit vector pointing along the average odd sidechain
+    direction.
+
+    Parameters
+    ----------
+    coords : torch.Tensor
+        Atomic coordinates of a peptide chain with shape ``[N, 3]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Unit vector with shape ``[3]`` pointing towards odd-numbered residue sidechains.
+    """
+    n_atoms = coords.shape[0]
+    device = coords.device
+    dtype = coords.dtype
+
+    if n_atoms >= 12 and n_atoms % 4 == 0:
+        l_res = n_atoms // 4
+        bb = coords.view(l_res, 4, 3)
+        n_pts = bb[:, 0]
+        ca_pts = bb[:, 1]
+        c_pts = bb[:, 2]
+
+        b = ca_pts - n_pts
+        c_vec = c_pts - ca_pts
+        b_norm = torch.linalg.norm(b - c_vec, dim=-1, keepdim=True) + 1e-8
+        cross = torch.linalg.cross(b, c_vec)
+        c_norm = torch.linalg.norm(cross, dim=-1, keepdim=True) + 1e-8
+
+        vecs = -0.531018 * ((b - c_vec) / b_norm) + 1.20673 * (cross / c_norm)
+        vecs = vecs / (torch.linalg.norm(vecs, dim=-1, keepdim=True) + 1e-8)
+
+        odd_mean = vecs[0::2].mean(dim=0)
+        even_mean = vecs[1::2].mean(dim=0)
+        v_pleat = odd_mean - even_mean
+    elif n_atoms >= 3:
+        p = coords[1:-1] - 0.5 * (coords[:-2] + coords[2:])
+        odd_p = p[1::2]
+        even_p = p[0::2]
+        if odd_p.shape[0] > 0 and even_p.shape[0] > 0:
+            v_pleat = odd_p.mean(dim=0) - even_p.mean(dim=0)
+        elif odd_p.shape[0] > 0:
+            v_pleat = odd_p.mean(dim=0)
+        elif even_p.shape[0] > 0:
+            v_pleat = -even_p.mean(dim=0)
+        else:
+            v_pleat = torch.zeros(3, device=device, dtype=dtype)
+    else:
+        v_pleat = torch.zeros(3, device=device, dtype=dtype)
+
+    norm = torch.linalg.norm(v_pleat)
+    if norm > 1e-4:
+        return v_pleat / norm
+    return torch.zeros(3, device=device, dtype=dtype)
+
+
 def align_consensus_to_double_tape(ref_coords: torch.Tensor) -> torch.Tensor:
     r"""Rigidly align the consensus monomer element axis with the in-sheet axis (+Y).
 
-    Centres the monomer at the origin and aligns its primary PCA axis $\mathbf{u}$
-    (signed N$\to$C) with $\hat{y} = (0, 1, 0)$ via minimal Rodrigues rotation:
-
-    $$\mathbf{k} = \mathbf{u} \times \hat{y}, \quad c = \mathbf{u} \cdot \hat{y}$$
-
-    This places the $\beta$-strand backbone parallel to the sheet direction ($Y$),
-    preventing inter-sheet clash along the bilayer normal ($X$), while preserving
-    internal monomer geometry.
+    Centres the monomer at the origin, aligns its primary PCA axis $\mathbf{u}$
+    (signed N$\to$C) with $\hat{y} = (0, 1, 0)$ via minimal Rodrigues rotation,
+    and rolls about $Y$ so that odd-numbered residues face along $-\hat{x}$
+    (outward in Layer 0) and even-numbered residues face along $+\hat{x}$
+    (inward toward the bilayer core).
 
     Parameters
     ----------
@@ -697,7 +770,9 @@ def align_consensus_to_double_tape(ref_coords: torch.Tensor) -> torch.Tensor:
     if k_vec.norm() < eps:
         if cos_t < 0:
             rot = torch.diag(
-                torch.tensor([1.0, -1.0, -1.0], device=u_axis.device, dtype=u_axis.dtype)
+                torch.tensor(
+                    [1.0, -1.0, -1.0], device=u_axis.device, dtype=u_axis.dtype
+                )
             )
         else:
             rot = torch.eye(3, device=u_axis.device, dtype=u_axis.dtype)
@@ -711,7 +786,21 @@ def align_consensus_to_double_tape(ref_coords: torch.Tensor) -> torch.Tensor:
             + k_x
             + (k_x @ k_x) / (1.0 + cos_t)
         )
-    return torch.matmul(centered, rot.T)
+    aligned = torch.matmul(centered, rot.T)
+
+    v_pleat = beta_strand_pleating_direction(aligned)
+    r_xz = torch.sqrt(v_pleat[0] ** 2 + v_pleat[2] ** 2)
+    if r_xz > 1e-4:
+        u_x = v_pleat[0] / r_xz
+        u_z = v_pleat[2] / r_xz
+        r_roll = torch.tensor(
+            [[-u_x, 0.0, -u_z], [0.0, 1.0, 0.0], [u_z, 0.0, -u_x]],
+            device=aligned.device,
+            dtype=aligned.dtype,
+        )
+        aligned = torch.matmul(aligned, r_roll.T)
+
+    return aligned
 
 
 def align_consensus_to_linear_tape(ref_coords: torch.Tensor) -> torch.Tensor:
