@@ -1019,18 +1019,63 @@ class AtomDiffusion(Module):
                             P_centered = P - P_mean
                             Q_centered = Q - Q_mean
 
-                            H = P_centered.T @ Q_centered
-                            U, S, Vh = torch.linalg.svd(H)
+                            if topology == "linear_tape":
+                                w = (P_centered * Q_centered[:, 2:3]).sum(dim=0)
+                                w_norm = w.norm()
+                                if w_norm > 1e-4:
+                                    u_z = w / w_norm
+                                else:
+                                    u_z = torch.tensor([0.0, 0.0, 1.0], device=P.device, dtype=P.dtype)
 
-                            d = torch.sign(torch.det(U @ Vh))
-                            D = torch.eye(3, device=P.device, dtype=P.dtype)
-                            D[2, 2] = d
+                                strand_dirs = []
+                                min_atoms_early = min(mask_c.sum().item() for mask_c in chain_masks)
+                                for mask_c in chain_masks:
+                                    m_idx = mask_c.nonzero(as_tuple=True)[0][:min_atoms_early]
+                                    if m_idx.shape[0] >= 3:
+                                        c_pts = atom_coords_denoised[batch_idx, m_idx]
+                                        s_dir = materials.strand_direction(c_pts)
+                                        strand_dirs.append(s_dir)
+                                if strand_dirs:
+                                    ref_s = strand_dirs[0]
+                                    aligned_dirs = [ref_s]
+                                    for s_d in strand_dirs[1:]:
+                                        if torch.dot(s_d, ref_s) < 0:
+                                            aligned_dirs.append(-s_d)
+                                        else:
+                                            aligned_dirs.append(s_d)
+                                    v_ref = torch.stack(aligned_dirs).mean(dim=0)
+                                else:
+                                    v_ref = torch.tensor([0.0, 1.0, 0.0], device=P.device, dtype=P.dtype)
 
-                            R_kabsch = U @ D @ Vh  # R_kabsch maps P to Q
+                                v_perp = v_ref - torch.dot(v_ref, u_z) * u_z
+                                if v_perp.norm() > 1e-4:
+                                    u_y = v_perp / v_perp.norm()
+                                else:
+                                    trial_v = torch.tensor([0.0, 1.0, 0.0], device=P.device, dtype=P.dtype)
+                                    trial_perp = trial_v - torch.dot(trial_v, u_z) * u_z
+                                    if trial_perp.norm() < 1e-4:
+                                        trial_v = torch.tensor([1.0, 0.0, 0.0], device=P.device, dtype=P.dtype)
+                                        trial_perp = trial_v - torch.dot(trial_v, u_z) * u_z
+                                    u_y = trial_perp / trial_perp.norm()
+
+                                u_x = torch.linalg.cross(u_y, u_z)
+                                u_x = u_x / u_x.norm()
+
+                                R_kabsch = torch.stack([u_x, u_y, u_z], dim=1)
+                            else:
+                                H = P_centered.T @ Q_centered
+                                U, S, Vh = torch.linalg.svd(H)
+
+                                d = torch.sign(torch.det(U @ Vh))
+                                D = torch.eye(3, device=P.device, dtype=P.dtype)
+                                D[2, 2] = d
+
+                                R_kabsch = U @ D @ Vh  # R_kabsch maps P to Q
 
                             # 4. Map to Local Frame, Fold, and Average
                             if topology in (
                                 "double_tape",
+                                "linear_tape",
                                 "bilayer_sheet",
                                 "cylindrical",
                             ):
@@ -1044,6 +1089,8 @@ class AtomDiffusion(Module):
                                     )
                                 elif topology == "double_tape":
                                     n_consensus_slots = 2  # one consensus per layer, matching c_idx = layer below
+                                elif topology == "linear_tape":
+                                    n_consensus_slots = asym_unit_size
                                 elif topology == "cylindrical":
                                     is_anti = (
                                         bool(feats["is_antiparallel"][batch_idx].item())
@@ -1120,7 +1167,47 @@ class AtomDiffusion(Module):
                                 ):
                                     is_anti = feats["is_antiparallel"][batch_idx].item()
 
-                                if is_anti:
+                                if topology == "linear_tape":
+                                    flip_matrix = torch.tensor(
+                                        [
+                                            [1.0, 0.0, 0.0],
+                                            [0.0, -1.0, 0.0],
+                                            [0.0, 0.0, -1.0],
+                                        ],
+                                        device=coords_folded.device,
+                                        dtype=coords_folded.dtype,
+                                    )
+                                    expected_sign = (
+                                        -1.0
+                                        if (is_anti and (i // asym_unit_size) % 2 == 1)
+                                        else 1.0
+                                    )
+                                    s_dir = materials.strand_direction(coords_folded)
+                                    ref_y = torch.tensor(
+                                        [0.0, 1.0, 0.0],
+                                        device=coords_folded.device,
+                                        dtype=coords_folded.dtype,
+                                    )
+                                    if torch.dot(s_dir, ref_y) * expected_sign < 0:
+                                        coords_folded = torch.matmul(
+                                            coords_folded, flip_matrix
+                                        )
+                                        c_unf = coords_folded + ideal_coms[i]
+                                        c_orig_global = (
+                                            torch.matmul(c_unf - Q_mean, R_kabsch.T)
+                                            + P_mean
+                                        )
+                                        atom_coords_denoised[batch_idx, mask_indices] = (
+                                            c_orig_global
+                                        )
+
+                                    if is_anti and (i // asym_unit_size) % 2 == 1:
+                                        coords_for_consensus = torch.matmul(
+                                            coords_folded, flip_matrix
+                                        )
+                                    else:
+                                        coords_for_consensus = coords_folded
+                                elif is_anti:
                                     if topology == "double_tape":
                                         R_rot = (
                                             materials.double_tape_antiparallel_rotation(
@@ -1177,6 +1264,7 @@ class AtomDiffusion(Module):
 
                                 if topology in (
                                     "double_tape",
+                                    "linear_tape",
                                     "bilayer_sheet",
                                     "cylindrical",
                                 ):
@@ -1193,6 +1281,8 @@ class AtomDiffusion(Module):
                                             i
                                         )
                                         c_idx = layer
+                                    elif topology == "linear_tape":
+                                        c_idx = i % asym_unit_size
                                     elif topology == "cylindrical":
                                         p = i // asym_unit_size
                                         u = i % asym_unit_size
@@ -1203,10 +1293,16 @@ class AtomDiffusion(Module):
                                         )
                                     else:
                                         c_idx = i % asym_unit_size
-                                    if ref_coords_accs[c_idx] is None:
-                                        ref_coords_accs[c_idx] = coords_folded
+
+                                    if topology == "linear_tape":
+                                        coords_to_acc = coords_for_consensus
                                     else:
-                                        ref_coords_accs[c_idx] += coords_folded
+                                        coords_to_acc = coords_folded
+
+                                    if ref_coords_accs[c_idx] is None:
+                                        ref_coords_accs[c_idx] = coords_to_acc
+                                    else:
+                                        ref_coords_accs[c_idx] += coords_to_acc
                                     counts[c_idx] += 1
                                 else:
                                     if ref_coords_acc is None:
@@ -1216,6 +1312,7 @@ class AtomDiffusion(Module):
 
                             if topology in (
                                 "double_tape",
+                                "linear_tape",
                                 "bilayer_sheet",
                                 "cylindrical",
                             ):
@@ -1289,6 +1386,8 @@ class AtomDiffusion(Module):
                                                 ref_coords
                                             )
                                         )
+                                    elif topology == "linear_tape":
+                                        aligned_ref_coords_list.append(ref_coords)
                                     else:
                                         aligned_ref_coords_list.append(ref_coords)
 
@@ -1316,6 +1415,7 @@ class AtomDiffusion(Module):
                                 # Unfold
                                 if topology in (
                                     "double_tape",
+                                    "linear_tape",
                                     "bilayer_sheet",
                                     "cylindrical",
                                 ):
@@ -1332,6 +1432,8 @@ class AtomDiffusion(Module):
                                             i
                                         )
                                         c_idx = layer
+                                    elif topology == "linear_tape":
+                                        c_idx = i % asym_unit_size
                                     elif topology == "cylindrical":
                                         p = i // asym_unit_size
                                         u = i % asym_unit_size
@@ -1375,7 +1477,21 @@ class AtomDiffusion(Module):
                                 ):
                                     is_anti = feats["is_antiparallel"][batch_idx].item()
 
-                                if is_anti:
+                                if topology == "linear_tape":
+                                    if is_anti and (i // asym_unit_size) % 2 == 1:
+                                        flip_matrix = torch.tensor(
+                                            [
+                                                [1.0, 0.0, 0.0],
+                                                [0.0, -1.0, 0.0],
+                                                [0.0, 0.0, -1.0],
+                                            ],
+                                            device=coords_to_unfold.device,
+                                            dtype=coords_to_unfold.dtype,
+                                        )
+                                        coords_to_unfold = torch.matmul(
+                                            coords_to_unfold, flip_matrix
+                                        )
+                                elif is_anti:
                                     if topology == "double_tape":
                                         R_rot = (
                                             materials.double_tape_antiparallel_rotation(

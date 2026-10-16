@@ -714,6 +714,30 @@ def align_consensus_to_double_tape(ref_coords: torch.Tensor) -> torch.Tensor:
     return torch.matmul(centered, rot.T)
 
 
+def align_consensus_to_linear_tape(ref_coords: torch.Tensor) -> torch.Tensor:
+    r"""Rigidly align the consensus monomer element axis with the tape strand axis (+Y).
+
+    Centres the monomer at the origin and aligns its primary PCA axis $\mathbf{u}$
+    (signed N$\to$C) with $\hat{y} = (0, 1, 0)$ via minimal Rodrigues rotation:
+
+    $$\mathbf{k} = \mathbf{u} \times \hat{y}, \quad c = \mathbf{u} \cdot \hat{y}$$
+
+    This places the $\beta$-strand backbone parallel to the strand direction ($Y$),
+    perpendicular to the tape growth axis ($Z$), preserving internal monomer geometry.
+
+    Parameters
+    ----------
+    ref_coords : torch.Tensor
+        Consensus monomer atom coordinates, shape ``[N, 3]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Centred, aligned coordinates, shape ``[N, 3]``.
+    """
+    return align_consensus_to_double_tape(ref_coords)
+
+
 def wrap_consensus_to_cylinder(
     coords: torch.Tensor,
     ideal_com: torch.Tensor,
