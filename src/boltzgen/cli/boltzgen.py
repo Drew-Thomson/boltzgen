@@ -247,7 +247,15 @@ def add_configure_arguments(
         "--anti-correlation-strength",
         type=float,
         default=0.0,
-        help="Strength of cross-partner anti-correlation applied during inverse folding (default: 0.0)",
+        help="Strength of cross-partner anti-correlation applied during inverse folding (raw logit scale, default: 0.0, recommended: 20.0-50.0 when active)",
+    )
+    p.add_argument(
+        "--anti_correlation_mode",
+        "--anti-correlation-mode",
+        type=str,
+        default="exact",
+        choices=["exact", "blosum62"],
+        help="Mode for cross-partner anti-correlation penalty ('exact' for identity ban, 'blosum62' for similarity-weighted penalty)",
     )
     p.add_argument(
         "--double_tape_core_bias",
@@ -1122,20 +1130,11 @@ class BinderDesignPipeline:
 
         if args.only_inverse_fold:
             exclude_residues = []
-            inverse_fold_avoid = (
-                args.inverse_fold_avoid
-                if args.inverse_fold_avoid is not None
-                else (
-                    "C"
-                    if protocol
-                    in [
-                        "peptide-anything",
-                        "nanobody-anything",
-                        "antibody-anything",
-                    ]
-                    else ""
-                )
-            )
+            avoid_str = args.inverse_fold_avoid if args.inverse_fold_avoid is not None else ""
+            if protocol in ["peptide-anything", "nanobody-anything", "antibody-anything"]:
+                if "C" not in avoid_str:
+                    avoid_str = "C" + avoid_str
+            inverse_fold_avoid = avoid_str
 
             for one_letter_code in inverse_fold_avoid:
                 exclude_residues.append(const.prot_letter_to_token[one_letter_code])
@@ -1158,18 +1157,7 @@ class BinderDesignPipeline:
                 f"data.cfg.moldir={moldir}",
                 f"override.inverse_fold_args.inverse_fold_restriction=[{', '.join(exclude_residues)}]",
             ]
-            anti_corr = getattr(args, "anti_correlation_strength", 0.0)
-            if anti_corr > 0.0 or getattr(args, "heteromer_counter_screen", False):
-                strength = anti_corr if anti_corr > 0.0 else 2.0
-                inverse_fold_args.append("override.inverse_fold_args.heteromer_anti_correlation=True")
-                inverse_fold_args.append(f"override.inverse_fold_args.anti_correlation_strength={strength}")
-
-            if getattr(args, "double_tape_core_bias", 0.0) > 0.0:
-                inverse_fold_args.append(f"override.inverse_fold_args.double_tape_core_bias={args.double_tape_core_bias}")
-            if getattr(args, "double_tape_aromatic_bias", 0.0) > 0.0:
-                inverse_fold_args.append(f"override.inverse_fold_args.double_tape_aromatic_bias={args.double_tape_aromatic_bias}")
-            if getattr(args, "double_tape_polar_bias", 0.0) > 0.0:
-                inverse_fold_args.append(f"override.inverse_fold_args.double_tape_polar_bias={args.double_tape_polar_bias}")
+            inverse_fold_args.extend(_inverse_fold_bias_args(args))
             inverse_fold_args.extend(_inverse_fold_diversity_args(args))
 
             self.steps.append(
@@ -1205,15 +1193,11 @@ class BinderDesignPipeline:
             # Inverse folding of diffusion-generated backbones.
             if not args.skip_inverse_folding:
                 exclude_residues = []
-                inverse_fold_avoid = (
-                    args.inverse_fold_avoid
-                    if args.inverse_fold_avoid is not None
-                    else (
-                        "C"
-                        if protocol in ["peptide-anything", "nanobody-anything", "antibody-anything"]
-                        else ""
-                    )
-                )
+                avoid_str = args.inverse_fold_avoid if args.inverse_fold_avoid is not None else ""
+                if protocol in ["peptide-anything", "nanobody-anything", "antibody-anything"]:
+                    if "C" not in avoid_str:
+                        avoid_str = "C" + avoid_str
+                inverse_fold_avoid = avoid_str
 
                 for one_letter_code in inverse_fold_avoid:
                     exclude_residues.append(const.prot_letter_to_token[one_letter_code])
@@ -1239,18 +1223,7 @@ class BinderDesignPipeline:
                     f"trainer.devices={devices}",
                     f"override.inverse_fold_args.inverse_fold_restriction=[{', '.join(exclude_residues)}]",
                 ]
-                anti_corr = getattr(args, "anti_correlation_strength", 0.0)
-                if anti_corr > 0.0 or getattr(args, "heteromer_counter_screen", False):
-                    strength = anti_corr if anti_corr > 0.0 else 2.0
-                    inverse_fold_args.append("override.inverse_fold_args.heteromer_anti_correlation=True")
-                    inverse_fold_args.append(f"override.inverse_fold_args.anti_correlation_strength={strength}")
-
-                if getattr(args, "double_tape_core_bias", 0.0) > 0.0:
-                    inverse_fold_args.append(f"override.inverse_fold_args.double_tape_core_bias={args.double_tape_core_bias}")
-                if getattr(args, "double_tape_aromatic_bias", 0.0) > 0.0:
-                    inverse_fold_args.append(f"override.inverse_fold_args.double_tape_aromatic_bias={args.double_tape_aromatic_bias}")
-                if getattr(args, "double_tape_polar_bias", 0.0) > 0.0:
-                    inverse_fold_args.append(f"override.inverse_fold_args.double_tape_polar_bias={args.double_tape_polar_bias}")
+                inverse_fold_args.extend(_inverse_fold_bias_args(args))
                 inverse_fold_args.extend(_inverse_fold_diversity_args(args))
 
                 self.steps.append(
@@ -1511,6 +1484,33 @@ class BinderDesignPipeline:
 
 
 ### Misc utiltiies ###
+def _inverse_fold_bias_args(args: argparse.Namespace) -> List[str]:
+    """Hydra overrides for sequence bias and anti-correlation options."""
+    out = []
+    anti_corr = getattr(args, "anti_correlation_strength", 0.0)
+    if anti_corr > 0.0 or getattr(args, "heteromer_counter_screen", False):
+        strength = anti_corr if anti_corr > 0.0 else 20.0
+        out.append("override.inverse_fold_args.heteromer_anti_correlation=True")
+        out.append(f"override.inverse_fold_args.anti_correlation_strength={strength}")
+        mode = getattr(args, "anti_correlation_mode", "exact")
+        if mode != "exact":
+            out.append(f"override.inverse_fold_args.anti_correlation_mode={mode}")
+
+    if getattr(args, "double_tape_core_bias", 0.0) > 0.0:
+        out.append(
+            f"override.inverse_fold_args.double_tape_core_bias={args.double_tape_core_bias}"
+        )
+    if getattr(args, "double_tape_aromatic_bias", 0.0) > 0.0:
+        out.append(
+            f"override.inverse_fold_args.double_tape_aromatic_bias={args.double_tape_aromatic_bias}"
+        )
+    if getattr(args, "double_tape_polar_bias", 0.0) > 0.0:
+        out.append(
+            f"override.inverse_fold_args.double_tape_polar_bias={args.double_tape_polar_bias}"
+        )
+    return out
+
+
 def _inverse_fold_diversity_args(args: argparse.Namespace) -> List[str]:
     """Hydra overrides for the inverse folding diversity options (only non-default)."""
     out = []

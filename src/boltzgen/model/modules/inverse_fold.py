@@ -22,6 +22,43 @@ BG_FREQ = torch.tensor(
 )
 
 
+def get_anti_correlation_weights(mode: str = "exact") -> Tensor:
+    r"""Compute substitution penalty weights matrix for cross-partner anti-correlation.
+
+    Parameters
+    ----------
+    mode : str, default="exact"
+        Penalty weighting scheme.
+        - "exact": Identity matrix (only the exact chosen residue is penalized).
+        - "blosum62": BLOSUM62 similarity-scaled penalty:
+          $$W_{a, b} = \max\left(0, \frac{\text{BLOSUM62}(a, b)}{\text{BLOSUM62}(a, a)}\right)$$
+
+    Returns
+    -------
+    Tensor
+        Normalized penalty weight matrix of shape (20, 20).
+    """
+    num_tokens = len(const.canonical_tokens)
+    if mode == "blosum62":
+        try:
+            import numpy as np
+            from Bio.Align import substitution_matrices
+
+            matrix = substitution_matrices.load("BLOSUM62")
+            letters = [const.prot_token_to_letter[t] for t in const.canonical_tokens]
+            weights = np.zeros((num_tokens, num_tokens), dtype=np.float32)
+            for i, a in enumerate(letters):
+                diag = float(matrix[a, a])
+                for j, b in enumerate(letters):
+                    val = float(matrix[a, b])
+                    weights[i, j] = max(0.0, val / diag)
+            return torch.from_numpy(weights)
+        except Exception:
+            pass
+    return torch.eye(num_tokens, dtype=torch.float32)
+
+
+
 
 class GaussianSmearing(torch.nn.Module):
     # used to embed the edge distances
@@ -521,6 +558,7 @@ class InverseFoldingDecoder(nn.Module):
         tie_symmetric_sequences: bool = True,
         heteromer_anti_correlation: bool = False,
         anti_correlation_strength: float = 0.0,
+        anti_correlation_mode: str = "exact",
         double_tape_core_bias: float = 0.0,
         double_tape_aromatic_bias: float = 0.0,
         double_tape_polar_bias: float = 0.0,
@@ -551,7 +589,17 @@ class InverseFoldingDecoder(nn.Module):
         self.sampling_temperature = sampling_temperature
         self.tie_symmetric_sequences = tie_symmetric_sequences
         self.heteromer_anti_correlation = heteromer_anti_correlation or (anti_correlation_strength > 0.0)
-        self.anti_correlation_strength = anti_correlation_strength
+        self.anti_correlation_strength = (
+            20.0
+            if (heteromer_anti_correlation and anti_correlation_strength == 0.0)
+            else anti_correlation_strength
+        )
+        self.anti_correlation_mode = anti_correlation_mode
+        self.register_buffer(
+            "anti_correlation_weights",
+            get_anti_correlation_weights(anti_correlation_mode),
+            persistent=False,
+        )
         self.double_tape_core_bias = double_tape_core_bias
         self.double_tape_aromatic_bias = double_tape_aromatic_bias
         self.double_tape_polar_bias = double_tape_polar_bias
@@ -709,35 +757,40 @@ class InverseFoldingDecoder(nn.Module):
             bb4_flat = torch.bmm(token_bb4_flat, coords_flat)
             bb4 = bb4_flat.view(B, -1, 4, 3)[valid_mask]
             
-            CA = bb4[:, 1]
-            asym_id = feats["feature_asym_id"][valid_mask]
-            
-            # Compute bilayer normal from side 0 to side 1
-            com0 = CA[asym_id % 2 == 0].mean(dim=0)
-            com1 = CA[asym_id % 2 == 1].mean(dim=0)
-            normal = torch.nn.functional.normalize(com1 - com0, dim=0)
-            
-            # Sidechain direction: idealized C-beta reconstructed from N, CA, C
-            # (bb4 atoms are N, CA, C, O; index 3 is the carbonyl O, not CB).
-            b = CA - bb4[:, 0]
-            c = bb4[:, 2] - CA
-            vec = (
-                -0.531018 * torch.nn.functional.normalize(b - c, dim=1)
-                + 1.20673 * torch.nn.functional.normalize(torch.cross(b, c, dim=1), dim=1)
-            )
-            vec = torch.nn.functional.normalize(vec, dim=1)
-            
-            # Identify inward vs outward positions (half-space test on bilayer normal)
-            curr_normal = torch.where((asym_id % 2 == 0).unsqueeze(1), normal.unsqueeze(0), -normal.unsqueeze(0))
-            dot = (vec * curr_normal).sum(dim=1).clamp(-1, 1)
-            
-            is_inward = dot > 0.0
+            # Identify inward vs outward positions for double-tape beta strands:
+            # By construction and alignment in align_consensus_to_double_tape:
+            # - Even 1-indexed residues (0-indexed res_idx % 2 == 1: 2, 4, 6, 8) point inward toward bilayer core.
+            # - Odd 1-indexed residues (0-indexed res_idx % 2 == 0: 1, 3, 5, 7, 9) point outward toward solvent.
+            res_idx = feats.get("feature_residue_index")
+            if res_idx is not None:
+                res_idx_valid = res_idx[valid_mask]
+                is_inward = (res_idx_valid % 2 == 1)
+            else:
+                CA = bb4[:, 1]
+                asym_id = feats["feature_asym_id"][valid_mask]
+                com0 = CA[asym_id % 2 == 0].mean(dim=0)
+                com1 = CA[asym_id % 2 == 1].mean(dim=0)
+                normal = torch.nn.functional.normalize(com1 - com0, dim=0)
+                b = CA - bb4[:, 0]
+                c = bb4[:, 2] - CA
+                vec = (
+                    -0.531018 * torch.nn.functional.normalize(b - c, dim=1)
+                    + 1.20673 * torch.nn.functional.normalize(torch.cross(b, c, dim=1), dim=1)
+                )
+                vec = torch.nn.functional.normalize(vec, dim=1)
+                curr_normal = torch.where((asym_id % 2 == 0).unsqueeze(1), normal.unsqueeze(0), -normal.unsqueeze(0))
+                dot = (vec * curr_normal).sum(dim=1).clamp(-1, 1)
+                is_inward = dot > 0.0
+
             is_outward = ~is_inward
             
             if self.double_tape_core_bias > 0:
                 for token in ("ALA", "VAL", "ILE", "LEU", "MET", "PHE", "TRP"):
                     idx_co = const.canonical_tokens.index(token)
                     per_residue_mask[is_inward, idx_co] += self.double_tape_core_bias
+                for token in ("SER", "THR"):
+                    idx_st = const.canonical_tokens.index(token)
+                    per_residue_mask[is_inward, idx_st] -= self.double_tape_core_bias
             
             if self.double_tape_aromatic_bias > 0:
                 for token in ("TYR", "TRP"):
@@ -773,36 +826,61 @@ class InverseFoldingDecoder(nn.Module):
             sampled = set(torch.where(~design_mask)[0].cpu().numpy().tolist()) if num_not_design > 0 else set()
         else:
             sym_groups, position_to_group = {}, {}
-            sampled = set()
+            sampled = set(torch.where(~design_mask)[0].cpu().numpy().tolist()) if num_not_design > 0 else set()
 
-        cross_partner_map = {}
-        if self.heteromer_anti_correlation and sym_groups and "symmetric_group" in feats:
+        partner_positions_map = {}
+        if self.heteromer_anti_correlation and self.anti_correlation_strength > 0:
             from collections import defaultdict
-            symmetric_group_tensor = feats["symmetric_group"][valid_mask]
-            res_idx_tensor = feats["feature_residue_index"][valid_mask]
-            
-            # Find unique non-zero symmetric_group values among designable positions
-            unique_sym_groups = set()
-            for i in range(symmetric_group_tensor.shape[0]):
-                if design_mask[i]:
-                    g = symmetric_group_tensor[i].item()
-                    if g > 0:
-                        unique_sym_groups.add(g)
-                        
-            if len(unique_sym_groups) == 2:
-                res_idx_to_groups = defaultdict(list)
-                for gid, positions in sym_groups.items():
-                    pos0 = positions[0]
-                    sym_g = symmetric_group_tensor[pos0].item()
-                    r_idx = res_idx_tensor[pos0].item()
-                    res_idx_to_groups[r_idx].append((gid, sym_g))
-                
-                for r_idx, groups in res_idx_to_groups.items():
-                    if len(groups) == 2:
-                        gid_a, gid_b = groups[0][0], groups[1][0]
-                        cross_partner_map[gid_a] = gid_b
-                        cross_partner_map[gid_b] = gid_a
-        sampled_groups = set()
+            symmetric_group_tensor = feats.get("symmetric_group")
+            if symmetric_group_tensor is not None:
+                symmetric_group_tensor = symmetric_group_tensor[valid_mask]
+            res_idx_tensor = feats.get("feature_residue_index")
+            if res_idx_tensor is not None:
+                res_idx_tensor = res_idx_tensor[valid_mask]
+            else:
+                res_idx_tensor = torch.arange(num_nodes, device=s.device)
+            asym_id_tensor = feats.get("feature_asym_id")
+            if asym_id_tensor is not None:
+                asym_id_tensor = asym_id_tensor[valid_mask]
+
+            use_sym_group = False
+            if symmetric_group_tensor is not None:
+                sym_design = symmetric_group_tensor[design_mask]
+                unique_sym = torch.unique(sym_design[sym_design > 0]).tolist()
+                if len(unique_sym) >= 2:
+                    use_sym_group = True
+
+            if use_sym_group:
+                entity_tensor = symmetric_group_tensor
+            elif asym_id_tensor is not None:
+                entity_tensor = asym_id_tensor
+            else:
+                entity_tensor = None
+
+            if entity_tensor is not None:
+                pos_by_entity_res = defaultdict(list)
+                for pos in range(num_nodes):
+                    if design_mask[pos]:
+                        ent = entity_tensor[pos].item()
+                        if use_sym_group and ent == 0:
+                            continue
+                        r_idx = res_idx_tensor[pos].item()
+                        pos_by_entity_res[(ent, r_idx)].append(pos)
+
+                res_to_entities = defaultdict(dict)
+                for (ent, r_idx), pos_list in pos_by_entity_res.items():
+                    res_to_entities[r_idx][ent] = pos_list
+
+                for r_idx, ent_dict in res_to_entities.items():
+                    if len(ent_dict) >= 2:
+                        entities = list(ent_dict.keys())
+                        for ent in entities:
+                            other_positions = []
+                            for other_ent in entities:
+                                if other_ent != ent:
+                                    other_positions.extend(ent_dict[other_ent])
+                            for pos in ent_dict[ent]:
+                                partner_positions_map[pos] = other_positions
 
         # Track sampled residues for windowed repetition penalty (penalizing consecutive identical residues)
         sampled_by_chain_res = {}
@@ -900,19 +978,22 @@ class InverseFoldingDecoder(nn.Module):
             for pos in positions:
                 decoded_seq[pos] = pred_one_hot
                 logits[pos] = aggregated_logits
-                if self.tie_symmetric_sequences:
-                    sampled.add(pos)
+                sampled.add(pos)
                 if self.repetition_penalty > 0:
                     sampled_by_chain_res[(node_chain[pos], node_res_idx[pos])] = ids_canonical.item()
-                    
-            if self.heteromer_anti_correlation and i in position_to_group:
-                my_group_id = position_to_group[i]
-                sampled_groups.add(my_group_id)
-                partner_group_id = cross_partner_map.get(my_group_id)
-                if partner_group_id is not None and partner_group_id not in sampled_groups:
-                    # Penalize the same AA at the partner's corresponding position
-                    for partner_pos in sym_groups[partner_group_id]:
-                        per_residue_mask[partner_pos, ids_canonical.item()] -= self.anti_correlation_strength
+
+            if self.heteromer_anti_correlation and self.anti_correlation_strength > 0:
+                partner_positions = partner_positions_map.get(i)
+                if partner_positions:
+                    unvisited_partners = [p for p in partner_positions if p not in sampled]
+                    if unvisited_partners:
+                        penalty = (
+                            self.anti_correlation_strength
+                            * self.anti_correlation_weights[ids_canonical.item()].to(
+                                device=per_residue_mask.device
+                            )
+                        )
+                        per_residue_mask[unvisited_partners] -= penalty
 
         n_tokens = valid_mask.shape[1]
         res_type = torch.zeros(1, n_tokens, self.num_res_type, device=s.device)

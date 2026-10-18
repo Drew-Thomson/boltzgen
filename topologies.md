@@ -109,7 +109,8 @@ While `material_builder.py` primarily drives topology placement, it also exposes
 
 - `--heteromer_counter_screen`: Instructs the pipeline to design a two-chain heteromer with alternating partner identities (e.g. A-B-A-B). Includes A-only and B-only counter-screen folding steps to filter out designs that might form unintended homomers.
 - `--heteromer_charge_bias` (default `0.5`): Strength of global charge complementarity bias applied during inverse folding to enforce positive/negative charge pairing across partners.
-- `--anti_correlation_strength` (default `0.0`): Strength of cross-partner anti-correlation penalty applied during inverse folding to maximize sequence divergence between partners (0.0 = inactive).
+- `--anti_correlation_strength` (default `20.0` when counter-screen active, `0.0` = disabled): Strength of cross-partner anti-correlation penalty in raw logit units applied during inverse folding to maximize sequence divergence between partners (recommended range: 20.0–50.0).
+- `--anti_correlation_mode` (default `exact`): Penalty weighting scheme for cross-partner anti-correlation (`exact` for identity ban, `blosum62` for similarity-weighted penalty).
 - `--max_partner_identity` (default `0.5`): Maximum allowed sequence identity between partners A and B before running the expensive structural counter-screens.
 - `--max_surviving_designs`: Optional cap on the number of sequence designs to pass into the counter-screen folding step.
 

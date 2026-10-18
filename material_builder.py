@@ -174,7 +174,15 @@ def main():
         "--anti-correlation-strength",
         type=float,
         default=0.0,
-        help="Strength of cross-partner anti-correlation applied during inverse folding (default: 0.0)",
+        help="Strength of cross-partner anti-correlation applied during inverse folding (raw logit scale, default: 0.0, recommended: 20.0-50.0 when active)",
+    )
+    parser.add_argument(
+        "--anti_correlation_mode",
+        "--anti-correlation-mode",
+        type=str,
+        default="exact",
+        choices=["exact", "blosum62"],
+        help="Mode for cross-partner anti-correlation penalty ('exact' or 'blosum62')",
     )
     parser.add_argument(
         "--target_max_rmsd",
@@ -242,7 +250,9 @@ def main():
             
         for k, v in config.items():
             norm_k = k.replace("-", "_")
-            if hasattr(args, norm_k) and norm_k != "asym_unit":
+            if norm_k in {"exclude_aa", "exclude_residues"}:
+                setattr(args, "avoid_aa", v)
+            elif hasattr(args, norm_k) and norm_k != "asym_unit":
                 setattr(args, norm_k, v)
 
     if "asym_unit" in config:
@@ -493,6 +503,8 @@ def main():
 
         if getattr(args, "anti_correlation_strength", 0.0) > 0.0:
             cmd.extend(["--anti_correlation_strength", str(args.anti_correlation_strength)])
+            if getattr(args, "anti_correlation_mode", "exact") != "exact":
+                cmd.extend(["--anti_correlation_mode", str(args.anti_correlation_mode)])
 
         if getattr(args, "double_tape_core_bias", 0.0) > 0.0:
             cmd.extend(["--double_tape_core_bias", str(args.double_tape_core_bias)])
