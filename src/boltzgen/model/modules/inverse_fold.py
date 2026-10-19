@@ -799,7 +799,9 @@ class InverseFoldingDecoder(nn.Module):
 
             if self.double_tape_polar_bias > 0:
                 # Residues able to form salt bridges / H-bonds on the exterior
-                for token in ("ARG", "LYS", "ASP", "GLU", "ASN", "GLN", "HIS"):
+                for token in (
+                    "ARG", "LYS", "ASP", "GLU", "ASN", "GLN", "HIS", "THR", "SER"
+                ):
                     idx_po = const.canonical_tokens.index(token)
                     per_residue_mask[is_outward, idx_po] += self.double_tape_polar_bias
 

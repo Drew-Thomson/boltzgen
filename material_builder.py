@@ -18,7 +18,7 @@ except ModuleNotFoundError as exc:
     def format_metrics_override(topology):
         # 2.0A is way too strict for multi-chain assemblies; 5.0A is more reasonable for global topology
         return "refolding_rmsd_threshold=5.0"
-    def format_additional_filters(topology):
+    def format_additional_filters(topology, *args, **kwargs):
         return None
 try:
     import biotite.structure as struc
@@ -214,7 +214,20 @@ def main():
         "--double_tape_polar_bias",
         type=float,
         default=0.0,
-        help="Strength of boost for R, K, D, E, N, Q, H on the outside (outward-facing) of double-tape (default: 0.0)",
+        help="Strength of boost for R, K, D, E, N, Q, H, T, S on the outside (outward-facing) of double-tape (default: 0.0)",
+    )
+    parser.add_argument(
+        "--filter_composition",
+        "--enable_composition_filters",
+        action="store_true",
+        default=False,
+        help="Apply composition and solubility filters for double_tape (outward_aromatic_fraction, design_hydrophobicity, THR_fraction)",
+    )
+    parser.add_argument(
+        "--enable_consecutive_hydrophobics",
+        action="store_true",
+        default=False,
+        help="Enable max_consecutive_ilv_sheet <= 2 filtering for sheet/tape materials",
     )
     parser.add_argument(
         "--backbone_noise",
@@ -527,7 +540,9 @@ def main():
             
         additional_filters_override = format_additional_filters(
             args.topology,
+            enable_consecutive_hydrophobics=getattr(args, "enable_consecutive_hydrophobics", False),
             is_heteromer=is_heteromer_assembly,
+            enable_composition_filters=getattr(args, "filter_composition", False),
         )
         if additional_filters_override is not None:
             cmd.extend(["--config", "filtering", additional_filters_override])

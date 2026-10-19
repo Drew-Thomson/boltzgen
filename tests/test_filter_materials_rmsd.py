@@ -179,3 +179,12 @@ def test_format_additional_filters_heteromer() -> None:
     )
     assert "max_consecutive_ilv_sheet" in combined
     assert "two_chain_alternation_ratio" in combined
+
+
+def test_format_additional_filters_composition() -> None:
+    active = format_additional_filters("double_tape", enable_composition_filters=True)
+    assert active is not None
+    assert "outward_aromatic_fraction" in active
+    assert "design_hydrophobicity" in active
+    assert "THR_fraction" in active
+

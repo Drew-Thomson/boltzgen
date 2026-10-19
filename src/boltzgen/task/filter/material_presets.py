@@ -72,6 +72,7 @@ def format_additional_filters(
     topology: str,
     enable_consecutive_hydrophobics: bool = False,
     is_heteromer: bool = False,
+    enable_composition_filters: bool = False,
 ) -> str | None:
     """Format optional additional hard filters for material topologies.
 
@@ -79,6 +80,8 @@ def format_additional_filters(
     inactivated by default but can be enabled via enable_consecutive_hydrophobics.
     Heteromer assemblies enforce two_chain_alternation_ratio >= 0.8 to eliminate
     homomer collapse.
+    Composition filtering enforces limits on outward aromatics, overall hydrophobicity,
+    and ensures minimum Threonine presence for double_tape assemblies.
     """
     valid_topologies = {"linear_tape", "double_tape", "bilayer_sheet"}
     if topology not in valid_topologies:
@@ -91,8 +94,16 @@ def format_additional_filters(
         )
     if is_heteromer:
         filters.append(
-            "{feature: two_chain_alternation_ratio, lower_is_better: False, threshold: 0.8}"
+            "{feature: two_chain_alternation_ratio, "
+            "lower_is_better: False, threshold: 0.8}"
         )
+    if enable_composition_filters and topology == "double_tape":
+        filters.extend([
+            "{feature: outward_aromatic_fraction, "
+            "lower_is_better: True, threshold: 0.25}",
+            "{feature: design_hydrophobicity, lower_is_better: True, threshold: 28.0}",
+            "{feature: THR_fraction, lower_is_better: False, threshold: 0.11}",
+        ])
 
     if not filters:
         return None

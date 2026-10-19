@@ -305,7 +305,9 @@ def test_double_tape_amphipathic_alternation() -> None:
     res_types = out["res_type"][0].argmax(dim=-1).tolist()
 
     core_tokens = {"ALA", "VAL", "ILE", "LEU", "PHE", "TRP"}
-    polar_tokens = {"ARG", "LYS", "ASP", "GLU", "ASN", "GLN", "HIS"}
+    polar_tokens = {
+        "ARG", "LYS", "ASP", "GLU", "ASN", "GLN", "HIS", "THR", "SER"
+    }
 
     for i, r in enumerate(res_types):
         tok = const.canonical_tokens[r - const.canonicals_offset]
