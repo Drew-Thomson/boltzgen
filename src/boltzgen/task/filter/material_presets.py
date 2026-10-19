@@ -25,6 +25,7 @@ def material_filtering_overrides(topology: str) -> dict[str, Any] | None:
             "complex_plddt": 1,
             "design_to_target_iptm": None,
             "neg_lattice_rmsd_refolded": 1,
+            "neg_global_rmsd": None,
         }
         if topology == "bilayer_sheet":
             overrides.update({
@@ -66,18 +67,33 @@ def format_metrics_override(topology: str) -> str | None:
     )
     return f"metrics_override={{{values}}}"
 
+
 def format_additional_filters(
-    topology: str, enable_consecutive_hydrophobics: bool = False
+    topology: str,
+    enable_consecutive_hydrophobics: bool = False,
+    is_heteromer: bool = False,
 ) -> str | None:
     """Format optional additional hard filters for material topologies.
 
     Consecutive hydrophobic filtering (max_consecutive_ilv_sheet <= 2) is
     inactivated by default but can be enabled via enable_consecutive_hydrophobics.
+    Heteromer assemblies enforce two_chain_alternation_ratio >= 0.8 to eliminate
+    homomer collapse.
     """
     valid_topologies = {"linear_tape", "double_tape", "bilayer_sheet"}
-    if enable_consecutive_hydrophobics and topology in valid_topologies:
-        return (
-            "additional_filters=[{feature: max_consecutive_ilv_sheet, "
-            "lower_is_better: True, threshold: 2}]"
+    if topology not in valid_topologies:
+        return None
+
+    filters: list[str] = []
+    if enable_consecutive_hydrophobics:
+        filters.append(
+            "{feature: max_consecutive_ilv_sheet, lower_is_better: True, threshold: 2}"
         )
-    return None
+    if is_heteromer:
+        filters.append(
+            "{feature: two_chain_alternation_ratio, lower_is_better: False, threshold: 0.8}"
+        )
+
+    if not filters:
+        return None
+    return f"additional_filters=[{', '.join(filters)}]"

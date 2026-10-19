@@ -160,7 +160,22 @@ def test_material_filtering_overrides_omits_hbonds_and_composition() -> None:
     assert "neg_outward_ilv_fraction" not in tape
     assert tape["complex_plddt"] == 1
     assert tape["neg_lattice_rmsd_refolded"] == 1
+    assert tape.get("neg_global_rmsd") is None
 
     sheet = material_filtering_overrides("bilayer_sheet")
     assert "h_bonds_per_interface_refolded" not in sheet
     assert sheet["sheet_planarity"] == 1
+    assert sheet.get("neg_global_rmsd") is None
+
+
+def test_format_additional_filters_heteromer() -> None:
+    active = format_additional_filters("double_tape", is_heteromer=True)
+    assert active is not None
+    assert "two_chain_alternation_ratio" in active
+    assert "0.8" in active
+
+    combined = format_additional_filters(
+        "double_tape", enable_consecutive_hydrophobics=True, is_heteromer=True
+    )
+    assert "max_consecutive_ilv_sheet" in combined
+    assert "two_chain_alternation_ratio" in combined

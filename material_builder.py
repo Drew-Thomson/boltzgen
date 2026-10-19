@@ -525,7 +525,10 @@ def main():
         if material_filtering_override is not None:
             cmd.extend(["--config", "filtering", material_filtering_override])
             
-        additional_filters_override = format_additional_filters(args.topology)
+        additional_filters_override = format_additional_filters(
+            args.topology,
+            is_heteromer=is_heteromer_assembly,
+        )
         if additional_filters_override is not None:
             cmd.extend(["--config", "filtering", additional_filters_override])
         
