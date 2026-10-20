@@ -16,6 +16,12 @@ avoid_aa: "CPM"
 heteromer_charge_bias: 0.5
 anti_correlation_strength: 20.0
 anti_correlation_mode: "exact"
+anti_correlation_surface_only: true
+partner_orientation: "auto"
+identity_filter_zoned: true
+identity_filter_weight_core: 0.0
+identity_filter_weight_surface: 1.0
+max_partner_identity: 0.5
 double_tape_core_bias: 1.2
 double_tape_polar_bias: 2.0
 double_tape_aromatic_bias: 0.5

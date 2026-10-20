@@ -96,22 +96,28 @@ Places chains along an incomplete circular arc in the XY-plane.
 
 ### Double tape (`double_tape`)
 
-Places chains in two parallel layers, with chains advancing along the Z-axis. With `--antiparallel_prob 1.0`, alternating chains form antiparallel sheets in both layers.
+Places chains in two parallel layers, with chains advancing along the Z-axis. Supports both antiparallel sheets (`--antiparallel_prob 1.0`, where alternating chains reverse direction) and parallel sheets (`--antiparallel_prob 0.0`, where all chains run in the same direction). In parallel assemblies, surface charges produce direct identical-charge self-repulsion ($q^2 > 0$) at $4.8\,\text{Å}$ in homomers, while antiparallel assemblies require sequence asymmetry ($q(i) \cdot q(L - 1 - i) \ge 0$) to destabilize homomers.
 
 - `--target_pitch` (default `4.8`): Spacing between neighboring chains along each tape.
 - `--layer_dist` (default `10.0`): Separation between layers.
-- `--double_tape_core_bias` (default `1.0`): Sequence generation bias for the inward-facing core. Decreases Threonine and increases Alanine probabilities at structurally inward-facing positions.
-- `--double_tape_aromatic_bias` (default `1.0`): Sequence generation bias for the outward-facing exterior. Increases Tryptophan and Tyrosine probabilities at outward-facing positions to promote stabilizing aromatic pairs.
+- `--double_tape_core_bias` (default `0.0`): Sequence generation bias for the inward-facing core. Decreases Threonine/Serine and boosts hydrophobic residues (Ala, Val, Ile, Leu) at structurally inward-facing positions.
+- `--double_tape_aromatic_bias` (default `1.0`): Sequence generation bias for the outward-facing exterior. Boosts Tryptophan and Tyrosine at outward-facing positions to promote stabilizing aromatic pairs.
+- `--double_tape_polar_bias` (default `0.0`): Sequence generation bias for the outward-facing exterior. Boosts Arg, Lys, Asp, Glu, Asn, Gln, His, Thr, Ser at outward-facing positions to support salt-bridge and hydrogen-bonding networks.
 
 ## Sequence Biasing and Heteromer Design
 
-While `material_builder.py` primarily drives topology placement, it also exposes advanced flags for controlling the sequences during the inverse-folding stage:
+While `material_builder.py` primarily drives topology placement, it also exposes advanced flags for controlling sequences during the inverse-folding and identity-filtering stages:
 
 - `--heteromer_counter_screen`: Instructs the pipeline to design a two-chain heteromer with alternating partner identities (e.g. A-B-A-B). Includes A-only and B-only counter-screen folding steps to filter out designs that might form unintended homomers.
 - `--heteromer_charge_bias` (default `0.5`): Strength of global charge complementarity bias applied during inverse folding to enforce positive/negative charge pairing across partners.
 - `--anti_correlation_strength` (default `20.0` when counter-screen active, `0.0` = disabled): Strength of cross-partner anti-correlation penalty in raw logit units applied during inverse folding to maximize sequence divergence between partners (recommended range: 20.0–50.0).
 - `--anti_correlation_mode` (default `exact`): Penalty weighting scheme for cross-partner anti-correlation (`exact` for identity ban, `blosum62` for similarity-weighted penalty).
-- `--max_partner_identity` (default `0.5`): Maximum allowed sequence identity between partners A and B before running the expensive structural counter-screens.
+- `--anti_correlation_surface_only`: Restricts the cross-partner logit penalty during inverse folding to solvent-facing positions. Leaves inward core positions unpenalized so both partners can share compatible hydrophobic core motifs (e.g. alternating Val/Ala) required for stable bilayer packing.
+- `--partner_orientation` (default `auto`, choices: `auto`, `parallel`, `antiparallel`): Relative strand orientation for partner sequence identity filtering and anti-correlation mapping. Under `auto`, relative orientation $\sigma = \operatorname{sgn}(\hat{\mathbf{u}}_A \cdot \hat{\mathbf{u}}_B)$ is detected dynamically from $\text{C}_\alpha$ vectors in the generated structure; if coordinates are absent, falls back to lattice metadata.
+- `--max_partner_identity` (default `0.5`): Maximum allowed sequence identity between partners A and B before running expensive structural counter-screens.
+- `--identity_filter_zoned` / `--no-identity_filter_zoned`: Activates zoned sequence identity evaluation. Automatically enabled for `double_tape`, `linear_tape`, and `bilayer_sheet`.
+- `--identity_filter_weight_core` (default `0.0`): Weight for inward core residue identity in zoned filtering. Setting to `0.0` allows core residues to be identical across partners without triggering false-positive counter-screen filtering.
+- `--identity_filter_weight_surface` (default `1.0`): Weight for outward solvent-facing residue identity in zoned filtering, concentrating divergence requirements where salt bridges and homomer repulsion operate.
 - `--max_surviving_designs`: Optional cap on the number of sequence designs to pass into the counter-screen folding step.
 
 ### Tetrahedral cage (`cage_tetrahedral`)

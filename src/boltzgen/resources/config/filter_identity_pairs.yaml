@@ -5,3 +5,7 @@ layout_path: null
 moldir: null
 max_partner_identity: 0.5
 max_surviving_designs: null
+zoned: null
+weight_core: 0.0
+weight_surface: 1.0
+orientation: auto

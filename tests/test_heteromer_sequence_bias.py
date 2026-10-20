@@ -1,7 +1,10 @@
-import pytest
-import numpy as np
-import torch
+import json
 from pathlib import Path
+
+import gemmi
+import numpy as np
+import pytest
+import torch
 
 from boltzgen.model.modules.material_layout import expand_material_spec
 from boltzgen.data.parse.schema import parse_residue_constraints
@@ -316,5 +319,316 @@ def test_double_tape_amphipathic_alternation() -> None:
             assert tok in polar_tokens, f"Position {i} (res {res_idx+1}) expected polar, got {tok}"
         else:  # 1-indexed even: inward
             assert tok in core_tokens, f"Position {i} (res {res_idx+1}) expected core hydrophobic, got {tok}"
+
+
+def test_antiparallel_heteromer_anti_correlation() -> None:
+    """Test cross-partner anti-correlation mapping under antiparallel strand orientation."""
+    torch.manual_seed(42)
+    n = 6
+    valid_mask = torch.ones(1, n, dtype=torch.bool)
+    s = torch.zeros(n, 8)
+    src, dst = torch.meshgrid(torch.arange(n), torch.arange(n), indexing="ij")
+    edge_idx = torch.stack([src.flatten(), dst.flatten()])
+    z = torch.zeros(n * n, 8)
+    feats = {
+        "design_mask": torch.ones(1, n, dtype=torch.bool),
+        "symmetric_group": torch.tensor([[1, 1, 1, 2, 2, 2]], dtype=torch.long),
+        "feature_asym_id": torch.tensor([[0, 0, 0, 1, 1, 1]], dtype=torch.long),
+        "feature_residue_index": torch.tensor([[0, 1, 2, 0, 1, 2]], dtype=torch.long),
+        "token_to_bb4_atoms": torch.eye(n * 4).unsqueeze(0),
+        "coords": torch.zeros(1, n * 4, 3),
+        "res_type_clone": torch.zeros(1, n, const.num_tokens),
+        "is_antiparallel": torch.tensor([True]),
+    }
+
+    decoder = InverseFoldingDecoder(
+        atom_s=1, atom_z=1, token_s=1, token_z=1,
+        node_dim=8, pair_dim=8, hidden_dim=8,
+        anti_correlation_strength=100.0,
+        sampling_temperature=None,
+    )
+    decoder.eval()
+    out = decoder.sample(s, z, edge_idx, valid_mask, feats)
+    res_types = out["res_type"][0].argmax(dim=-1).tolist()
+    chain_a = res_types[:3]
+    chain_b = res_types[3:]
+    # Under antiparallel alignment, index 0 of A contacts index 2 of B, etc.
+    assert chain_a[0] != chain_b[2], f"Match at ends: {chain_a[0]} == {chain_b[2]}"
+    assert chain_a[1] != chain_b[1], f"Match at centre: {chain_a[1]} == {chain_b[1]}"
+    assert chain_a[2] != chain_b[0], f"Match at ends: {chain_a[2]} == {chain_b[0]}"
+
+
+def test_surface_only_anti_correlation() -> None:
+    """Test surface-only anti-correlation leaves core positions unpenalized."""
+    torch.manual_seed(42)
+    n = 8
+    valid_mask = torch.ones(1, n, dtype=torch.bool)
+    s = torch.zeros(n, 8)
+    src, dst = torch.meshgrid(torch.arange(n), torch.arange(n), indexing="ij")
+    edge_idx = torch.stack([src.flatten(), dst.flatten()])
+    z = torch.zeros(n * n, 8)
+    feats = {
+        "design_mask": torch.ones(1, n, dtype=torch.bool),
+        "symmetric_group": torch.tensor([[1, 1, 1, 1, 2, 2, 2, 2]], dtype=torch.long),
+        "feature_asym_id": torch.tensor([[0, 0, 0, 0, 1, 1, 1, 1]], dtype=torch.long),
+        "feature_residue_index": torch.tensor(
+            [[0, 1, 2, 3, 0, 1, 2, 3]], dtype=torch.long
+        ),
+        "token_to_bb4_atoms": torch.eye(n * 4).unsqueeze(0),
+        "coords": torch.zeros(1, n * 4, 3),
+        "res_type_clone": torch.zeros(1, n, const.num_tokens),
+    }
+
+    decoder = InverseFoldingDecoder(
+        atom_s=1, atom_z=1, token_s=1, token_z=1,
+        node_dim=8, pair_dim=8, hidden_dim=8,
+        double_tape_core_bias=10.0,
+        anti_correlation_strength=100.0,
+        anti_correlation_surface_only=True,
+        sampling_temperature=None,
+    )
+    decoder.eval()
+    out = decoder.sample(s, z, edge_idx, valid_mask, feats)
+    res_types = out["res_type"][0].argmax(dim=-1).tolist()
+    chain_a = res_types[:4]
+    chain_b = res_types[4:]
+
+    # Surface positions (even 0-indexed: 0, 2) must differ
+    assert chain_a[0] != chain_b[0], f"Surface position 0 matched: {chain_a[0]}"
+    assert chain_a[2] != chain_b[2], f"Surface position 2 matched: {chain_a[2]}"
+
+
+def test_filter_identity_pairs_antiparallel_and_zoned(tmp_path: Path) -> None:
+    """Test FilterHighIdentityPairs with antiparallel 4a+4b design from Futty et al."""
+    layout_file = tmp_path / "material_layout.json"
+    layout = {
+        "topology": "double_tape",
+        "chains": [
+            {"chain_id": "A", "role": "protein", "partner_label": "A"},
+            {"chain_id": "B", "role": "protein", "partner_label": "B"},
+        ],
+    }
+    layout_file.write_text(json.dumps(layout))
+
+    # Peptide 4a: EVWAKVKAT, Peptide 4b: TATVEAWVK
+    st = gemmi.Structure()
+    m = gemmi.Model("1")
+    ch_a = gemmi.Chain("A")
+    for idx, char in enumerate("EVWAKVKAT"):
+        res = gemmi.Residue()
+        res.name = const.prot_letter_to_token[char]
+        res.seqid = gemmi.SeqId(str(idx + 1))
+        atom = gemmi.Atom()
+        atom.name = "CA"
+        atom.element = gemmi.Element("C")
+        atom.pos = gemmi.Position(0.0, float(idx) * 3.8, 0.0)
+        res.add_atom(atom)
+        ch_a.add_residue(res)
+    m.add_chain(ch_a)
+
+    ch_b = gemmi.Chain("B")
+    for idx, char in enumerate("TATVEAWVK"):
+        res = gemmi.Residue()
+        res.name = const.prot_letter_to_token[char]
+        res.seqid = gemmi.SeqId(str(idx + 1))
+        atom = gemmi.Atom()
+        atom.name = "CA"
+        atom.element = gemmi.Element("C")
+        # Reverse coordinate vector along Y for antiparallel orientation
+        atom.pos = gemmi.Position(10.0, float(8 - idx) * 3.8, 0.0)
+        res.add_atom(atom)
+        ch_b.add_residue(res)
+    m.add_chain(ch_b)
+    st.add_model(m)
+
+    cif_path = tmp_path / "design_4a_4b.cif"
+    st.make_mmcif_document().write_file(str(cif_path))
+
+    # Test zoned filtering: surface identity is 40% <= 50%, should survive!
+    task_zoned = FilterHighIdentityPairs(
+        str(tmp_path),
+        str(layout_file),
+        max_partner_identity=0.5,
+        zoned=True,
+        weight_core=0.0,
+        weight_surface=1.0,
+        orientation="auto",
+    )
+    task_zoned.run()
+    assert cif_path.exists(), "4a+4b should survive zoned identity filtering!"
+
+
+def test_filter_identity_pairs_parallel_zoned(tmp_path: Path) -> None:
+    """Test FilterHighIdentityPairs with parallel peptide pair."""
+    layout_file = tmp_path / "material_layout.json"
+    layout = {
+        "topology": "double_tape",
+        "chains": [
+            {"chain_id": "A", "role": "protein", "partner_label": "A"},
+            {"chain_id": "B", "role": "protein", "partner_label": "B"},
+        ],
+    }
+    layout_file.write_text(json.dumps(layout))
+
+    # Parallel pair with identical core (V, A, V, A) but diverse surface (40% match)
+    seq_a = "EVWAKVKAT"
+    seq_b = "KVWAEVTAT"
+    st = gemmi.Structure()
+    m = gemmi.Model("1")
+    ch_a = gemmi.Chain("A")
+    for idx, char in enumerate(seq_a):
+        res = gemmi.Residue()
+        res.name = const.prot_letter_to_token[char]
+        res.seqid = gemmi.SeqId(str(idx + 1))
+        atom = gemmi.Atom()
+        atom.name = "CA"
+        atom.element = gemmi.Element("C")
+        atom.pos = gemmi.Position(0.0, float(idx) * 3.8, 0.0)
+        res.add_atom(atom)
+        ch_a.add_residue(res)
+    m.add_chain(ch_a)
+
+    ch_b = gemmi.Chain("B")
+    for idx, char in enumerate(seq_b):
+        res = gemmi.Residue()
+        res.name = const.prot_letter_to_token[char]
+        res.seqid = gemmi.SeqId(str(idx + 1))
+        atom = gemmi.Atom()
+        atom.name = "CA"
+        atom.element = gemmi.Element("C")
+        # Parallel orientation along Y
+        atom.pos = gemmi.Position(10.0, float(idx) * 3.8, 0.0)
+        res.add_atom(atom)
+        ch_b.add_residue(res)
+    m.add_chain(ch_b)
+    st.add_model(m)
+
+    cif_path = tmp_path / "design_parallel.cif"
+    st.make_mmcif_document().write_file(str(cif_path))
+
+    # Zoned filtering: surface identity = 40% <= 50%, should survive
+    task_zoned = FilterHighIdentityPairs(
+        str(tmp_path),
+        str(layout_file),
+        max_partner_identity=0.5,
+        zoned=True,
+        weight_core=0.0,
+        weight_surface=1.0,
+        orientation="parallel",
+    )
+    task_zoned.run()
+    assert cif_path.exists(), "Parallel pair with diverse surface should survive!"
+
+
+def test_different_length_antiparallel_anti_correlation() -> None:
+    """Test anti-correlation when partner chains have different lengths."""
+    torch.manual_seed(42)
+    n_a = 6
+    n_b = 10
+    n = n_a + n_b
+    valid_mask = torch.ones(1, n, dtype=torch.bool)
+    s = torch.zeros(n, 8)
+    src, dst = torch.meshgrid(torch.arange(n), torch.arange(n), indexing="ij")
+    edge_idx = torch.stack([src.flatten(), dst.flatten()])
+    z = torch.zeros(n * n, 8)
+    sym_group = torch.cat(
+        [torch.full((n_a,), 1, dtype=torch.long), torch.full((n_b,), 2, dtype=torch.long)]
+    ).unsqueeze(0)
+    asym_id = torch.cat(
+        [torch.zeros(n_a, dtype=torch.long), torch.ones(n_b, dtype=torch.long)]
+    ).unsqueeze(0)
+    res_idx = torch.cat(
+        [torch.arange(n_a, dtype=torch.long), torch.arange(n_b, dtype=torch.long)]
+    ).unsqueeze(0)
+    feats = {
+        "design_mask": torch.ones(1, n, dtype=torch.bool),
+        "symmetric_group": sym_group,
+        "feature_asym_id": asym_id,
+        "feature_residue_index": res_idx,
+        "token_to_bb4_atoms": torch.eye(n * 4).unsqueeze(0),
+        "coords": torch.zeros(1, n * 4, 3),
+        "res_type_clone": torch.zeros(1, n, const.num_tokens),
+        "is_antiparallel": torch.tensor([True]),
+    }
+
+    decoder = InverseFoldingDecoder(
+        atom_s=1, atom_z=1, token_s=1, token_z=1,
+        node_dim=8, pair_dim=8, hidden_dim=8,
+        anti_correlation_strength=100.0,
+        sampling_temperature=None,
+    )
+    decoder.eval()
+    out = decoder.sample(s, z, edge_idx, valid_mask, feats)
+    res_types = out["res_type"][0].argmax(dim=-1).tolist()
+    chain_a = res_types[:n_a]
+    chain_b = res_types[n_a:]
+
+    # A has mid=2.5, B has mid=4.5
+    # Antiparallel: A[0] (0) maps to round(4.5 - (0 - 2.5)) = round(7.0) = 7
+    # A[5] (5) maps to round(4.5 - (5 - 2.5)) = round(2.0) = 2
+    assert chain_a[0] != chain_b[7], f"Mapped pair matched: {chain_a[0]} == {chain_b[7]}"
+    assert chain_a[5] != chain_b[2], f"Mapped pair matched: {chain_a[5]} == {chain_b[2]}"
+
+
+def test_different_length_zoned_filter_identity_pairs(tmp_path: Path) -> None:
+    """Test FilterHighIdentityPairs with different strand lengths (len 9 and len 13)."""
+    layout_file = tmp_path / "material_layout.json"
+    layout = {
+        "topology": "double_tape",
+        "chains": [
+            {"chain_id": "A", "role": "protein", "partner_label": "A"},
+            {"chain_id": "B", "role": "protein", "partner_label": "B"},
+        ],
+    }
+    layout_file.write_text(json.dumps(layout))
+
+    # A is len 9 (EVWAKVKAT), B is len 13 with overhangs (GSTATVEAWVKSK)
+    seq_a = "EVWAKVKAT"
+    seq_b = "GSTATVEAWVKSK"
+    st = gemmi.Structure()
+    m = gemmi.Model("1")
+    ch_a = gemmi.Chain("A")
+    for idx, char in enumerate(seq_a):
+        res = gemmi.Residue()
+        res.name = const.prot_letter_to_token[char]
+        res.seqid = gemmi.SeqId(str(idx + 1))
+        atom = gemmi.Atom()
+        atom.name = "CA"
+        atom.element = gemmi.Element("C")
+        atom.pos = gemmi.Position(0.0, float(idx) * 3.8, 0.0)
+        res.add_atom(atom)
+        ch_a.add_residue(res)
+    m.add_chain(ch_a)
+
+    ch_b = gemmi.Chain("B")
+    for idx, char in enumerate(seq_b):
+        res = gemmi.Residue()
+        res.name = const.prot_letter_to_token[char]
+        res.seqid = gemmi.SeqId(str(idx + 1))
+        atom = gemmi.Atom()
+        atom.name = "CA"
+        atom.element = gemmi.Element("C")
+        # Reverse along Y for antiparallel orientation
+        atom.pos = gemmi.Position(10.0, float(len(seq_b) - 1 - idx) * 3.8, 0.0)
+        res.add_atom(atom)
+        ch_b.add_residue(res)
+    m.add_chain(ch_b)
+    st.add_model(m)
+
+    cif_path = tmp_path / "design_diff_lengths.cif"
+    st.make_mmcif_document().write_file(str(cif_path))
+
+    # Zoned filtering across unequal lengths: surface identity = 40% <= 50%, survives!
+    task = FilterHighIdentityPairs(
+        str(tmp_path),
+        str(layout_file),
+        max_partner_identity=0.5,
+        zoned=True,
+        weight_core=0.0,
+        weight_surface=1.0,
+        orientation="antiparallel",
+    )
+    task.run()
+    assert cif_path.exists(), "Unequal length pair should survive zoned filtering!"
 
 

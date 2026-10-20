@@ -559,6 +559,7 @@ class InverseFoldingDecoder(nn.Module):
         heteromer_anti_correlation: bool = False,
         anti_correlation_strength: float = 0.0,
         anti_correlation_mode: str = "exact",
+        anti_correlation_surface_only: bool = False,
         double_tape_core_bias: float = 0.0,
         double_tape_aromatic_bias: float = 0.0,
         double_tape_polar_bias: float = 0.0,
@@ -600,6 +601,7 @@ class InverseFoldingDecoder(nn.Module):
             get_anti_correlation_weights(anti_correlation_mode),
             persistent=False,
         )
+        self.anti_correlation_surface_only = anti_correlation_surface_only
         self.double_tape_core_bias = double_tape_core_bias
         self.double_tape_aromatic_bias = double_tape_aromatic_bias
         self.double_tape_polar_bias = double_tape_polar_bias
@@ -738,10 +740,13 @@ class InverseFoldingDecoder(nn.Module):
             prior_offset = (log_prior - log_prior.mean()) * self.background_unbias_strength
             per_residue_mask -= prior_offset.unsqueeze(0)
 
+        is_inward = None
+        is_outward = None
         if (
             self.double_tape_core_bias > 0
             or self.double_tape_aromatic_bias > 0
             or self.double_tape_polar_bias > 0
+            or self.anti_correlation_surface_only
         ):
             token_bb4 = feats["token_to_bb4_atoms"].float()
             coords = feats["coords"]
@@ -869,20 +874,113 @@ class InverseFoldingDecoder(nn.Module):
                         r_idx = res_idx_tensor[pos].item()
                         pos_by_entity_res[(ent, r_idx)].append(pos)
 
-                res_to_entities = defaultdict(dict)
-                for (ent, r_idx), pos_list in pos_by_entity_res.items():
-                    res_to_entities[r_idx][ent] = pos_list
+                # Determine relative strand orientation across entities (parallel vs antiparallel)
+                is_anti_global = None
+                if "is_antiparallel" in feats:
+                    anti_feat = feats["is_antiparallel"]
+                    if isinstance(anti_feat, torch.Tensor):
+                        is_anti_global = bool(anti_feat.flatten()[0].item())
+                    elif isinstance(anti_feat, bool):
+                        is_anti_global = anti_feat
 
-                for r_idx, ent_dict in res_to_entities.items():
-                    if len(ent_dict) >= 2:
-                        entities = list(ent_dict.keys())
-                        for ent in entities:
-                            other_positions = []
-                            for other_ent in entities:
-                                if other_ent != ent:
-                                    other_positions.extend(ent_dict[other_ent])
-                            for pos in ent_dict[ent]:
-                                partner_positions_map[pos] = other_positions
+                entity_strand_dir = {}
+                token_bb4 = feats.get("token_to_bb4_atoms")
+                coords = feats.get("coords")
+                if token_bb4 is not None and coords is not None:
+                    try:
+                        B = coords.shape[0]
+                        A = coords.shape[-2]
+                        token_bb4_flat = token_bb4.float().view(B, -1, A)
+                        coords_flat = coords.float().view(B, A, 3)
+                        bb4_flat = torch.bmm(token_bb4_flat, coords_flat)
+                        ca_all = bb4_flat.view(B, -1, 4, 3)[valid_mask][:, 1]
+                        for ent in set(ent for (ent, _) in pos_by_entity_res):
+                            ent_positions = [
+                                pos
+                                for (e, _), plist in pos_by_entity_res.items()
+                                if e == ent
+                                for pos in plist
+                            ]
+                            if len(ent_positions) >= 2:
+                                ent_positions.sort(
+                                    key=lambda p: res_idx_tensor[p].item()
+                                )
+                                k = max(1, len(ent_positions) // 4)
+                                v = ca_all[ent_positions[-k:]].mean(
+                                    dim=0
+                                ) - ca_all[ent_positions[:k]].mean(dim=0)
+                                norm = v.norm()
+                                if norm > 1e-4:
+                                    entity_strand_dir[ent] = v / norm
+                    except Exception:
+                        pass
+
+                def are_entities_antiparallel(e_a: int, e_b: int) -> bool:
+                    if e_a in entity_strand_dir and e_b in entity_strand_dir:
+                        dot = torch.dot(
+                            entity_strand_dir[e_a], entity_strand_dir[e_b]
+                        ).item()
+                        if abs(dot) > 1e-3:
+                            return dot < 0.0
+                    if is_anti_global is not None:
+                        return is_anti_global
+                    return False
+
+                entities = list(set(ent for (ent, _) in pos_by_entity_res))
+                min_res = {
+                    ent: min(r for (e, r) in pos_by_entity_res if e == ent)
+                    for ent in entities
+                }
+                max_res = {
+                    ent: max(r for (e, r) in pos_by_entity_res if e == ent)
+                    for ent in entities
+                }
+                mid_res = {
+                    ent: (min_res[ent] + max_res[ent]) / 2.0
+                    for ent in entities
+                }
+
+                for (ent, r_idx), pos_list in pos_by_entity_res.items():
+                    for pos in pos_list:
+                        if self.anti_correlation_surface_only and is_outward is not None:
+                            if not is_outward[pos].item():
+                                partner_positions_map[pos] = []
+                                continue
+
+                        other_positions = []
+                        for other_ent in entities:
+                            if other_ent == ent:
+                                continue
+                            if are_entities_antiparallel(ent, other_ent):
+                                partner_r = int(
+                                    round(
+                                        mid_res[other_ent]
+                                        - (r_idx - mid_res[ent])
+                                    )
+                                )
+                            else:
+                                partner_r = int(
+                                    round(
+                                        mid_res[other_ent]
+                                        + (r_idx - mid_res[ent])
+                                    )
+                                )
+
+                            partner_candidates = pos_by_entity_res.get(
+                                (other_ent, partner_r), []
+                            )
+                            if (
+                                self.anti_correlation_surface_only
+                                and is_outward is not None
+                            ):
+                                partner_candidates = [
+                                    p
+                                    for p in partner_candidates
+                                    if is_outward[p].item()
+                                ]
+                            other_positions.extend(partner_candidates)
+
+                        partner_positions_map[pos] = other_positions
 
         # Track sampled residues for windowed repetition penalty (penalizing consecutive identical residues)
         sampled_by_chain_res = {}

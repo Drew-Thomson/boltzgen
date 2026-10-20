@@ -258,6 +258,42 @@ def add_configure_arguments(
         help="Mode for cross-partner anti-correlation penalty ('exact' for identity ban, 'blosum62' for similarity-weighted penalty)",
     )
     p.add_argument(
+        "--anti_correlation_surface_only",
+        "--anti-correlation-surface-only",
+        action="store_true",
+        default=False,
+        help="Apply cross-partner anti-correlation only to surface (outward-facing) residues, leaving core residues unpenalized",
+    )
+    p.add_argument(
+        "--partner_orientation",
+        "--partner-orientation",
+        type=str,
+        default="auto",
+        choices=["auto", "parallel", "antiparallel"],
+        help="Partner strand orientation for identity filtering ('auto', 'parallel', 'antiparallel')",
+    )
+    p.add_argument(
+        "--identity_filter_weight_core",
+        "--identity-filter-weight-core",
+        type=float,
+        default=0.0,
+        help="Weight for core residue identity in zoned partner identity filtering (default: 0.0)",
+    )
+    p.add_argument(
+        "--identity_filter_weight_surface",
+        "--identity-filter-weight-surface",
+        type=float,
+        default=1.0,
+        help="Weight for surface residue identity in zoned partner identity filtering (default: 1.0)",
+    )
+    p.add_argument(
+        "--identity_filter_zoned",
+        "--identity-filter-zoned",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Force enable or disable zoned identity filtering (default: auto for tape/sheet topologies)",
+    )
+    p.add_argument(
         "--double_tape_core_bias",
         "--double-tape-core-bias",
         type=float,
@@ -1257,17 +1293,23 @@ class BinderDesignPipeline:
                 )
             topology_params = heteromer_meta.get("topology_params", {})
             topology = heteromer_meta.get("topology")
+            filter_args = [
+                f"design_dir={source_dir}",
+                f"layout_path={layout_path}",
+                f"moldir={moldir}",
+                f"max_partner_identity={args.max_partner_identity}",
+                f"max_surviving_designs={args.max_surviving_designs}",
+                f"orientation={getattr(args, 'partner_orientation', 'auto')}",
+                f"weight_core={getattr(args, 'identity_filter_weight_core', 0.0)}",
+                f"weight_surface={getattr(args, 'identity_filter_weight_surface', 1.0)}",
+            ]
+            if getattr(args, "identity_filter_zoned", None) is not None:
+                filter_args.append(f"zoned={args.identity_filter_zoned}")
             self.steps.append(
                 PipelineStep(
                     name="filter_identity_pairs",
                     config_path=args.config_dir / "filter_identity_pairs.yaml",
-                    args=[
-                        f"design_dir={source_dir}",
-                        f"layout_path={layout_path}",
-                        f"moldir={moldir}",
-                        f"max_partner_identity={args.max_partner_identity}",
-                        f"max_surviving_designs={args.max_surviving_designs}",
-                    ],
+                    args=filter_args,
                 )
             )
 
@@ -1495,6 +1537,8 @@ def _inverse_fold_bias_args(args: argparse.Namespace) -> List[str]:
         mode = getattr(args, "anti_correlation_mode", "exact")
         if mode != "exact":
             out.append(f"override.inverse_fold_args.anti_correlation_mode={mode}")
+        if getattr(args, "anti_correlation_surface_only", False):
+            out.append("override.inverse_fold_args.anti_correlation_surface_only=True")
 
     if getattr(args, "double_tape_core_bias", 0.0) > 0.0:
         out.append(

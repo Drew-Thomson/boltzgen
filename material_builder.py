@@ -185,6 +185,42 @@ def main():
         help="Mode for cross-partner anti-correlation penalty ('exact' or 'blosum62')",
     )
     parser.add_argument(
+        "--anti_correlation_surface_only",
+        "--anti-correlation-surface-only",
+        action="store_true",
+        default=False,
+        help="Apply cross-partner anti-correlation only to surface (outward-facing) residues, leaving core residues unpenalized",
+    )
+    parser.add_argument(
+        "--partner_orientation",
+        "--partner-orientation",
+        type=str,
+        default="auto",
+        choices=["auto", "parallel", "antiparallel"],
+        help="Partner strand orientation for identity filtering ('auto', 'parallel', 'antiparallel')",
+    )
+    parser.add_argument(
+        "--identity_filter_weight_core",
+        "--identity-filter-weight-core",
+        type=float,
+        default=0.0,
+        help="Weight for core residue identity in zoned partner identity filtering (default: 0.0)",
+    )
+    parser.add_argument(
+        "--identity_filter_weight_surface",
+        "--identity-filter-weight-surface",
+        type=float,
+        default=1.0,
+        help="Weight for surface residue identity in zoned partner identity filtering (default: 1.0)",
+    )
+    parser.add_argument(
+        "--identity_filter_zoned",
+        "--identity-filter-zoned",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Force enable or disable zoned identity filtering (default: auto for tape/sheet topologies)",
+    )
+    parser.add_argument(
         "--target_max_rmsd",
         type=float,
         default=None,
@@ -481,6 +517,7 @@ def main():
             "slide_noise": args.slide_noise,
             "target_twist": args.target_twist,
             "twist_noise": args.twist_noise,
+            "antiparallel_prob": args.antiparallel_prob,
         },
         charge_bias_strength=args.heteromer_charge_bias,
     )
@@ -518,6 +555,17 @@ def main():
             cmd.extend(["--anti_correlation_strength", str(args.anti_correlation_strength)])
             if getattr(args, "anti_correlation_mode", "exact") != "exact":
                 cmd.extend(["--anti_correlation_mode", str(args.anti_correlation_mode)])
+
+        if getattr(args, "anti_correlation_surface_only", False):
+            cmd.append("--anti_correlation_surface_only")
+        if getattr(args, "partner_orientation", "auto") != "auto":
+            cmd.extend(["--partner_orientation", str(args.partner_orientation)])
+        if getattr(args, "identity_filter_weight_core", 0.0) != 0.0:
+            cmd.extend(["--identity_filter_weight_core", str(args.identity_filter_weight_core)])
+        if getattr(args, "identity_filter_weight_surface", 1.0) != 1.0:
+            cmd.extend(["--identity_filter_weight_surface", str(args.identity_filter_weight_surface)])
+        if getattr(args, "identity_filter_zoned", None) is not None:
+            cmd.append(f"--{'identity-filter-zoned' if args.identity_filter_zoned else 'no-identity-filter-zoned'}")
 
         if getattr(args, "double_tape_core_bias", 0.0) > 0.0:
             cmd.extend(["--double_tape_core_bias", str(args.double_tape_core_bias)])
