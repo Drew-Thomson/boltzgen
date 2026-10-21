@@ -1,6 +1,6 @@
 """Tests for materials-focused structural RMSD filtering and ranking."""
 
-# ruff: noqa: INP001, PLR2004
+# ruff: noqa: INP001, PLR2004, PD901
 
 from pathlib import Path
 
@@ -173,12 +173,47 @@ def test_format_additional_filters_heteromer() -> None:
     assert active is not None
     assert "two_chain_alternation_ratio" in active
     assert "0.8" in active
+    assert "strand_polarity_target_match" in active
+    assert "intra_sheet_alternation_ratio" in active
+    assert "bilayer_dist_std" in active
 
     combined = format_additional_filters(
         "double_tape", enable_consecutive_hydrophobics=True, is_heteromer=True
     )
     assert "max_consecutive_ilv_sheet" in combined
     assert "two_chain_alternation_ratio" in combined
+    assert "strand_polarity_target_match" in combined
+
+
+def test_load_dataframe_double_tape_local_rmsd_priority(tmp_path: Path) -> None:
+    task = Filter.__new__(Filter)
+    task.from_inverse_folded = True
+    task.refolding_rmsd_threshold = 2.5
+    task.global_rmsd_threshold = 2.5
+    task.filters = [
+        {"feature": "local_rmsd", "lower_is_better": True, "threshold": 2.5},
+        {"feature": "global_rmsd", "lower_is_better": True, "threshold": 2.5},
+    ]
+
+    # Both local_double_tape_rmsd and legacy lattice_rmsd_refolded present
+    df_in = pd.DataFrame(
+        {
+            "id": ["d1", "d2"],
+            "designed_sequence": ["ACDEF", "FGHIJ"],
+            "bb_rmsd": [8.5, 9.2],
+            "lattice_rmsd_refolded": [6.5, 7.2],
+            "local_double_tape_rmsd": [1.3, 1.8],
+            "min_interaction_pae": [4.0, 7.5],
+        }
+    )
+
+    df_in.to_csv(tmp_path / "aggregate_metrics_0.csv", index=False)
+    task.design_dir = tmp_path
+    task.load_dataframe()
+    # Verifies local_double_tape_rmsd was chosen as local_rmsd
+    assert task.df["local_rmsd"].tolist() == [1.3, 1.8]
+    assert task.df["global_rmsd"].tolist() == [8.5, 9.2]
+    assert task.global_rmsd_threshold == 15.0
 
 
 def test_format_additional_filters_composition() -> None:

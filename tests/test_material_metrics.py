@@ -1,6 +1,6 @@
 """CPU tests for material analysis metrics and ranking presets."""
 
-# ruff: noqa: INP001, ANN201
+# ruff: noqa: INP001, ANN201, PLR2004, D401
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from boltzgen.task.analyze.analyze_utils import heteromer_counter_screen_contras
 from boltzgen.task.analyze.material_metrics import (
     backbone_ca_coords,
     cage_metrics,
+    compute_double_tape_neatness_metrics,
     compute_material_metrics,
     compute_two_chain_alternating_metrics,
     pore_aspect_ratio,
@@ -363,4 +364,235 @@ def test_two_chain_alternating_metrics_se3_invariance() -> None:
     assert res["lattice_rmsd_geom"] == pytest.approx(0.0, abs=1e-4)
     assert res["lattice_rmsd_refolded"] == pytest.approx(0.0, abs=1e-4)
     assert res["two_chain_alternation_ratio"] == pytest.approx(1.0)
+
+
+def _build_mock_double_tape(
+    num_steps: int = 8,
+    atoms_per_strand: int = 36,
+    pitch: float = 4.8,
+    layer_dist: float = 8.0,
+    is_antiparallel: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, dict[int, int], torch.Tensor]:
+    """Helper to synthesize a double-tape lattice geometry for testing."""
+    num_chains = 2 * num_steps
+    res_y = torch.linspace(-15.0, 15.0, atoms_per_strand)
+    base_strand = torch.stack(
+        [torch.zeros_like(res_y), res_y, torch.zeros_like(res_y)], dim=1
+    )
+
+    coords_list = []
+    chain_ids_list = []
+    partner_slots = {}
+
+    for c in range(num_chains):
+        layer = c % 2
+        step = c // 2
+        strand = base_strand.clone()
+        if is_antiparallel and (layer + step) % 2 == 1:
+            strand[:, 1] = -strand[:, 1]
+        strand[:, 0] += (layer - 0.5) * layer_dist
+        strand[:, 2] += step * pitch
+        coords_list.append(strand)
+        chain_ids_list.append(torch.full((atoms_per_strand,), c, dtype=torch.long))
+        partner_slots[c] = step % 2
+
+    coords = torch.cat(coords_list)
+    chain_ids = torch.cat(chain_ids_list)
+    bb_mask = torch.ones(coords.shape[0], dtype=torch.bool)
+    return coords, chain_ids, partner_slots, bb_mask
+
+
+def test_double_tape_neatness_antiparallel_perfect_and_supercoiled() -> None:
+    torch.manual_seed(42)
+    coords_ideal, chain_ids, partner_slots, bb_mask = _build_mock_double_tape(
+        num_steps=8, is_antiparallel=True
+    )
+
+    # 1. Perfect refold
+    res_perf = compute_double_tape_neatness_metrics(
+        coords_refold=coords_ideal,
+        coords_ideal=coords_ideal,
+        chain_ids_refold=chain_ids,
+        chain_ids_ideal=chain_ids,
+        partner_slots_refold=partner_slots,
+        partner_slots_ideal=partner_slots,
+        bb_mask_refold=bb_mask,
+        bb_mask_ideal=bb_mask,
+    )
+    assert res_perf["strand_polarity_target_match"] == pytest.approx(1.0)
+    assert res_perf["intra_sheet_alternation_ratio"] == pytest.approx(1.0)
+    assert res_perf["local_step_rmsd"] == pytest.approx(0.0, abs=1e-4)
+    assert res_perf["local_double_tape_rmsd"] == pytest.approx(0.0, abs=1e-4)
+    assert res_perf["bilayer_dist_std"] == pytest.approx(0.0, abs=1e-4)
+    assert res_perf["double_tape_neatness_score"] == pytest.approx(1.0, abs=1e-3)
+
+    # 2. Supercoiled assembly (3 deg twist per step along tape axis)
+    num_steps = 8
+    atoms_per_strand = 36
+    num_chains = 2 * num_steps
+    coords_twisted_list = []
+    twist_per_step_rad = math.radians(3.0)
+
+    for c in range(num_chains):
+        step = c // 2
+        angle = step * twist_per_step_rad
+        cos_a, sin_a = math.cos(angle), math.sin(angle)
+        rot_z = torch.tensor(
+            [[cos_a, -sin_a, 0.0], [sin_a, cos_a, 0.0], [0.0, 0.0, 1.0]],
+            dtype=torch.float32,
+        )
+        c_coords = coords_ideal[c * atoms_per_strand : (c + 1) * atoms_per_strand]
+        coords_twisted_list.append(c_coords @ rot_z)
+
+    coords_twisted = torch.cat(coords_twisted_list)
+
+    res_twisted = compute_double_tape_neatness_metrics(
+        coords_refold=coords_twisted,
+        coords_ideal=coords_ideal,
+        chain_ids_refold=chain_ids,
+        chain_ids_ideal=chain_ids,
+        partner_slots_refold=partner_slots,
+        partner_slots_ideal=partner_slots,
+        bb_mask_refold=bb_mask,
+        bb_mask_ideal=bb_mask,
+    )
+    # Local step RMSD remains small despite cumulative supercoiling
+    assert res_twisted["strand_polarity_target_match"] == pytest.approx(1.0)
+    assert res_twisted["intra_sheet_alternation_ratio"] == pytest.approx(1.0)
+    assert res_twisted["local_step_rmsd"] < 0.5
+    assert res_twisted["local_double_tape_rmsd"] < 0.5
+    assert res_twisted["double_tape_neatness_score"] > 0.85
+
+
+def test_double_tape_neatness_antiparallel_parallel_failure_mode() -> None:
+    torch.manual_seed(42)
+    coords_ideal, chain_ids, partner_slots, bb_mask = _build_mock_double_tape(
+        num_steps=8, is_antiparallel=True
+    )
+    # Refold is completely parallel (failure mode)
+    coords_par, _, _, _ = _build_mock_double_tape(
+        num_steps=8, is_antiparallel=False
+    )
+
+    res = compute_double_tape_neatness_metrics(
+        coords_refold=coords_par,
+        coords_ideal=coords_ideal,
+        chain_ids_refold=chain_ids,
+        chain_ids_ideal=chain_ids,
+        partner_slots_refold=partner_slots,
+        partner_slots_ideal=partner_slots,
+        bb_mask_refold=bb_mask,
+        bb_mask_ideal=bb_mask,
+        lambda_penalty=5.0,
+    )
+    assert res["strand_polarity_target_match"] == pytest.approx(0.0)
+    assert res["local_double_tape_rmsd"] >= 5.0
+    assert res["double_tape_neatness_score"] == pytest.approx(0.0)
+
+
+def test_double_tape_neatness_antiparallel_homomer_collapse() -> None:
+    torch.manual_seed(42)
+    coords_ideal, chain_ids, ideal_slots, bb_mask = _build_mock_double_tape(
+        num_steps=8, is_antiparallel=True
+    )
+    # Defective partner alternation (A-A-B-B within sheets)
+    defective_slots = {}
+    for c in range(16):
+        step = c // 2
+        defective_slots[c] = (step // 2) % 2
+
+    res = compute_double_tape_neatness_metrics(
+        coords_refold=coords_ideal,
+        coords_ideal=coords_ideal,
+        chain_ids_refold=chain_ids,
+        chain_ids_ideal=chain_ids,
+        partner_slots_refold=defective_slots,
+        partner_slots_ideal=ideal_slots,
+        bb_mask_refold=bb_mask,
+        bb_mask_ideal=bb_mask,
+        lambda_penalty=5.0,
+    )
+    assert res["intra_sheet_alternation_ratio"] < 0.6
+    assert res["local_double_tape_rmsd"] >= 2.0
+
+
+def test_double_tape_neatness_parallel_target() -> None:
+    torch.manual_seed(42)
+    coords_par, chain_ids, partner_slots, bb_mask = _build_mock_double_tape(
+        num_steps=8, is_antiparallel=False
+    )
+    # Refold is correctly parallel
+    res_par = compute_double_tape_neatness_metrics(
+        coords_refold=coords_par,
+        coords_ideal=coords_par,
+        chain_ids_refold=chain_ids,
+        chain_ids_ideal=chain_ids,
+        partner_slots_refold=partner_slots,
+        partner_slots_ideal=partner_slots,
+        bb_mask_refold=bb_mask,
+        bb_mask_ideal=bb_mask,
+    )
+    assert res_par["strand_polarity_target_match"] == pytest.approx(1.0)
+    assert res_par["local_step_rmsd"] == pytest.approx(0.0, abs=1e-4)
+    assert res_par["local_double_tape_rmsd"] == pytest.approx(0.0, abs=1e-4)
+
+    # Refold is antiparallel (failure mode when parallel targeted)
+    coords_anti, _, _, _ = _build_mock_double_tape(
+        num_steps=8, is_antiparallel=True
+    )
+    res_anti_fail = compute_double_tape_neatness_metrics(
+        coords_refold=coords_anti,
+        coords_ideal=coords_par,
+        chain_ids_refold=chain_ids,
+        chain_ids_ideal=chain_ids,
+        partner_slots_refold=partner_slots,
+        partner_slots_ideal=partner_slots,
+        bb_mask_refold=bb_mask,
+        bb_mask_ideal=bb_mask,
+        lambda_penalty=5.0,
+    )
+    assert res_anti_fail["strand_polarity_target_match"] == pytest.approx(0.0)
+    assert res_anti_fail["local_double_tape_rmsd"] >= 5.0
+    assert res_anti_fail["double_tape_neatness_score"] == pytest.approx(0.0)
+
+
+def test_double_tape_neatness_se3_invariance() -> None:
+    torch.manual_seed(42)
+    coords_ideal, chain_ids, partner_slots, bb_mask = _build_mock_double_tape(
+        num_steps=8, is_antiparallel=True
+    )
+    theta = math.pi / 3
+    r_mat = torch.tensor(
+        [
+            [math.cos(theta), -math.sin(theta), 0.0],
+            [math.sin(theta), math.cos(theta), 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=torch.float32,
+    )
+    t_vec = torch.tensor([50.0, -100.0, 25.0], dtype=torch.float32)
+    coords_rotated = (coords_ideal @ r_mat) + t_vec
+
+    res_orig = compute_double_tape_neatness_metrics(
+        coords_refold=coords_ideal,
+        coords_ideal=coords_ideal,
+        chain_ids_refold=chain_ids,
+        chain_ids_ideal=chain_ids,
+        partner_slots_refold=partner_slots,
+        partner_slots_ideal=partner_slots,
+        bb_mask_refold=bb_mask,
+        bb_mask_ideal=bb_mask,
+    )
+    res_rot = compute_double_tape_neatness_metrics(
+        coords_refold=coords_rotated,
+        coords_ideal=coords_ideal,
+        chain_ids_refold=chain_ids,
+        chain_ids_ideal=chain_ids,
+        partner_slots_refold=partner_slots,
+        partner_slots_ideal=partner_slots,
+        bb_mask_refold=bb_mask,
+        bb_mask_ideal=bb_mask,
+    )
+    for key in res_orig:
+        assert res_rot[key] == pytest.approx(res_orig[key], abs=1e-4)
 

@@ -27,6 +27,10 @@ def material_filtering_overrides(topology: str) -> dict[str, Any] | None:
             "neg_lattice_rmsd_refolded": 1,
             "neg_global_rmsd": None,
         }
+        if topology == "double_tape":
+            overrides.update({
+                "double_tape_neatness_score": 1,
+            })
         if topology == "bilayer_sheet":
             overrides.update({
                 "sheet_planarity": 1,
@@ -97,6 +101,14 @@ def format_additional_filters(
             "{feature: two_chain_alternation_ratio, "
             "lower_is_better: False, threshold: 0.8}"
         )
+        if topology == "double_tape":
+            filters.extend([
+                "{feature: strand_polarity_target_match, "
+                "lower_is_better: False, threshold: 0.9}",
+                "{feature: intra_sheet_alternation_ratio, "
+                "lower_is_better: False, threshold: 0.85}",
+                "{feature: bilayer_dist_std, lower_is_better: True, threshold: 1.5}",
+            ])
     if enable_composition_filters and topology == "double_tape":
         filters.extend([
             "{feature: outward_aromatic_fraction, "

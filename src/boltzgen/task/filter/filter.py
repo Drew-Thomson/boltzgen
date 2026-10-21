@@ -333,8 +333,18 @@ class Filter(Task):
             df["neg_lattice_rmsd_refolded"].fillna(0) != 0
         ).any()
 
+        # Double-tape supercoiling-invariant local RMSD
+        if (
+            "local_double_tape_rmsd" in df
+            and df["local_double_tape_rmsd"].notna().any()
+        ):
+            df["local_rmsd"] = df["local_double_tape_rmsd"]
+            self.global_rmsd_threshold = 15.0
+            for filter_dict in self.filters:
+                if filter_dict.get("feature") == "global_rmsd":
+                    filter_dict["threshold"] = self.global_rmsd_threshold
         # Multi-chain / two-chain material case: lattice alternating RMSD
-        if "lattice_rmsd_refolded" in df and df["lattice_rmsd_refolded"].notna().any():
+        elif "lattice_rmsd_refolded" in df and df["lattice_rmsd_refolded"].notna().any():
             df["local_rmsd"] = df["lattice_rmsd_refolded"]
             self.global_rmsd_threshold = 15.0
             for filter_dict in self.filters:
@@ -342,15 +352,6 @@ class Filter(Task):
                     filter_dict["threshold"] = self.global_rmsd_threshold
         elif lattice_informative:
             df["local_rmsd"] = -df["neg_lattice_rmsd_refolded"]
-            self.global_rmsd_threshold = 15.0
-            for filter_dict in self.filters:
-                if filter_dict.get("feature") == "global_rmsd":
-                    filter_dict["threshold"] = self.global_rmsd_threshold
-        elif (
-            "local_double_tape_rmsd" in df
-            and (df["local_double_tape_rmsd"].fillna(0) > 0).any()
-        ):
-            df["local_rmsd"] = df["local_double_tape_rmsd"]
             self.global_rmsd_threshold = 15.0
             for filter_dict in self.filters:
                 if filter_dict.get("feature") == "global_rmsd":

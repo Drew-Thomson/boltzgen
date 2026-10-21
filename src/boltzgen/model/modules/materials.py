@@ -738,8 +738,9 @@ def align_consensus_to_double_tape(ref_coords: torch.Tensor) -> torch.Tensor:
 
     Centres the monomer at the origin, aligns its primary PCA axis $\mathbf{u}$
     (signed N$\to$C) with $\hat{y} = (0, 1, 0)$ via minimal Rodrigues rotation,
-    and rolls about $Y$ so that odd-numbered residues face along $-\hat{x}$
-    (outward in Layer 0) and even-numbered residues face along $+\hat{x}$
+    and rolls about $Y$ so that backbone amide bonds lie coplanar with the
+    in-sheet lateral axis ($\pm\hat{z}$), while odd-numbered residues face along
+    $-\hat{x}$ (outward in Layer 0) and even-numbered residues face along $+\hat{x}$
     (inward toward the bilayer core).
 
     Parameters
@@ -788,17 +789,93 @@ def align_consensus_to_double_tape(ref_coords: torch.Tensor) -> torch.Tensor:
         )
     aligned = torch.matmul(centered, rot.T)
 
-    v_pleat = beta_strand_pleating_direction(aligned)
-    r_xz = torch.sqrt(v_pleat[0] ** 2 + v_pleat[2] ** 2)
-    if r_xz > 1e-4:
-        u_x = v_pleat[0] / r_xz
-        u_z = v_pleat[2] / r_xz
+    n_atoms = aligned.shape[0]
+    has_amide = False
+    theta_co = None
+
+    if n_atoms >= 12 and n_atoms % 4 == 0:
+        l_res = n_atoms // 4
+        bb = aligned.view(l_res, 4, 3)
+        c_pts = bb[:, 2]
+        o_pts = bb[:, 3]
+        co = o_pts - c_pts
+        co = co / (torch.linalg.norm(co, dim=-1, keepdim=True) + 1e-8)
+
+        signs = torch.tensor(
+            [(-1.0) ** i for i in range(l_res)],
+            device=aligned.device,
+            dtype=aligned.dtype,
+        ).unsqueeze(1)
+        co_alt = co * signs
+        co_xz = co_alt[:, [0, 2]]
+        mean_co_xz = co_xz.mean(dim=0)
+        norm_co = torch.linalg.norm(mean_co_xz)
+        if norm_co > 1e-4:
+            mean_co_xz = mean_co_xz / norm_co
+            theta_co = torch.atan2(mean_co_xz[0], mean_co_xz[1])
+            has_amide = True
+    elif n_atoms >= 9 and n_atoms % 3 == 0:
+        l_res = n_atoms // 3
+        bb = aligned.view(l_res, 3, 3)
+        ca_pts = bb[:-1, 1]
+        c_pts = bb[:-1, 2]
+        next_n_pts = bb[1:, 0]
+        c_ca = ca_pts - c_pts
+        c_ca = c_ca / (torch.linalg.norm(c_ca, dim=-1, keepdim=True) + 1e-8)
+        c_n = next_n_pts - c_pts
+        c_n = c_n / (torch.linalg.norm(c_n, dim=-1, keepdim=True) + 1e-8)
+        co_est = -(c_ca + c_n)
+        co_est = co_est / (torch.linalg.norm(co_est, dim=-1, keepdim=True) + 1e-8)
+
+        signs = torch.tensor(
+            [(-1.0) ** i for i in range(l_res - 1)],
+            device=aligned.device,
+            dtype=aligned.dtype,
+        ).unsqueeze(1)
+        co_alt = co_est * signs
+        co_xz = co_alt[:, [0, 2]]
+        mean_co_xz = co_xz.mean(dim=0)
+        norm_co = torch.linalg.norm(mean_co_xz)
+        if norm_co > 1e-4:
+            mean_co_xz = mean_co_xz / norm_co
+            theta_co = torch.atan2(mean_co_xz[0], mean_co_xz[1])
+            has_amide = True
+
+    if has_amide and theta_co is not None:
+        v_pleat = beta_strand_pleating_direction(aligned)
+        pi_val = torch.acos(
+            torch.tensor(-1.0, device=aligned.device, dtype=aligned.dtype)
+        )
+        candidate_angles = [-theta_co, -theta_co + pi_val]
+        best_angle = candidate_angles[0]
+        for candidate_angle in candidate_angles:
+            cos_a = torch.cos(candidate_angle)
+            sin_a = torch.sin(candidate_angle)
+            v_pleat_x = cos_a * v_pleat[0] + sin_a * v_pleat[2]
+            if v_pleat_x < 0:
+                best_angle = candidate_angle
+                break
+
+        cos_r = torch.cos(best_angle)
+        sin_r = torch.sin(best_angle)
         r_roll = torch.tensor(
-            [[-u_x, 0.0, -u_z], [0.0, 1.0, 0.0], [u_z, 0.0, -u_x]],
+            [[cos_r, 0.0, sin_r], [0.0, 1.0, 0.0], [-sin_r, 0.0, cos_r]],
             device=aligned.device,
             dtype=aligned.dtype,
         )
         aligned = torch.matmul(aligned, r_roll.T)
+    else:
+        v_pleat = beta_strand_pleating_direction(aligned)
+        r_xz = torch.sqrt(v_pleat[0] ** 2 + v_pleat[2] ** 2)
+        if r_xz > 1e-4:
+            u_x = v_pleat[0] / r_xz
+            u_z = v_pleat[2] / r_xz
+            r_roll = torch.tensor(
+                [[-u_x, 0.0, -u_z], [0.0, 1.0, 0.0], [u_z, 0.0, -u_x]],
+                device=aligned.device,
+                dtype=aligned.dtype,
+            )
+            aligned = torch.matmul(aligned, r_roll.T)
 
     return aligned
 

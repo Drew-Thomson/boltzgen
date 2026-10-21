@@ -197,3 +197,73 @@ def test_align_consensus_to_double_tape_prevents_layer_overlap() -> None:
 
     min_dist = float(torch.min(torch.cdist(chain_0, chain_1)))
     assert min_dist >= 8.4, f"Expected clearance >= 8.4 A, got {min_dist:.2f} A"
+
+
+def test_align_consensus_to_double_tape_amide_coplanar() -> None:
+    """Verify in-sheet coplanar alignment of backbone carbonyl bonds.
+
+    Confirms that align_consensus_to_double_tape rolls the strand so that
+    backbone carbonyl C=O bonds lie coplanar with the Y-Z sheet plane (<5 deg tilt),
+    while preserving odd-outside / even-inside pleating orientation.
+    """
+    from boltzgen.model.modules.materials import (
+        align_consensus_to_double_tape,
+        beta_strand_pleating_direction,
+    )
+
+    # Build a canonical 9-residue beta-strand with N, CA, C, O backbone atoms
+    # Strands run along Y; C=O alternate pointing along +/- Z; pleating along X.
+    torch.manual_seed(42)
+    bb_coords = []
+    for i in range(9):
+        y = i * 3.4
+        sign = 1.0 if i % 2 == 0 else -1.0
+        n = [0.3 * sign, y - 1.2, 0.0]
+        ca = [0.0, y, 0.2 * sign]
+        c = [-0.3 * sign, y + 1.2, 0.0]
+        # In a pleated sheet, C=O points predominantly along Z with slight pleat along X
+        o = [-0.1 * sign, y + 1.2, -1.23 * sign]
+        bb_coords.extend([n, ca, c, o])
+
+    coords = torch.tensor(bb_coords, dtype=torch.float32)
+
+    # Randomly rotate in 3D
+    q, _ = torch.linalg.qr(torch.randn(3, 3))
+    rotated = torch.matmul(coords, q.T)
+
+    aligned = align_consensus_to_double_tape(rotated)
+    assert aligned.shape == (36, 3)
+
+    # 1. Carbonyl C=O vectors must lie in Y-Z sheet plane (X component ~ 0)
+    l_res = 9
+    bb = aligned.view(l_res, 4, 3)
+    c_pts = bb[:, 2]
+    o_pts = bb[:, 3]
+    co = o_pts - c_pts
+    co = co / torch.linalg.norm(co, dim=-1, keepdim=True)
+
+    out_of_sheet_tilts = torch.rad2deg(
+        torch.asin(torch.clamp(torch.abs(co[:, 0]), 0.0, 1.0))
+    )
+    assert (
+        out_of_sheet_tilts.mean() < 5.0
+    ), f"Mean C=O out-of-sheet tilt {out_of_sheet_tilts.mean():.2f}° exceeds 5°"
+    assert (
+        out_of_sheet_tilts.max() < 10.0
+    ), f"Max C=O out-of-sheet tilt {out_of_sheet_tilts.max():.2f}° exceeds 10°"
+
+    # 2. Odd-outside (facing -X in Layer 0)
+    v_pleat = beta_strand_pleating_direction(aligned)
+    assert (
+        v_pleat[0] < -0.5
+    ), f"Odd pleating direction {v_pleat[0]:.3f} must point along -X"
+
+    # 3. Test reconstruction fallback with N, CA, C (no O)
+    bb3 = bb[:, :3].reshape(-1, 3)
+    aligned3 = align_consensus_to_double_tape(bb3)
+    assert aligned3.shape == (27, 3)
+    v_pleat3 = beta_strand_pleating_direction(aligned3)
+    assert (
+        v_pleat3[0] < -0.5
+    ), f"N,CA,C fallback pleating direction {v_pleat3[0]:.3f} must point along -X"
+

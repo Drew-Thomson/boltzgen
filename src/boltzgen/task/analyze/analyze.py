@@ -1354,63 +1354,36 @@ class Analyze(Task):
                                 print("Error computing two-chain alternating metrics:", metric_err)
 
                         topology = os.environ.get("MAT_TOPOLOGY", "floating")
-                        
+
                         if topology == "double_tape":
                             screen_type = os.environ.get("MAT_SCREEN_TYPE", "")
                             if screen_type == "homomer" or len(coms_ideal) == 1:
                                 metrics["local_double_tape_rmsd"] = 0.0
+                                metrics["neg_local_double_tape_rmsd"] = 0.0
                                 if not has_two_chain_asym_unit:
                                     metrics["neg_lattice_rmsd_refolded"] = 0.0
                             else:
-                                if has_two_chain_asym_unit:
-                                    seq_errors = sum(
-                                        1 for u, ideal_u in enumerate(col_ind)
-                                        if partner_slots_refold.get(int(chains_refold[u].item() if isinstance(chains_refold[u], torch.Tensor) else u), u % 2)
-                                        != partner_slots_ideal.get(int(chains_ideal[ideal_u].item() if isinstance(chains_ideal[ideal_u], torch.Tensor) else ideal_u), ideal_u % 2)
+                                try:
+                                    from boltzgen.task.analyze.material_metrics import (
+                                        compute_double_tape_neatness_metrics,
                                     )
-                                else:
-                                    seq_errors = sum(1 for u, ideal_u in enumerate(col_ind) if (u // 2) % 2 != (ideal_u // 2) % 2)
-                                
-                                # 2. Graph topology errors
-                                refold_edges = set()
-                                for u in range(num_chains):
-                                    for v in range(u + 1, num_chains):
-                                        if torch.linalg.norm(coms_refold[u] - coms_refold[v]).item() < 6.0:
-                                            refold_edges.add((u, v))
-                                            
-                                ideal_edges = set()
-                                for i in range(num_chains):
-                                    for j in range(i + 1, num_chains):
-                                        if torch.linalg.norm(coms_ideal[i] - coms_ideal[j]).item() < 6.0:
-                                            ideal_edges.add((i, j))
-                                            
-                                ideal_to_refold = {ideal_idx: refold_idx for refold_idx, ideal_idx in enumerate(col_ind)}
-                                mapped_ideal_edges = set()
-                                for i, j in ideal_edges:
-                                    u, v = ideal_to_refold.get(i), ideal_to_refold.get(j)
-                                    if u is not None and v is not None:
-                                        mapped_ideal_edges.add((min(u, v), max(u, v)))
-                                    
-                                missing_edges = len(mapped_ideal_edges - refold_edges)
-                                extra_edges = len(refold_edges - mapped_ideal_edges)
-                                
-                                # 3. Orientation errors for correctly formed edges
-                                orientation_errors = 0
-                                correct_edges = mapped_ideal_edges.intersection(refold_edges)
-                                for u, v in correct_edges:
-                                    dot_refold = torch.dot(dirs_refold[u], dirs_refold[v]).item()
-                                    ideal_u = col_ind[list(row_ind).index(u)]
-                                    ideal_v = col_ind[list(row_ind).index(v)]
-                                    dot_ideal = torch.dot(dirs_ideal[ideal_u], dirs_ideal[ideal_v]).item()
-                                    if (dot_refold > 0) != (dot_ideal > 0):
-                                        orientation_errors += 1
-                                        
-                                total_error = seq_errors + missing_edges + extra_edges + orientation_errors
-                                metrics["local_double_tape_rmsd"] = float(total_error)
-                                
-                            if not has_two_chain_asym_unit or two_chain_metrics is None:
-                                metrics["neg_lattice_rmsd_refolded"] = -metrics["local_double_tape_rmsd"]
-                            
+                                    neatness_metrics = compute_double_tape_neatness_metrics(
+                                        coords_refold=coords_refold,
+                                        coords_ideal=coords_ideal,
+                                        chain_ids_refold=atom_asym_id_refold,
+                                        chain_ids_ideal=atom_asym_id_ideal,
+                                        partner_slots_refold=partner_slots_refold,
+                                        partner_slots_ideal=partner_slots_ideal,
+                                        bb_mask_refold=bb_mask_refold,
+                                        bb_mask_ideal=bb_mask_ideal,
+                                    )
+                                    metrics.update(neatness_metrics)
+                                    metrics["neg_local_double_tape_rmsd"] = -neatness_metrics["local_double_tape_rmsd"]
+                                    metrics["neg_lattice_rmsd_refolded"] = -neatness_metrics["local_double_tape_rmsd"]
+                                    metrics["lattice_rmsd_refolded"] = neatness_metrics["local_double_tape_rmsd"]
+                                except Exception as dt_err:
+                                    print("Error computing double tape neatness metrics:", dt_err)
+
                             # Calculate chi_outward
                             if len(coms_ideal) > 1:
                                 normal = (coms_ideal[1] - coms_ideal[0]).cpu().numpy()
