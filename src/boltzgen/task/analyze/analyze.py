@@ -1376,6 +1376,7 @@ class Analyze(Task):
                                         partner_slots_ideal=partner_slots_ideal,
                                         bb_mask_refold=bb_mask_refold,
                                         bb_mask_ideal=bb_mask_ideal,
+                                        two_chain_alternation_ratio=metrics.get("two_chain_alternation_ratio"),
                                     )
                                     metrics.update(neatness_metrics)
                                     metrics["neg_local_double_tape_rmsd"] = -neatness_metrics["local_double_tape_rmsd"]

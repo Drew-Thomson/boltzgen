@@ -669,7 +669,10 @@ def align_consensus_to_cylinder(ref_coords: torch.Tensor) -> torch.Tensor:
     return torch.matmul(centered, rot.T)
 
 
-def beta_strand_pleating_direction(coords: torch.Tensor) -> torch.Tensor:
+def beta_strand_pleating_direction(
+    coords: torch.Tensor,
+    bb_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
     r"""Return transverse unit vector pointing towards odd-numbered sidechains.
 
     For a beta-strand, odd residues (1, 3, 5, ...) pleat towards one side of the
@@ -683,19 +686,38 @@ def beta_strand_pleating_direction(coords: torch.Tensor) -> torch.Tensor:
     ----------
     coords : torch.Tensor
         Atomic coordinates of a peptide chain with shape ``[N, 3]``.
+    bb_mask : torch.Tensor | None, default=None
+        Boolean mask of shape ``[N]`` indicating backbone atoms (N, CA, C, O).
+        If provided, only backbone atoms are used to compute the pleating
+        direction.
 
     Returns
     -------
     torch.Tensor
         Unit vector with shape ``[3]`` pointing towards odd-numbered residue sidechains.
     """
-    n_atoms = coords.shape[0]
     device = coords.device
     dtype = coords.dtype
 
-    if n_atoms >= 12 and n_atoms % 4 == 0:
-        l_res = n_atoms // 4
-        bb = coords.view(l_res, 4, 3)
+    if bb_mask is not None:
+        coords_bb = coords[bb_mask.bool()]
+    else:
+        coords_bb = coords
+
+    n_bb = coords_bb.shape[0]
+
+    is_pure_bb_4 = (
+        n_bb >= 8
+        and n_bb % 4 == 0
+        and (
+            bb_mask is not None
+            or (coords_bb[1:] - coords_bb[:-1]).norm(dim=-1).mean() < 2.0
+        )
+    )
+
+    if is_pure_bb_4:
+        l_res = n_bb // 4
+        bb = coords_bb.view(l_res, 4, 3)
         n_pts = bb[:, 0]
         ca_pts = bb[:, 1]
         c_pts = bb[:, 2]
@@ -712,8 +734,8 @@ def beta_strand_pleating_direction(coords: torch.Tensor) -> torch.Tensor:
         odd_mean = vecs[0::2].mean(dim=0)
         even_mean = vecs[1::2].mean(dim=0)
         v_pleat = odd_mean - even_mean
-    elif n_atoms >= 3:
-        p = coords[1:-1] - 0.5 * (coords[:-2] + coords[2:])
+    elif n_bb >= 3:
+        p = coords_bb[1:-1] - 0.5 * (coords_bb[:-2] + coords_bb[2:])
         odd_p = p[1::2]
         even_p = p[0::2]
         if odd_p.shape[0] > 0 and even_p.shape[0] > 0:
@@ -733,7 +755,10 @@ def beta_strand_pleating_direction(coords: torch.Tensor) -> torch.Tensor:
     return torch.zeros(3, device=device, dtype=dtype)
 
 
-def align_consensus_to_double_tape(ref_coords: torch.Tensor) -> torch.Tensor:
+def align_consensus_to_double_tape(
+    ref_coords: torch.Tensor,
+    bb_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
     r"""Rigidly align the consensus monomer element axis with the in-sheet axis (+Y).
 
     Centres the monomer at the origin, aligns its primary PCA axis $\mathbf{u}$
@@ -747,6 +772,10 @@ def align_consensus_to_double_tape(ref_coords: torch.Tensor) -> torch.Tensor:
     ----------
     ref_coords : torch.Tensor
         Consensus monomer atom coordinates, shape ``[N, 3]``.
+    bb_mask : torch.Tensor | None, default=None
+        Boolean mask of shape ``[N]`` indicating backbone atoms (N, CA, C, O).
+        If provided, backbone geometry is used for amide and pleating roll
+        alignment.
 
     Returns
     -------
@@ -768,7 +797,7 @@ def align_consensus_to_double_tape(ref_coords: torch.Tensor) -> torch.Tensor:
     k_vec = torch.linalg.cross(u_axis, v_axis)
     cos_t = torch.dot(u_axis, v_axis)
 
-    if k_vec.norm() < eps:
+    if k_vec.norm() < eps or (1.0 + cos_t) < 1e-6:
         if cos_t < 0:
             rot = torch.diag(
                 torch.tensor(
@@ -789,13 +818,27 @@ def align_consensus_to_double_tape(ref_coords: torch.Tensor) -> torch.Tensor:
         )
     aligned = torch.matmul(centered, rot.T)
 
-    n_atoms = aligned.shape[0]
+    if bb_mask is not None:
+        aligned_bb = aligned[bb_mask.bool()]
+    else:
+        aligned_bb = aligned
+
+    n_bb = aligned_bb.shape[0]
     has_amide = False
     theta_co = None
 
-    if n_atoms >= 12 and n_atoms % 4 == 0:
-        l_res = n_atoms // 4
-        bb = aligned.view(l_res, 4, 3)
+    is_pure_bb_4 = (
+        n_bb >= 8
+        and n_bb % 4 == 0
+        and (
+            bb_mask is not None
+            or (aligned_bb[1:] - aligned_bb[:-1]).norm(dim=-1).mean() < 2.0
+        )
+    )
+
+    if is_pure_bb_4:
+        l_res = n_bb // 4
+        bb = aligned_bb.view(l_res, 4, 3)
         c_pts = bb[:, 2]
         o_pts = bb[:, 3]
         co = o_pts - c_pts
@@ -814,9 +857,14 @@ def align_consensus_to_double_tape(ref_coords: torch.Tensor) -> torch.Tensor:
             mean_co_xz = mean_co_xz / norm_co
             theta_co = torch.atan2(mean_co_xz[0], mean_co_xz[1])
             has_amide = True
-    elif n_atoms >= 9 and n_atoms % 3 == 0:
-        l_res = n_atoms // 3
-        bb = aligned.view(l_res, 3, 3)
+    elif (
+        bb_mask is None
+        and n_bb >= 9
+        and n_bb % 3 == 0
+        and (aligned_bb[1:] - aligned_bb[:-1]).norm(dim=-1).mean() < 2.0
+    ):
+        l_res = n_bb // 3
+        bb = aligned_bb.view(l_res, 3, 3)
         ca_pts = bb[:-1, 1]
         c_pts = bb[:-1, 2]
         next_n_pts = bb[1:, 0]
@@ -842,7 +890,7 @@ def align_consensus_to_double_tape(ref_coords: torch.Tensor) -> torch.Tensor:
             has_amide = True
 
     if has_amide and theta_co is not None:
-        v_pleat = beta_strand_pleating_direction(aligned)
+        v_pleat = beta_strand_pleating_direction(aligned, bb_mask=bb_mask)
         pi_val = torch.acos(
             torch.tensor(-1.0, device=aligned.device, dtype=aligned.dtype)
         )
@@ -865,7 +913,7 @@ def align_consensus_to_double_tape(ref_coords: torch.Tensor) -> torch.Tensor:
         )
         aligned = torch.matmul(aligned, r_roll.T)
     else:
-        v_pleat = beta_strand_pleating_direction(aligned)
+        v_pleat = beta_strand_pleating_direction(aligned, bb_mask=bb_mask)
         r_xz = torch.sqrt(v_pleat[0] ** 2 + v_pleat[2] ** 2)
         if r_xz > 1e-4:
             u_x = v_pleat[0] / r_xz

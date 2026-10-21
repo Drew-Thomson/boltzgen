@@ -639,6 +639,7 @@ def compute_double_tape_neatness_metrics(  # noqa: C901, PLR0912, PLR0915
     bb_mask_ideal: torch.Tensor,
     lambda_penalty: float = 5.0,
     contact_distance: float = 5.0,
+    two_chain_alternation_ratio: float | None = None,
 ) -> dict[str, float]:
     r"""Compute supercoiling-invariant double-layer neatness and polarity metrics.
 
@@ -702,6 +703,9 @@ def compute_double_tape_neatness_metrics(  # noqa: C901, PLR0912, PLR0915
         Penalty scaling in Angstroms for polarity and alternation violations.
     contact_distance : float, default=5.0
         Maximum backbone distance in Angstroms defining an in-sheet interface contact.
+    two_chain_alternation_ratio : float | None, default=None
+        Overall two-chain heteromeric alternation ratio across all contacts. If
+        provided, bounds ``intra_sheet_alternation_ratio`` and scales neatness score.
 
     Returns
     -------
@@ -821,9 +825,14 @@ def compute_double_tape_neatness_metrics(  # noqa: C901, PLR0912, PLR0915
                             n_homo_intra += 1
 
     tot_intra = n_hetero_intra + n_homo_intra
-    intra_sheet_alternation_ratio = (
-        float(n_hetero_intra / tot_intra) if tot_intra > 0 else 1.0
-    )
+    expected_intra = max(1, 2 * (num_steps - 1))
+    contact_coverage = min(1.0, tot_intra / expected_intra)
+    raw_ratio = float(n_hetero_intra / tot_intra) if tot_intra > 0 else 0.0
+    intra_sheet_alternation_ratio = float(raw_ratio * contact_coverage)
+    if two_chain_alternation_ratio is not None:
+        intra_sheet_alternation_ratio = float(
+            min(intra_sheet_alternation_ratio, two_chain_alternation_ratio)
+        )
 
     # 3. Supercoiling-invariant overlapping 2x2 unit-cell Kabsch RMSD
     step_rmsds: list[float] = []
@@ -887,15 +896,25 @@ def compute_double_tape_neatness_metrics(  # noqa: C901, PLR0912, PLR0915
         bilayer_dist_std = 0.0
 
     # 5. Penalized local double-tape RMSD and neatness score
+    two_chain_factor = (
+        two_chain_alternation_ratio
+        if two_chain_alternation_ratio is not None
+        else 1.0
+    )
     polarity_penalty = lambda_penalty * (1.0 - strand_polarity_target_match)
     alternation_penalty = lambda_penalty * (1.0 - intra_sheet_alternation_ratio)
+    two_chain_penalty = lambda_penalty * (1.0 - two_chain_factor)
     local_double_tape_rmsd = float(
-        local_step_rmsd + polarity_penalty + alternation_penalty
+        local_step_rmsd
+        + polarity_penalty
+        + alternation_penalty
+        + two_chain_penalty
     )
 
     double_tape_neatness_score = float(
         strand_polarity_target_match
         * intra_sheet_alternation_ratio
+        * two_chain_factor
         * math.exp(-local_step_rmsd / 2.5)
         * math.exp(-bilayer_dist_std / 1.0)
     )

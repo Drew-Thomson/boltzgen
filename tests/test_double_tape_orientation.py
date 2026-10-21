@@ -1,10 +1,16 @@
+"""Tests for double tape monomer alignment and simulated fold-flip-unfold."""
+
+# ruff: noqa: INP001, ANN201, PLR2004, D401, N806
+
 import pytest
 import torch
 from boltzgen.model.modules.materials import (
-    strand_direction,
-    lock_slot_orientations,
+    align_consensus_to_double_tape,
+    beta_strand_pleating_direction,
     double_tape_antiparallel_rotation,
     double_tape_layer_position,
+    lock_slot_orientations,
+    strand_direction,
 )
 
 def test_strand_direction():
@@ -266,4 +272,112 @@ def test_align_consensus_to_double_tape_amide_coplanar() -> None:
     assert (
         v_pleat3[0] < -0.5
     ), f"N,CA,C fallback pleating direction {v_pleat3[0]:.3f} must point along -X"
+
+
+def test_align_consensus_with_backbone_mask():
+    torch.manual_seed(42)
+    l_res = 8
+    # 4 backbone atoms + 3 sidechain atoms per residue = 7 atoms/residue (56 total)
+    atoms_per_res = 7
+    total_atoms = l_res * atoms_per_res
+    coords = torch.zeros((total_atoms, 3))
+    bb_mask = torch.zeros(total_atoms, dtype=torch.bool)
+
+    # Canonical beta strand with alternating pleating along X
+    for r in range(l_res):
+        base_idx = r * atoms_per_res
+        y = r * 3.4
+        sign = 1.0 if r % 2 == 0 else -1.0
+        # N, CA, C, O
+        coords[base_idx + 0] = torch.tensor([0.3 * sign, y - 1.2, 0.0])
+        coords[base_idx + 1] = torch.tensor([0.0, y, 0.2 * sign])
+        coords[base_idx + 2] = torch.tensor([-0.3 * sign, y + 1.2, 0.0])
+        coords[base_idx + 3] = torch.tensor([-0.1 * sign, y + 1.2, -1.23 * sign])
+        bb_mask[base_idx : base_idx + 4] = True
+        # CB, CG, CD (sidechain)
+        coords[base_idx + 4] = torch.tensor([sign * 1.5, y, 0.5])
+        coords[base_idx + 5] = torch.tensor([sign * 2.5, y, 0.5])
+        coords[base_idx + 6] = torch.tensor([sign * 3.5, y, 0.5])
+
+    # Rotate arbitrarily in 3D
+    q, _ = torch.linalg.qr(torch.randn(3, 3))
+    coords_rot = torch.matmul(coords, q.T)
+
+    aligned = align_consensus_to_double_tape(coords_rot, bb_mask=bb_mask)
+    assert aligned.shape == (total_atoms, 3)
+
+    # Must be 3D and not collapsed onto 1D line
+    assert aligned[:, 0].std() > 0.5
+    assert aligned[:, 1].std() > 0.5
+    assert aligned[:, 2].std() > 0.5
+
+    # Check that odd residue sidechains face -X in Layer 0
+    v_pleat = beta_strand_pleating_direction(aligned, bb_mask=bb_mask)
+    assert v_pleat[0] < -0.3
+
+
+def test_heteromer_double_tape_prevents_1d_transverse_cancellation():
+    """Verify that (layer, template) partitioning prevents x/z cancellation."""
+    torch.manual_seed(42)
+    # 8 chains: 4 in layer 0, 4 in layer 1
+    # 2 templates (A=0, B=1)
+    # Simulated strand coords with 3D extents
+    n_atoms = 30
+    coords_chain = torch.randn(n_atoms, 3)
+    coords_chain[:, 1] += torch.linspace(0, 15, n_atoms)
+
+    # Layer 0 (step 0, 1, 2, 3), Layer 1 (step 0, 1, 2, 3)
+    chain_templates = [0, 1, 1, 0, 0, 1, 1, 0]  # heteromer alternation
+
+    # Partitioned consensus: (layer, template) -> 4 slots
+    active_pairs = sorted(
+        {(double_tape_layer_position(i)[0], chain_templates[i]) for i in range(8)}
+    )
+    pair_to_slot = {p: idx for idx, p in enumerate(active_pairs)}
+    assert len(active_pairs) == 4
+
+    partitioned_accs = [torch.zeros_like(coords_chain) for _ in range(4)]
+    partitioned_counts = [0] * 4
+
+    # Broken unpartitioned consensus: single slot per template -> 2 slots
+    unpartitioned_accs = [torch.zeros_like(coords_chain) for _ in range(2)]
+    unpartitioned_counts = [0] * 2
+
+    for i in range(8):
+        layer, _ = double_tape_layer_position(i)
+        R_rot = double_tape_antiparallel_rotation(i)
+        coords_folded = torch.matmul(coords_chain, R_rot)
+
+        # Partitioned
+        slot_p = pair_to_slot[(layer, chain_templates[i])]
+        partitioned_accs[slot_p] += coords_folded
+        partitioned_counts[slot_p] += 1
+
+        # Unpartitioned (old bug)
+        slot_u = chain_templates[i]
+        unpartitioned_accs[slot_u] += coords_folded
+        unpartitioned_counts[slot_u] += 1
+
+    # In unpartitioned, layer 0 (+x, +y, +z) and layer 1 (-x, +y, -z) cancelled x and z!
+    unpart_res = unpartitioned_accs[0] / unpartitioned_counts[0]
+    assert torch.allclose(unpart_res[:, 0], torch.zeros(n_atoms), atol=1e-5)
+    assert torch.allclose(unpart_res[:, 2], torch.zeros(n_atoms), atol=1e-5)
+
+    # In partitioned, x and z are completely preserved!
+    for p_idx in range(4):
+        part_res = partitioned_accs[p_idx] / partitioned_counts[p_idx]
+        assert part_res[:, 0].std() > 0.5
+        assert part_res[:, 2].std() > 0.5
+
+
+def test_align_consensus_antiparallel_rodrigues_singularity():
+    """Verify that when PCA axis is perfectly antiparallel to +Y, no NaN occurs."""
+    coords = torch.zeros((16, 3))
+    coords[:, 1] = torch.linspace(10, 0, 16)  # points along -Y
+    aligned = align_consensus_to_double_tape(coords)
+    assert not torch.isnan(aligned).any()
+    assert not torch.isinf(aligned).any()
+    # Should be rotated to point along +Y
+    s_dir = strand_direction(aligned)
+    assert s_dir[1] > 0.99
 

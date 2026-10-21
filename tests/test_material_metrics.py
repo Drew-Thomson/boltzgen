@@ -596,3 +596,50 @@ def test_double_tape_neatness_se3_invariance() -> None:
     for key in res_orig:
         assert res_rot[key] == pytest.approx(res_orig[key], abs=1e-4)
 
+
+def test_double_tape_neatness_homomer_segregation_penalized() -> None:
+    coords_ideal, chain_ids, partner_slots, bb_mask = _build_mock_double_tape(
+        num_steps=8, is_antiparallel=True
+    )
+    # Perfectly matching geometry, but homomer-segregated sequence:
+    # two_chain_alternation_ratio = 0.0
+    res_segregated = compute_double_tape_neatness_metrics(
+        coords_refold=coords_ideal,
+        coords_ideal=coords_ideal,
+        chain_ids_refold=chain_ids,
+        chain_ids_ideal=chain_ids,
+        partner_slots_refold=partner_slots,
+        partner_slots_ideal=partner_slots,
+        bb_mask_refold=bb_mask,
+        bb_mask_ideal=bb_mask,
+        lambda_penalty=5.0,
+        two_chain_alternation_ratio=0.0,
+    )
+    assert res_segregated["double_tape_neatness_score"] == pytest.approx(0.0)
+    assert res_segregated["local_double_tape_rmsd"] >= 5.0
+    assert res_segregated["intra_sheet_alternation_ratio"] == pytest.approx(0.0)
+
+
+def test_double_tape_neatness_tot_intra_zero_returns_zero() -> None:
+    coords_ideal, chain_ids, partner_slots, bb_mask = _build_mock_double_tape(
+        num_steps=8, is_antiparallel=True
+    )
+    # Translate every chain so no chains are within contact_distance (5.0 A)
+    coords_dispersed = coords_ideal.clone()
+    for c in range(16):
+        c_mask = chain_ids == c
+        coords_dispersed[c_mask] += torch.tensor([c * 100.0, 0.0, 0.0])
+
+    res_dispersed = compute_double_tape_neatness_metrics(
+        coords_refold=coords_dispersed,
+        coords_ideal=coords_ideal,
+        chain_ids_refold=chain_ids,
+        chain_ids_ideal=chain_ids,
+        partner_slots_refold=partner_slots,
+        partner_slots_ideal=partner_slots,
+        bb_mask_refold=bb_mask,
+        bb_mask_ideal=bb_mask,
+    )
+    assert res_dispersed["intra_sheet_alternation_ratio"] == pytest.approx(0.0)
+    assert res_dispersed["double_tape_neatness_score"] == pytest.approx(0.0)
+

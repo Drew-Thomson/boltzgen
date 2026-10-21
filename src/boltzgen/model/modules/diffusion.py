@@ -842,6 +842,7 @@ class AtomDiffusion(Module):
                                 continue
 
                             double_tape_slot_indices = None
+                            double_tape_pair_to_slot: dict[tuple[int, int], int] = {}
                             heteromer_double_tape = False
                             if topology == "double_tape" and material_layout is not None:
                                 slots = materials.double_tape_consensus_slot_indices_from_layout(
@@ -1084,9 +1085,21 @@ class AtomDiffusion(Module):
                                         params["grid_dim_y"]
                                     )
                                 elif heteromer_double_tape:
-                                    n_consensus_slots = (
-                                        max(double_tape_slot_indices) + 1
+                                    active_pairs = sorted(
+                                        list(
+                                            {
+                                                (
+                                                    materials.double_tape_layer_position(j)[0],
+                                                    double_tape_slot_indices[j],
+                                                )
+                                                for j in range(N_chains)
+                                            }
+                                        )
                                     )
+                                    double_tape_pair_to_slot = {
+                                        p: idx for idx, p in enumerate(active_pairs)
+                                    }
+                                    n_consensus_slots = len(active_pairs)
                                 elif topology == "double_tape":
                                     n_consensus_slots = 2  # one consensus per layer, matching c_idx = layer below
                                 elif topology == "linear_tape":
@@ -1105,9 +1118,11 @@ class AtomDiffusion(Module):
                                 if n_consensus_slots > 0:
                                     ref_coords_accs = [None] * n_consensus_slots
                                     counts = [0] * n_consensus_slots
+                                    slot_bb_masks = [None] * n_consensus_slots
                                 else:
                                     ref_coords_accs = []
                                     counts = []
+                                    slot_bb_masks = []
                             else:
                                 ref_coords_acc = None
 
@@ -1274,7 +1289,12 @@ class AtomDiffusion(Module):
                                             * int(params["grid_dim_y"])
                                         )
                                     elif heteromer_double_tape:
-                                        c_idx = double_tape_slot_indices[i]
+                                        layer, _ = materials.double_tape_layer_position(
+                                            i
+                                        )
+                                        c_idx = double_tape_pair_to_slot[
+                                            (layer, double_tape_slot_indices[i])
+                                        ]
                                     elif topology == "double_tape":
                                         # Route by layer to keep antiparallel orientations separate.
                                         layer, _ = materials.double_tape_layer_position(
@@ -1304,6 +1324,12 @@ class AtomDiffusion(Module):
                                     else:
                                         ref_coords_accs[c_idx] += coords_to_acc
                                     counts[c_idx] += 1
+                                    if "backbone_mask" in feats:
+                                        b_mask = feats["backbone_mask"]
+                                        if b_mask.dim() == 2:
+                                            b_mask = b_mask[batch_idx]
+                                        chain_bb_mask = b_mask[mask_indices].bool()
+                                        slot_bb_masks[c_idx] = chain_bb_mask
                                 else:
                                     if ref_coords_acc is None:
                                         ref_coords_acc = coords_folded
@@ -1383,7 +1409,10 @@ class AtomDiffusion(Module):
                                     elif topology == "double_tape":
                                         aligned_ref_coords_list.append(
                                             materials.align_consensus_to_double_tape(
-                                                ref_coords
+                                                ref_coords,
+                                                bb_mask=slot_bb_masks[slot_idx]
+                                                if slot_bb_masks
+                                                else None,
                                             )
                                         )
                                     elif topology == "linear_tape":
@@ -1425,7 +1454,12 @@ class AtomDiffusion(Module):
                                             * int(params["grid_dim_y"])
                                         )
                                     elif heteromer_double_tape:
-                                        c_idx = double_tape_slot_indices[i]
+                                        layer, _ = materials.double_tape_layer_position(
+                                            i
+                                        )
+                                        c_idx = double_tape_pair_to_slot[
+                                            (layer, double_tape_slot_indices[i])
+                                        ]
                                     elif topology == "double_tape":
                                         # Route by layer to match fold logic.
                                         layer, _ = materials.double_tape_layer_position(

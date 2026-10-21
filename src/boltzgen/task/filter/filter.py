@@ -508,6 +508,17 @@ class Filter(Task):
         # This single value determines its final rank group.
         self.df["max_rank"] = rank_df.max(axis=1)
 
+        # Penalize designs that fail critical topology-defining heteromeric alternation filters
+        critical_fail_mask = pd.Series(False, index=self.df.index)
+        for crit_col in [
+            "pass_two_chain_alternation_ratio_filter",
+            "pass_intra_sheet_alternation_ratio_filter",
+        ]:
+            if crit_col in self.df.columns:
+                critical_fail_mask |= (self.df[crit_col] == False)
+        if critical_fail_mask.any():
+            self.df.loc[critical_fail_mask, "max_rank"] += 100000.0
+
         # 3. Sort by this new max_rank and then create the final dense rank,
         # which is equivalent to the original 'rank_counter'.
         self.df = self.df.sort_values("max_rank")
@@ -556,6 +567,10 @@ class Filter(Task):
             else "design_iptm",
             "min_design_to_target_pae",
             "delta_sasa_refolded",
+            "double_tape_neatness_score",
+            "two_chain_alternation_ratio",
+            "intra_sheet_alternation_ratio",
+            "local_double_tape_rmsd",
             "loop",
             "helix",
             "sheet",

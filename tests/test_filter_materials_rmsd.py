@@ -223,3 +223,24 @@ def test_format_additional_filters_composition() -> None:
     assert "design_hydrophobicity" in active
     assert "THR_fraction" in active
 
+
+def test_filter_sort_df_penalizes_failed_alternation_ratio() -> None:
+    task = Filter.__new__(Filter)
+    task.metrics = {"local_rmsd": 1}
+    task.df = pd.DataFrame(
+        {
+            "id": ["homomer_segregated", "true_alternating"],
+            "num_filters_passed": [4, 2],
+            "local_rmsd": [1.1, 2.3],
+            "complex_plddt": [85.0, 78.0],
+            "pass_two_chain_alternation_ratio_filter": [False, True],
+            "pass_intra_sheet_alternation_ratio_filter": [False, True],
+        }
+    )
+    task.sort_df()
+    # The true alternating design must rank #1 even if it passed fewer filters overall
+    assert task.df.iloc[0]["id"] == "true_alternating"
+    assert task.df.iloc[1]["id"] == "homomer_segregated"
+    homo_max_rank = task.df.loc[task.df["id"] == "homomer_segregated", "max_rank"].item()
+    assert homo_max_rank >= 100000.0
+
