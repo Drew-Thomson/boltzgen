@@ -965,6 +965,15 @@ def execute_command(args: argparse.Namespace) -> None:
         os.environ["BOLTZGEN_PIPELINE_PROGRESS"] = f"Step {index}/{total_steps}"
         os.environ["BOLTZGEN_PIPELINE_STEP"] = step_name
 
+        if step_name == "counter_screen_folding":
+            cs_dir = Path(args.output) / "heteromer_counter_screens"
+            if cs_dir.is_dir() and not any(cs_dir.glob("*.cif")):
+                print(
+                    "No candidate heteromers passed the quality filter for counter-screening; "
+                    "skipping counter_screen_folding."
+                )
+                continue
+
         start = time.time()
         if args.subprocess:
             command = [

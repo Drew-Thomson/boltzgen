@@ -12,8 +12,8 @@ twist_noise: 5
 background_unbias_strength: 0.2
 repetition_penalty: 1.0
 top_p: 0.9
-avoid_aa: "CPM"
-heteromer_charge_bias: 1.0
+avoid_aa: "CPGM"
+heteromer_charge_bias: 3.5
 anti_correlation_strength: 20.0
 anti_correlation_mode: "exact"
 anti_correlation_surface_only: true
@@ -22,10 +22,12 @@ identity_filter_zoned: true
 identity_filter_weight_core: 0.0
 identity_filter_weight_surface: 1.0
 max_partner_identity: 0.5
-double_tape_core_bias: 1.2
-double_tape_polar_bias: 1.4
-double_tape_aromatic_bias: 1.0
-filter_composition: true
+double_tape_core_bias: 3.0
+double_tape_polar_bias: 0.0
+double_tape_aromatic_bias: 2.0
+filter_composition: false
+target_max_rmsd: 4.0
+refolding_rmsd_threshold: 4.0
 asym_unit:
   - type: "protein"
     length: 9

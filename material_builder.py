@@ -227,6 +227,13 @@ def main():
         help="Optional maximum local RMSD for target models before counter-screening (default: use the filtering RMSD threshold)",
     )
     parser.add_argument(
+        "--refolding_rmsd_threshold",
+        "--refolding-rmsd-threshold",
+        type=float,
+        default=None,
+        help="RMSD threshold for filtering (default: 2.0 for monomers, recommended 4.0-5.0 for materials)",
+    )
+    parser.add_argument(
         "--target_min_plddt",
         type=float,
         default=0.0,
@@ -297,11 +304,18 @@ def main():
         with open(args.config, 'r') as f:
             config = yaml.safe_load(f)
             
+        action_map = {action.dest: action for action in parser._actions}
         for k, v in config.items():
             norm_k = k.replace("-", "_")
             if norm_k in {"exclude_aa", "exclude_residues"}:
                 setattr(args, "avoid_aa", v)
             elif hasattr(args, norm_k) and norm_k != "asym_unit":
+                action = action_map.get(norm_k)
+                if action and action.type is not None and v is not None:
+                    try:
+                        v = action.type(v)
+                    except (ValueError, TypeError) as e:
+                        parser.error(f"Invalid value for config option '{k}': {e}")
                 setattr(args, norm_k, v)
 
     if "asym_unit" in config:
@@ -548,8 +562,13 @@ def main():
                 cmd.extend(["--max_surviving_designs", str(args.max_surviving_designs)])
             if args.target_max_rmsd is not None:
                 cmd.extend(["--target_max_rmsd", str(args.target_max_rmsd)])
+            elif getattr(args, "refolding_rmsd_threshold", None) is not None:
+                cmd.extend(["--target_max_rmsd", str(args.refolding_rmsd_threshold)])
             if hasattr(args, "target_min_plddt"):
                 cmd.extend(["--target_min_plddt", str(args.target_min_plddt)])
+
+        if getattr(args, "refolding_rmsd_threshold", None) is not None:
+            cmd.extend(["--refolding_rmsd_threshold", str(args.refolding_rmsd_threshold)])
 
         if getattr(args, "anti_correlation_strength", 0.0) > 0.0:
             cmd.extend(["--anti_correlation_strength", str(args.anti_correlation_strength)])

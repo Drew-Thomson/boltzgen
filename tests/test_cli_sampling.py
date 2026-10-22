@@ -1,6 +1,8 @@
 import argparse
-import sys
 from pathlib import Path
+import sys
+
+import pytest
 
 
 def test_diffusion_batch_size_threshold_dropped(monkeypatch):
@@ -396,3 +398,41 @@ def test_material_builder_underscore_and_alias_args(monkeypatch, tmp_path):
     assert (
         cmd_args_no_cs[cmd_args_no_cs.index("--anti_correlation_strength") + 1] == "2.5"
     )
+
+    # 4. Test refolding_rmsd_threshold and target_max_rmsd passing
+    cmd_args_rmsd = []
+    monkeypatch.setattr(
+        material_builder.subprocess,
+        "run",
+        lambda cmd, check=True: cmd_args_rmsd.extend(cmd),
+    )
+    test_args_rmsd = [
+        "material_builder.py",
+        "--config",
+        str(config_file),
+        "--heteromer_counter_screen",
+        "--refolding_rmsd_threshold",
+        "4.0",
+        "--run",
+    ]
+    monkeypatch.setattr(sys, "argv", test_args_rmsd)
+    material_builder.main()
+
+    assert "--refolding_rmsd_threshold" in cmd_args_rmsd
+    assert cmd_args_rmsd[cmd_args_rmsd.index("--refolding_rmsd_threshold") + 1] == "4.0"
+    assert "--target_max_rmsd" in cmd_args_rmsd
+    assert cmd_args_rmsd[cmd_args_rmsd.index("--target_max_rmsd") + 1] == "4.0"
+
+    # 5. Test invalid config value raises an error early
+    invalid_config = tmp_path / "invalid_config.yaml"
+    invalid_config.write_text(
+        "copies: 4\nlength: 6\nseqs_per_backbone: 1s\ntopology: cyclic\n"
+    )
+    test_args_invalid = [
+        "material_builder.py",
+        "--config",
+        str(invalid_config),
+    ]
+    monkeypatch.setattr(sys, "argv", test_args_invalid)
+    with pytest.raises(SystemExit):
+        material_builder.main()

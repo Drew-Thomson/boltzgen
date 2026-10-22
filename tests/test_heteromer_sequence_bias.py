@@ -32,17 +32,40 @@ def test_charge_bias_generation():
         charge_bias_strength=1.5
     )
     
-    # Check that A has positive bias (R, K, H boosted)
+    # Check that A has positive bias (R, K boosted, H excluded)
     ent_A = entities[0]["protein"]
     assert "residue_constraints" in ent_A
     weights_A = ent_A["residue_constraints"][0]["weights"]
-    assert weights_A["R"] == 1.5
+    assert weights_A["R"] == pytest.approx(1.5 * 1.15)
+    assert weights_A["K"] == pytest.approx(1.5 * 1.15)
+    assert "H" not in weights_A
     assert weights_A["D"] < 0
     
     ent_B = entities[1]["protein"]
     weights_B = ent_B["residue_constraints"][0]["weights"]
     assert weights_B["D"] == 1.5
+    assert weights_B["E"] == 1.5
+    assert "H" not in weights_B
     assert weights_B["R"] < 0
+
+
+def test_double_tape_charge_bias_surface_positions():
+    entities, _ = expand_material_spec(
+        copies=4,
+        asym_unit=[
+            {"type": "protein", "name": "A", "length": 9},
+            {"type": "protein", "name": "B", "length": 9},
+        ],
+        heteromer_screening=False,
+        topology="double_tape",
+        charge_bias_strength=1.0,
+    )
+    ent_A = entities[0]["protein"]
+    assert "residue_constraints" in ent_A
+    assert ent_A["residue_constraints"][0]["position"] == "1,3,5,7,9"
+    ent_B = entities[2]["protein"]
+    assert "residue_constraints" in ent_B
+    assert ent_B["residue_constraints"][0]["position"] == "1,3,5,7,9"
 
 
 def test_parse_residue_constraints_with_bias():

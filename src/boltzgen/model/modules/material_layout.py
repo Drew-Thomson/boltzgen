@@ -328,9 +328,9 @@ def expand_material_spec(
                 partner_label = "A" if protein_slot == 0 else "B"
                 bias = float(charge_bias_strength)
                 if partner_label == "A":
-                    weights = {"R": bias, "K": bias, "H": bias * 0.53, "D": -bias * 0.33, "E": -bias * 0.33}
+                    weights = {"R": bias * 1.15, "K": bias * 1.15, "D": -bias * 0.33, "E": -bias * 0.33}
                 else:
-                    weights = {"D": bias, "E": bias, "R": -bias * 0.33, "K": -bias * 0.33, "H": -bias * 0.2}
+                    weights = {"D": bias, "E": bias, "R": -bias * 0.33, "K": -bias * 0.33}
                 
                 weights = {k: (0.99 if round(v, 4) == 1.0 else v) for k, v in weights.items()}
                 
@@ -339,8 +339,13 @@ def expand_material_spec(
                     if str(entity["protein"]["sequence"]).isdigit():
                         chain_length = int(entity["protein"]["sequence"])
                 
+                if topology == "double_tape":
+                    position_spec = ",".join(str(p) for p in range(1, chain_length + 1, 2))
+                else:
+                    position_spec = f"1..{chain_length}"
+                
                 new_constraint = {
-                    "position": f"1..{chain_length}",
+                    "position": position_spec,
                     "weights": weights
                 }
                 

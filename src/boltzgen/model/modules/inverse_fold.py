@@ -793,7 +793,9 @@ class InverseFoldingDecoder(nn.Module):
                 for token in ("ALA", "VAL", "ILE", "LEU", "MET", "PHE", "TRP"):
                     idx_co = const.canonical_tokens.index(token)
                     per_residue_mask[is_inward, idx_co] += self.double_tape_core_bias
-                for token in ("SER", "THR"):
+                for token in (
+                    "SER", "THR", "ARG", "LYS", "ASP", "GLU", "ASN", "GLN", "HIS"
+                ):
                     idx_st = const.canonical_tokens.index(token)
                     per_residue_mask[is_inward, idx_st] -= self.double_tape_core_bias
             
