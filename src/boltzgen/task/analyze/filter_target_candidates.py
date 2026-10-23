@@ -41,6 +41,18 @@ def target_rmsd(frame: pd.DataFrame, topology: Optional[str]) -> pd.Series:
     """Per-design structural deviation (lower is better) for the target fold."""
     if (
         topology == "double_tape"
+        and "local_step_rmsd" in frame
+        and frame["local_step_rmsd"].notna().any()
+    ):
+        return frame["local_step_rmsd"]
+    if (
+        topology == "double_tape"
+        and "lattice_rmsd_geom" in frame
+        and frame["lattice_rmsd_geom"].notna().any()
+    ):
+        return frame["lattice_rmsd_geom"]
+    if (
+        topology == "double_tape"
         and "local_double_tape_rmsd" in frame
         and frame["local_double_tape_rmsd"].notna().any()
     ):
@@ -52,8 +64,9 @@ def target_rmsd(frame: pd.DataFrame, topology: Optional[str]) -> pd.Series:
     if "bb_rmsd" in frame:
         return frame["bb_rmsd"]
     raise ValueError(
-        "No structural RMSD column (local_double_tape_rmsd, "
-        "neg_lattice_rmsd_refolded or bb_rmsd) found in aggregate metrics"
+        "No structural RMSD column (local_step_rmsd, lattice_rmsd_geom, "
+        "local_double_tape_rmsd, neg_lattice_rmsd_refolded or bb_rmsd) "
+        "found in aggregate metrics"
     )
 
 

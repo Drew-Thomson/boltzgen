@@ -1302,6 +1302,12 @@ class BinderDesignPipeline:
                 )
             topology_params = heteromer_meta.get("topology_params", {})
             topology = heteromer_meta.get("topology")
+            if args.target_max_rmsd is None:
+                target_max_rmsd = _effective_refolding_rmsd_threshold(
+                    config_args_by_step.get("filtering", []),
+                    args.refolding_rmsd_threshold,
+                    topology=topology,
+                )
             filter_args = [
                 f"design_dir={source_dir}",
                 f"layout_path={layout_path}",
@@ -1486,15 +1492,28 @@ class BinderDesignPipeline:
             f"budget={args.budget}",
         ]
         if args.heteromer_counter_screen:
-            filter_args.append(
-                "metrics_override={delta_design_iptm_vs_homomer_max: 1, "
-                "delta_complex_plddt_vs_homomer_max: 1, "
-                "delta_protein_iptm_vs_homomer_max: 2, "
-                "design_to_target_iptm: null, design_ptm: null, "
-                "neg_min_design_to_target_pae: null, "
-                "neg_lattice_rmsd_refolded: null, "
-                "h_bonds_per_interface_refolded: null, packing_density_refolded: null}"
-            )
+            if topology == "double_tape":
+                filter_args.append(
+                    "metrics_override={delta_design_iptm_vs_homomer_max: 1, "
+                    "delta_complex_plddt_vs_homomer_max: 1, "
+                    "delta_protein_iptm_vs_homomer_max: 2, "
+                    "double_tape_neatness_score: 1, "
+                    "neg_lattice_rmsd_refolded: 1, "
+                    "neg_global_rmsd: null, "
+                    "design_to_target_iptm: null, design_ptm: null, "
+                    "neg_min_design_to_target_pae: null, "
+                    "h_bonds_per_interface_refolded: null, packing_density_refolded: null}"
+                )
+            else:
+                filter_args.append(
+                    "metrics_override={delta_design_iptm_vs_homomer_max: 1, "
+                    "delta_complex_plddt_vs_homomer_max: 1, "
+                    "delta_protein_iptm_vs_homomer_max: 2, "
+                    "design_to_target_iptm: null, design_ptm: null, "
+                    "neg_min_design_to_target_pae: null, "
+                    "neg_lattice_rmsd_refolded: null, "
+                    "h_bonds_per_interface_refolded: null, packing_density_refolded: null}"
+                )
 
         # Add optional filtering arguments
         if args.alpha is not None:
@@ -1746,15 +1765,20 @@ def parse_config_args(base_config, config_args, valid_step_names):
 
 
 def _effective_refolding_rmsd_threshold(
-    filtering_config_args: List[str], cli_threshold: float | None
+    filtering_config_args: List[str],
+    cli_threshold: float | None,
+    topology: str | None = None,
 ) -> float:
     """Resolve the local RMSD cutoff used by final filtering.
 
-    The filtering task defaults to 2.5 A. The CLI RMSD option is appended
-    before per-step config overrides, so explicit filtering config arguments
-    take precedence over the CLI value, matching Hydra's actual merge order.
+    The filtering task defaults to 2.5 A (5.0 A for sheet/tape materials).
+    The CLI RMSD option is appended before per-step config overrides, so
+    explicit filtering config arguments take precedence over the CLI value,
+    matching Hydra's actual merge order.
     """
-    threshold = 2.5 if cli_threshold is None else cli_threshold
+    is_sheet_tape = topology in {"double_tape", "linear_tape", "bilayer_sheet"}
+    default_threshold = 5.0 if is_sheet_tape else 2.5
+    threshold = default_threshold if cli_threshold is None else cli_threshold
     for override in filtering_config_args:
         key, separator, value = override.partition("=")
         if separator and key == "refolding_rmsd_threshold":

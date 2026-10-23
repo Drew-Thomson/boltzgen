@@ -23,6 +23,25 @@ def test_double_tape_candidate_rmsd_uses_local_metric() -> None:
     assert target_rmsd(frame, "double_tape").tolist() == [1.0, 6.0]
 
 
+def test_double_tape_candidate_rmsd_prefers_local_step_and_geom() -> None:
+    frame_step = pd.DataFrame(
+        {
+            "local_step_rmsd": [1.5, 3.0],
+            "lattice_rmsd_geom": [2.0, 4.0],
+            "local_double_tape_rmsd": [16.0, 18.0],
+        }
+    )
+    assert target_rmsd(frame_step, "double_tape").tolist() == [1.5, 3.0]
+
+    frame_geom = pd.DataFrame(
+        {
+            "lattice_rmsd_geom": [2.0, 4.0],
+            "local_double_tape_rmsd": [16.0, 18.0],
+        }
+    )
+    assert target_rmsd(frame_geom, "double_tape").tolist() == [2.0, 4.0]
+
+
 def test_double_tape_culling_gates_counter_screens_by_local_rmsd(tmp_path) -> None:
     pd.DataFrame(
         {
