@@ -296,6 +296,12 @@ def main():
         default=0.0,
         help="Per-occurrence logit penalty for repeated amino acids within a chain (default: 0.0)",
     )
+    parser.add_argument(
+        "--steps",
+        nargs="+",
+        default=None,
+        help="Specific pipeline steps to run (e.g. '--steps design' to generate backbone topologies without the full design pipeline)",
+    )
     
     args = parser.parse_args()
     
@@ -311,7 +317,9 @@ def main():
                 setattr(args, "avoid_aa", v)
             elif hasattr(args, norm_k) and norm_k != "asym_unit":
                 action = action_map.get(norm_k)
-                if action and action.type is not None and v is not None:
+                if norm_k == "steps" and isinstance(v, str):
+                    v = [v]
+                elif action and action.type is not None and v is not None:
                     try:
                         v = action.type(v)
                     except (ValueError, TypeError) as e:
@@ -618,16 +626,21 @@ def main():
             cmd.extend(["--inverse_fold_avoid", args.avoid_aa])
         if args.aa_bias:
             cmd.append(f"override.inverse_fold_args.aa_bias={args.aa_bias}")
+        if getattr(args, "steps", None):
+            steps_list = [args.steps] if isinstance(args.steps, str) else list(args.steps)
+            cmd.extend(["--steps"] + steps_list)
         
         try:
             subprocess.run(cmd, check=True)
             print("BoltzGen run completed successfully.")
             
             # Find the output structures to calculate BSA
-            # Check filtering output first, fallback to refold
+            # Check filtering output first, fallback to refold, then to intermediate designs
             output_cifs = glob.glob(os.path.join(args.output_dir, "filtering", "*.cif"))
             if not output_cifs:
                 output_cifs = glob.glob(os.path.join(args.output_dir, "intermediate_designs_inverse_folded", "refold_cif", "*.cif"))
+            if not output_cifs:
+                output_cifs = glob.glob(os.path.join(args.output_dir, "intermediate_designs", "*.cif"))
             
             import pandas as pd
             metrics_csvs = glob.glob(os.path.join(args.output_dir, "final_ranked_designs", "metrics_*.csv"))
@@ -640,6 +653,8 @@ def main():
                 
                 # Format to nice strings
                 print(df[available_cols].head(10).to_string(index=False))
+            elif output_cifs:
+                print(f"Generated {len(output_cifs)} design structure(s): {', '.join([os.path.basename(c) for c in output_cifs[:5]])}{'...' if len(output_cifs) > 5 else ''}")
             else:
                 print("No output metrics CSV found.")
                 

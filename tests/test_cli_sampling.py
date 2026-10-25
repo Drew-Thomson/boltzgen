@@ -436,3 +436,26 @@ def test_material_builder_underscore_and_alias_args(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "argv", test_args_invalid)
     with pytest.raises(SystemExit):
         material_builder.main()
+
+    # 6. Test --steps argument forwarding and YAML config parsing
+    cmd_args_steps = []
+    monkeypatch.setattr(
+        material_builder.subprocess,
+        "run",
+        lambda cmd, check=True: cmd_args_steps.extend(cmd),
+    )
+    steps_config = tmp_path / "steps_config.yaml"
+    steps_config.write_text(
+        "copies: 4\nlength: 6\ntopology: helical\nsteps:\n  - design\n"
+    )
+    test_args_steps = [
+        "material_builder.py",
+        "--config",
+        str(steps_config),
+        "--run",
+    ]
+    monkeypatch.setattr(sys, "argv", test_args_steps)
+    material_builder.main()
+
+    assert "--steps" in cmd_args_steps
+    assert cmd_args_steps[cmd_args_steps.index("--steps") + 1] == "design"

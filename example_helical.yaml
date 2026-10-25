@@ -1,0 +1,29 @@
+# Configuration for material_builder.py
+# Generates backbone topology structures for the helical topology class
+# without running downstream inverse-folding, folding, or filtering steps.
+
+topology: helical
+copies: 16
+length: 18
+
+# Secondary structure conditioning:
+#   "H" = alpha-helix
+#   "S" = beta-strand
+secondary_structure: H
+
+# Helical lattice parameters
+target_radius: 15.0       # Radius of the helix (Angstroms)
+target_dz: 5.0            # Axial rise per chain along Z (Angstroms)
+target_angle: 30.0        # Angular rotation between adjacent chains (degrees)
+guidance_scale: 1.5       # Strength of lattice COM guidance during diffusion (default: 1.0)
+spacing_noise: 0.1        # Noise perturbation on lattice positions
+antiparallel_prob: 0.0    # Set to 1.0 for alternating antiparallel chains
+
+# Sampling & execution
+num_designs: 4            # Number of topology backbone structures to sample
+diffusion_batch_size: 1
+output_dir: helical_topology_examples
+
+# Restrict execution to backbone diffusion only (skips inverse-folding, refolding, filtering)
+steps:
+  - design
