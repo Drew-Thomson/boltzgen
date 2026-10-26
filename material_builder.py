@@ -141,6 +141,9 @@ def main():
     parser.add_argument("--avoid_aa", type=str, default="", help="String of amino acids to completely avoid (e.g. 'CWP')")
     parser.add_argument("--aa_bias", type=str, default="", help="Amino acid bias string for ProteinMPNN (e.g. 'T:1.0,S:0.5,V:-0.5,I:-0.5')")
     parser.add_argument("--ligand_inclusion_bias", type=float, default=0.0, help="Strength of the inward centripetal force for ligands during diffusion (default: 0.0)")
+    parser.add_argument("--ligand_anchor_residue", type=str, default="random", help="Residue index (1-indexed), 'random' to anchor ligand to parent protein, or 'none' to disable (default: random)")
+    parser.add_argument("--ligand_anchor_distance", type=float, default=4.0, help="Distance in Angstroms from C_alpha for anchored ligand (default: 4.0)")
+    parser.add_argument("--ligand_anchor_direction", type=str, choices=["outward", "radial", "sidechain", "auto"], default="outward", help="Direction to project anchored ligand from C_alpha (default: outward)")
     parser.add_argument("--run", action="store_true", help="Execute BoltzGen after generating YAML")
     parser.add_argument(
         "--heteromer_counter_screen",
@@ -476,6 +479,12 @@ def main():
     os.environ["MAT_COPIES"] = str(args.copies)
     os.environ["MAT_GUIDANCE_SCALE"] = str(args.guidance_scale)
     os.environ["MAT_LIGAND_INCLUSION_BIAS"] = str(args.ligand_inclusion_bias)
+    if args.ligand_anchor_residue is not None:
+        os.environ["MAT_LIGAND_ANCHOR_RESIDUE"] = str(args.ligand_anchor_residue)
+    else:
+        os.environ["MAT_LIGAND_ANCHOR_RESIDUE"] = "random"
+    os.environ["MAT_LIGAND_ANCHOR_DISTANCE"] = str(args.ligand_anchor_distance)
+    os.environ["MAT_LIGAND_ANCHOR_DIRECTION"] = str(args.ligand_anchor_direction)
     os.environ["MAT_ASYM_UNIT_SIZE"] = str(
         1 if is_heteromer_assembly else args.asym_unit_size
     )

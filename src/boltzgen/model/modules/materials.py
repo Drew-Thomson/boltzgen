@@ -561,6 +561,215 @@ def fit_rigid_transform(source: torch.Tensor, target: torch.Tensor):
     return rotation, translation
 
 
+def resolve_anchor_residue_index(
+    spec: Any,
+    seq_len: int,
+    device: torch.device | None = None,
+    generator: torch.Generator | None = None,
+) -> int:
+    r"""Resolve a 0-indexed anchor residue from a user spec or uniform random sample.
+
+    When ``spec`` is an integer or numeric string, it represents a 1-indexed residue
+    position ($k \in [1, L]$), which is converted to 0-indexed and clamped to $[0, L - 1]$.
+    When ``spec`` is ``'random'`` or unspecified, a position is drawn uniformly from
+    the internal residues $[2, L - 3]$ (for $L > 4$) to avoid terminal unfolding.
+
+    Parameters
+    ----------
+    spec : Any
+        Residue identifier: 1-indexed int, numeric string, or ``'random'``.
+    seq_len : int
+        Total number of residues in the parent protein chain ($L$).
+    device : torch.device | None
+        Torch device for random sampling.
+    generator : torch.Generator | None
+        Optional PyTorch generator for reproducible sampling.
+
+    Returns
+    -------
+    int
+        0-indexed residue position in $[0, L - 1]$.
+    """
+    if seq_len <= 0:
+        return 0
+    if spec is not None and str(spec).strip().lower() not in ("random", "none"):
+        try:
+            val = int(spec)
+            return max(0, min(val - 1, seq_len - 1))
+        except (ValueError, TypeError):
+            pass
+
+    if seq_len > 4:
+        low = 2
+        high = seq_len - 3
+    else:
+        low = 0
+        high = seq_len - 1
+
+    if device is None:
+        device = torch.device("cpu")
+    sample = torch.randint(low, high + 1, (1,), device=device, generator=generator)
+    return int(sample.item())
+
+
+def compute_anchored_ligand_position(
+    ca_coords: torch.Tensor,
+    assembly_com: torch.Tensor,
+    topology: str,
+    anchor_distance: float = 4.0,
+    r_kabsch: torch.Tensor | None = None,
+    sidechain_vec: torch.Tensor | None = None,
+    direction_mode: str = "outward",
+) -> torch.Tensor:
+    r"""Compute target position for a ligand anchored to a specific residue C_alpha.
+
+    Calculates the spatial anchor position avoiding backbone penetration:
+    $$\mathbf{x}_{\text{target}} = \mathbf{x}_{\text{C}_\alpha} + d_{\text{anchor}} \hat{\mathbf{u}}$$
+    When sidechain vector $\mathbf{v}_{\text{sc}}$ is available, $\hat{\mathbf{u}}$ is directed
+    away from the peptide backbone into solvent/interface space, preventing embedding.
+
+    Parameters
+    ----------
+    ca_coords : torch.Tensor
+        Guided C_alpha coordinates of shape ``(3,)``.
+    assembly_com : torch.Tensor
+        Center of mass of the complex of shape ``(3,)``.
+    topology : str
+        Assembly topology (e.g. ``'cyclic'``, ``'cylindrical'``, ``'double_tape'``).
+    anchor_distance : float
+        Target distance from C_alpha in Angstroms (default: 4.0).
+    r_kabsch : torch.Tensor | None
+        Kabsch rotation matrix mapping local frame to global frame.
+    sidechain_vec : torch.Tensor | None
+        Optional unnormalized vector pointing in the C_alpha -> C_beta direction.
+    direction_mode : str
+        Direction mode: ``'outward'`` (or ``'radial'``), ``'sidechain'``, or ``'auto'``.
+
+    Returns
+    -------
+    torch.Tensor
+        Target ligand position of shape ``(3,)``.
+    """
+    disp = ca_coords - assembly_com
+    if topology in ("cage_tetrahedral", "cage_octahedral", "floating"):
+        norm_disp = torch.norm(disp)
+        u_radial = (
+            disp / (norm_disp + 1e-6)
+            if norm_disp > 1e-4
+            else torch.tensor([1.0, 0.0, 0.0], device=ca_coords.device, dtype=ca_coords.dtype)
+        )
+    else:
+        if r_kabsch is not None and r_kabsch.shape == (3, 3):
+            v_axis = r_kabsch[:, 2]
+        else:
+            v_axis = torch.tensor([0.0, 0.0, 1.0], device=ca_coords.device, dtype=ca_coords.dtype)
+        v_along_axis = torch.dot(disp, v_axis) * v_axis
+        v_perp = disp - v_along_axis
+        norm_perp = torch.norm(v_perp)
+        if norm_perp > 1e-4:
+            u_radial = v_perp / norm_perp
+        else:
+            norm_disp = torch.norm(disp)
+            u_radial = (
+                disp / (norm_disp + 1e-6)
+                if norm_disp > 1e-4
+                else torch.tensor([1.0, 0.0, 0.0], device=ca_coords.device, dtype=ca_coords.dtype)
+            )
+
+    mode = str(direction_mode).strip().lower()
+    if sidechain_vec is not None and torch.norm(sidechain_vec) > 1e-4:
+        u_sc = sidechain_vec / torch.norm(sidechain_vec)
+        if mode == "sidechain":
+            u_dir = u_sc
+        else:
+            # For 'outward' or 'auto', ensure displacement does not pass back into the helix backbone.
+            cos_sim = torch.dot(u_sc, u_radial)
+            if cos_sim >= 0.0:
+                v_blend = u_sc + 0.4 * u_radial
+                u_dir = v_blend / torch.norm(v_blend)
+            else:
+                # Inward-facing sidechain: project along the interface tangent perpendicular to u_radial
+                v_tangent = u_sc - cos_sim * u_radial
+                norm_tangent = torch.norm(v_tangent)
+                if norm_tangent > 1e-4:
+                    u_dir = v_tangent / norm_tangent
+                else:
+                    u_dir = u_sc
+    else:
+        u_dir = u_radial
+
+    return ca_coords + float(anchor_distance) * u_dir
+
+
+def resolve_protein_metal_clashes(
+    metal_pos: torch.Tensor,
+    protein_coords: torch.Tensor,
+    assembly_com: torch.Tensor | None = None,
+    min_distance: float = 2.8,
+    max_iterations: int = 8,
+) -> torch.Tensor:
+    r"""Iteratively repel metal position away from protein atoms to prevent embedding.
+
+    If the metal atom is within ``min_distance`` of any protein atom, pushes it outward:
+    $$\mathbf{x}_{\text{metal}} \leftarrow \mathbf{x}_{\text{metal}} + \sum_{j \in \text{clash}} (d_{\min} - d_j) \frac{\mathbf{x}_{\text{metal}} - \mathbf{x}_j}{d_j}$$
+
+    Parameters
+    ----------
+    metal_pos : torch.Tensor
+        Proposed metal position of shape ``(3,)`` or ``(M, 3)``.
+    protein_coords : torch.Tensor
+        Coordinates of all atoms in the protein chain of shape ``(N, 3)``.
+    assembly_com : torch.Tensor | None
+        Optional assembly center of mass for breaking saddle points.
+    min_distance : float
+        Minimum clearance distance in Angstroms (default: 2.8).
+    max_iterations : int
+        Maximum push-out iterations.
+
+    Returns
+    -------
+    torch.Tensor
+        Repelled metal position free of steric overlap.
+    """
+    pos = metal_pos.clone()
+    is_1d = pos.dim() == 1
+    if is_1d:
+        pos = pos.unsqueeze(0)
+    for _ in range(max_iterations):
+        dists = torch.cdist(pos, protein_coords)
+        clash_mask = dists < min_distance
+        if not clash_mask.any():
+            break
+        for m_idx in range(pos.shape[0]):
+            clashing = clash_mask[m_idx].nonzero(as_tuple=True)[0]
+            if len(clashing) == 0:
+                continue
+            push = torch.zeros(3, device=pos.device, dtype=pos.dtype)
+            max_deficit = 0.0
+            for at_idx in clashing:
+                diff = pos[m_idx] - protein_coords[at_idx]
+                d = dists[m_idx, at_idx].item()
+                if d > 1e-4:
+                    deficit = min_distance - d
+                    max_deficit = max(max_deficit, deficit)
+                    push = push + (diff / d) * deficit
+            push_norm = push.norm()
+            if push_norm > 1e-4 and max_deficit > 0.0:
+                # Clamp step size to max penetration deficit to prevent multi-atom push explosion
+                step_size = min(push_norm.item(), max_deficit * 1.1)
+                push = (push / push_norm) * step_size
+            elif push_norm < 1e-4:
+                ref_com = assembly_com if assembly_com is not None else protein_coords.mean(dim=0)
+                out_vec = pos[m_idx] - ref_com
+                out_norm = out_vec.norm()
+                if out_norm > 1e-4:
+                    push = (out_vec / out_norm) * (min_distance - dists[m_idx].min().item())
+                else:
+                    push = torch.tensor([1.0, 0.0, 0.0], device=pos.device, dtype=pos.dtype) * min_distance
+            pos[m_idx] = pos[m_idx] + push
+    return pos.squeeze(0) if is_1d else pos
+
+
 def compute_element_trace(
     ca_coords: torch.Tensor,
     secondary_structure: str | None = None,

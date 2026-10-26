@@ -671,6 +671,12 @@ class AtomDiffusion(Module):
                 torch.rand(shape[0], device=self.device) < antiparallel_prob
             )
 
+        # Sample per-trajectory anchor residues and jittered distances once so all denoising
+        # steps and all symmetric placements of the same template within an assembly use the
+        # exact same values.
+        sampled_anchor_residues: dict[tuple[int, int, int], int] = {}
+        sampled_anchor_distances: dict[tuple[int, int, int], float] = {}
+
         # gradually denoise
         coords_traj = [atom_coords]
         x0_coords_traj = []
@@ -1671,12 +1677,180 @@ class AtomDiffusion(Module):
                                     )
                                     carried = original_ligand @ rotation + translation
 
+                                    anchor_spec = record.get("anchor_residue")
+                                    if anchor_spec is None:
+                                        anchor_spec = os.environ.get(
+                                            "MAT_LIGAND_ANCHOR_RESIDUE", "random"
+                                        )
+                                    if anchor_spec is not None and str(
+                                        anchor_spec
+                                    ).strip().lower() not in ("none", "false", "off", "no", ""):
+                                        target_protein_asym = (
+                                            protein_indices[0] if protein_indices else None
+                                        )
+                                        if target_protein_asym is not None:
+                                            chain_tokens = (
+                                                asym_id[batch_idx] == target_protein_asym
+                                            ).nonzero(as_tuple=True)[0]
+                                            l_tokens = len(chain_tokens)
+                                            if l_tokens > 0:
+                                                t_idx = int(
+                                                    record.get(
+                                                        "ligand_template_index", 0
+                                                    )
+                                                )
+                                                inst_idx = int(
+                                                    record.get(
+                                                        "ligand_instance_index", 0
+                                                    )
+                                                )
+                                                cache_key = (batch_idx, t_idx, inst_idx)
+                                                if cache_key not in sampled_anchor_residues:
+                                                    sampled_anchor_residues[cache_key] = (
+                                                        materials.resolve_anchor_residue_index(
+                                                            anchor_spec,
+                                                            l_tokens,
+                                                            device=self.device,
+                                                        )
+                                                    )
+                                                k = sampled_anchor_residues[cache_key]
+                                                tok_k = chain_tokens[k]
+
+                                                ca_coord = None
+                                                if "token_to_rep_atom" in feats:
+                                                    tra = feats["token_to_rep_atom"]
+                                                    rep_mask = (
+                                                        tra[batch_idx, tok_k]
+                                                        if tra.dim() == 3
+                                                        else tra[tok_k]
+                                                    )
+                                                    if rep_mask.any():
+                                                        ca_idx = rep_mask.int().argmax()
+                                                        ca_coord = atom_coords_denoised[
+                                                            batch_idx, ca_idx
+                                                        ]
+                                                if ca_coord is None:
+                                                    atom_idx_list, _ = (
+                                                        original_protein_coords[
+                                                            target_protein_asym
+                                                        ]
+                                                    )
+                                                    chain_atom_toks = token_indices[
+                                                        batch_idx, atom_idx_list
+                                                    ]
+                                                    res_atoms = atom_idx_list[
+                                                        chain_atom_toks == tok_k
+                                                    ]
+                                                    if len(res_atoms) > 0:
+                                                        ca_coord = atom_coords_denoised[
+                                                            batch_idx, res_atoms
+                                                        ].mean(dim=0)
+                                                    else:
+                                                        ca_coord = atom_coords_denoised[
+                                                            batch_idx, atom_idx_list
+                                                        ].mean(dim=0)
+
+                                                sidechain_vec = None
+                                                if "token_to_bb4_atoms" in feats:
+                                                    bb4 = feats["token_to_bb4_atoms"]
+                                                    bb4_tok = (
+                                                        bb4[batch_idx, tok_k]
+                                                        if bb4.dim() == 4
+                                                        else bb4[tok_k]
+                                                    )
+                                                    if (
+                                                        bb4_tok.shape[0] >= 3
+                                                        and bb4_tok[0].any()
+                                                        and bb4_tok[1].any()
+                                                        and bb4_tok[2].any()
+                                                    ):
+                                                        # Featurizer stores [N, CA, C, O] at indices [0, 1, 2, 3]
+                                                        n_at = atom_coords_denoised[
+                                                            batch_idx,
+                                                            bb4_tok[0].int().argmax(),
+                                                        ]
+                                                        ca_at = atom_coords_denoised[
+                                                            batch_idx,
+                                                            bb4_tok[1].int().argmax(),
+                                                        ]
+                                                        c_at = atom_coords_denoised[
+                                                            batch_idx,
+                                                            bb4_tok[2].int().argmax(),
+                                                        ]
+                                                        sidechain_vec = -(
+                                                            (n_at - ca_at)
+                                                            + (c_at - ca_at)
+                                                        )
+
+                                                anchor_dist = float(
+                                                    record.get("anchor_distance")
+                                                    or os.environ.get(
+                                                        "MAT_LIGAND_ANCHOR_DISTANCE",
+                                                        "4.0",
+                                                    )
+                                                )
+                                                if spacing_noise > 0.0:
+                                                    if cache_key not in sampled_anchor_distances:
+                                                        jitter_val = float(
+                                                            torch.randn(1, device=self.device).item()
+                                                        ) * (0.4 * spacing_noise)
+                                                        sampled_anchor_distances[cache_key] = max(
+                                                            3.0, min(6.0, anchor_dist + jitter_val)
+                                                        )
+                                                    anchor_dist = sampled_anchor_distances[cache_key]
+
+                                                anchor_dir = str(
+                                                    record.get("anchor_direction")
+                                                    or os.environ.get(
+                                                        "MAT_LIGAND_ANCHOR_DIRECTION",
+                                                        "outward",
+                                                    )
+                                                )
+                                                r_kabsch_arg = (
+                                                    R_kabsch
+                                                    if (
+                                                        topology != "linear_tape"
+                                                        and "R_kabsch" in locals()
+                                                    )
+                                                    else None
+                                                )
+                                                target_lig_pos = (
+                                                    materials.compute_anchored_ligand_position(
+                                                        ca_coords=ca_coord,
+                                                        assembly_com=P_mean,
+                                                        topology=topology,
+                                                        anchor_distance=anchor_dist,
+                                                        r_kabsch=r_kabsch_arg,
+                                                        sidechain_vec=sidechain_vec,
+                                                        direction_mode=anchor_dir,
+                                                    )
+                                                )
+                                                target_lig_pos = (
+                                                    materials.resolve_protein_metal_clashes(
+                                                        target_lig_pos,
+                                                        protein_coords=target_coords,
+                                                        assembly_com=P_mean,
+                                                        min_distance=2.8,
+                                                    )
+                                                )
+                                                lig_com = carried.mean(dim=0)
+                                                carried = carried + (
+                                                    target_lig_pos - lig_com
+                                                )
+
                                     ligand_inclusion_bias = float(
                                         os.environ.get(
                                             "MAT_LIGAND_INCLUSION_BIAS", "0.0"
                                         )
                                     )
-                                    if ligand_inclusion_bias > 0.0:
+                                    if (
+                                        ligand_inclusion_bias > 0.0
+                                        and (
+                                            anchor_spec is None
+                                            or str(anchor_spec).strip().lower()
+                                            in ("none", "false", "")
+                                        )
+                                    ):
                                         ligand_com = carried.mean(dim=0)
                                         direction = P_mean - ligand_com
                                         if topology not in (

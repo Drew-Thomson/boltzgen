@@ -25,6 +25,12 @@ Ligand entries may specify exactly one of:
 - `ligands_per_asym_unit` (positive integer): Number of copies generated per topology placement, independent of the number of peptide templates.
 - `attach_to` (protein template name or zero-based protein-template index): Required with `ligands_per_peptide` when the asymmetric unit contains more than one protein template. With one protein template it may be omitted. It is not valid with `ligands_per_asym_unit`.
 
+Ligands can also specify residue anchoring options to space metal ions/ligands out along the peptide rather than collapsing into the assembly core:
+
+- `anchor_residue` (1-indexed integer or `'random'`): Pin the ligand to a specific residue's $\text{C}_\alpha$ position (or a randomly sampled internal residue in $[3, L-2]$). When set, all symmetric copies of the template within an assembly share the same anchor residue index, inheriting the parent protein's axial displacement, tilt, and antiparallel flip.
+- `anchor_distance` (float, default `4.0`): Distance in $\text{\AA}$ from the anchor $\text{C}_\alpha$ coordinate to the ligand center.
+- `anchor_direction` (`'outward'` / `'radial'`, `'sidechain'`, or `'auto'`, default `'outward'`): Direction to project the ligand from the anchor $\text{C}_\alpha$. `'outward'` projects radially outward from the assembly axis, keeping ions at the outer surface and interface.
+
 If neither multiplicity field is supplied, a ligand retains the legacy default of one copy per topology placement. Give protein templates a `name` to use a stable `attach_to` reference. `copies` continues to count topology placements; total emitted chains can be higher due to ligands.
 
 Example: one zinc ligand per two peptides and three calcium ligands per placement:

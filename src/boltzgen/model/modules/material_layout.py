@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,9 @@ _BUILDER_KEYS = {
     "attach_to",
     "ligands_per_peptide",
     "ligands_per_asym_unit",
+    "anchor_residue",
+    "anchor_distance",
+    "anchor_direction",
 }
 
 
@@ -409,6 +413,22 @@ def expand_material_spec(
                     protein_asym_by_slot[parent_slot] if scope == "per_peptide" else None
                 )
                 unit_record["ligand_asym_indices"].append(asym_index)
+                anchor_res = ligand.get("anchor_residue")
+                if anchor_res is None:
+                    anchor_res = os.environ.get("MAT_LIGAND_ANCHOR_RESIDUE", "random")
+                anchor_dist = ligand.get("anchor_distance")
+                if anchor_dist is None and "MAT_LIGAND_ANCHOR_DISTANCE" in os.environ:
+                    anchor_dist = float(os.environ["MAT_LIGAND_ANCHOR_DISTANCE"])
+                elif anchor_dist is not None:
+                    anchor_dist = float(anchor_dist)
+                else:
+                    anchor_dist = 4.0
+                anchor_dir = ligand.get("anchor_direction")
+                if anchor_dir is None and "MAT_LIGAND_ANCHOR_DIRECTION" in os.environ:
+                    anchor_dir = os.environ["MAT_LIGAND_ANCHOR_DIRECTION"]
+                elif anchor_dir is None:
+                    anchor_dir = "outward"
+
                 records.append(
                     {
                         "asym_index": asym_index,
@@ -420,6 +440,9 @@ def expand_material_spec(
                         "attachment_scope": scope,
                         "parent_asym_index": parent_asym_index,
                         "parent_protein_slot_index": parent_slot,
+                        "anchor_residue": anchor_res,
+                        "anchor_distance": anchor_dist,
+                        "anchor_direction": anchor_dir,
                     }
                 )
         unit_records.append(unit_record)

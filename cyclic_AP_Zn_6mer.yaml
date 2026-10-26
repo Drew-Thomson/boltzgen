@@ -1,0 +1,18 @@
+copies: 6
+topology: cyclic
+target_radius: 9.0
+antiparallel_prob: 1.0
+num_designs: 10
+spacing_noise: 1
+inverse_temp: 2
+asym_unit:
+  - type: protein
+    name: helical_peptide
+    length: 20
+    secondary_structure: H
+  - type: ligand
+    ccd: ZN
+    ligands_per_peptide: 1
+    attach_to: helical_peptide
+    anchor_residue: random      # 1-indexed specific residue (e.g. 10) or 'random' (default)
+    anchor_distance: 4.0       # Distance in Angstroms from C_alpha (default: 4.0)
