@@ -1153,6 +1153,19 @@ class BinderDesignPipeline:
         # Design generation
         output_dir = args.output / "intermediate_designs"
         print(f"Raw designs will be saved to: {output_dir}")
+        effective_min_ligand_distance = getattr(args, "min_ligand_distance", None)
+        if effective_min_ligand_distance is None and getattr(args, "design_spec", None):
+            try:
+                candidate_layout = args.design_spec[0].resolve().parent / "material_layout.json"
+                if candidate_layout.exists():
+                    layout_data = json.loads(candidate_layout.read_text())
+                    for lig in layout_data.get("ligands", []):
+                        val = lig.get("min_ligand_distance", lig.get("min_distance"))
+                        if val is not None:
+                            effective_min_ligand_distance = float(val)
+                            break
+            except Exception:
+                pass
         diffusion_batch_size = args.diffusion_batch_size
         if diffusion_batch_size is None:
             diffusion_batch_size = 1
@@ -1448,8 +1461,8 @@ class BinderDesignPipeline:
                 f"min_complex_plddt={args.target_min_plddt}",
                 f"topology={topology}",
             ]
-            if args.min_ligand_distance is not None:
-                filter_candidate_args.append(f"min_ligand_distance={args.min_ligand_distance}")
+            if effective_min_ligand_distance is not None:
+                filter_candidate_args.append(f"min_ligand_distance={effective_min_ligand_distance}")
             self.steps.append(
                 PipelineStep(
                     name="filter_target_candidates",
@@ -1519,8 +1532,8 @@ class BinderDesignPipeline:
                 f"min_complex_plddt={args.target_min_plddt}",
                 f"topology={topology}",
             ]
-            if args.min_ligand_distance is not None:
-                filter_candidate_args.append(f"min_ligand_distance={args.min_ligand_distance}")
+            if effective_min_ligand_distance is not None:
+                filter_candidate_args.append(f"min_ligand_distance={effective_min_ligand_distance}")
             self.steps.append(
                 PipelineStep(
                     name="filter_target_candidates",
@@ -1627,10 +1640,23 @@ class BinderDesignPipeline:
             parsed_metrics = parse_metrics_override(args.metrics_override)
             print(f"Filtering metrics override: {parsed_metrics}")
             filter_args.append(f"metrics_override={parsed_metrics}")
+        extra_filters = []
         if args.additional_filters is not None:
             parsed_filters = parse_additional_filters(args.additional_filters)
-            print(f"Filtering additional filters: {parsed_filters}")
-            filter_args.append(f"additional_filters={parsed_filters}")
+            if parsed_filters:
+                extra_filters.extend(parsed_filters)
+        if effective_min_ligand_distance is not None:
+            if not any(f.get("feature") == "min_ligand_distance" for f in extra_filters):
+                extra_filters.append(
+                    {
+                        "feature": "min_ligand_distance",
+                        "threshold": float(effective_min_ligand_distance),
+                        "lower_is_better": False,
+                    }
+                )
+        if extra_filters:
+            print(f"Filtering additional filters: {extra_filters}")
+            filter_args.append(f"additional_filters={extra_filters}")
         if args.size_buckets is not None:
             parsed_size_buckets = parse_size_buckets(args.size_buckets)
             print(f"Filtering size buckets: {parsed_size_buckets}")

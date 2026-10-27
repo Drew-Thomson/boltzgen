@@ -68,6 +68,16 @@ _BUILDER_KEYS = {
     "anchor_residue",
     "anchor_distance",
     "anchor_direction",
+    "placement",
+    "constraint",
+    "axis",
+    "count",
+    "axial_z",
+    "distribution",
+    "z_range",
+    "min_distance",
+    "min_ligand_distance",
+    "min_protein_distance",
 }
 
 
@@ -263,7 +273,91 @@ def expand_material_spec(
     n_placements = copies if is_heteromer_assembly else copies // len(proteins)
 
     normalized_ligands: list[tuple[int, dict[str, Any], str, int | None, int | Fraction]] = []
+    axial_ligands: list[tuple[int, dict[str, Any], list[float], str, list[float], float]] = []
     for template_idx, ligand in ligands:
+        placement_mode = str(ligand.get("placement", "")).strip().lower()
+        constraint_mode = str(ligand.get("constraint", "")).strip().lower()
+        axis_mode = str(ligand.get("axis", "")).strip().lower()
+        is_axial = (
+            placement_mode in ("z_axis", "axial", "center", "central")
+            or constraint_mode in ("z_axis", "axial")
+            or axis_mode in ("z", "z_axis")
+            or "axial_z" in ligand
+        )
+        if is_axial:
+            if ligand.get("attach_to") is not None:
+                raise ValueError(
+                    f"attach_to is not supported for axial ligand template {template_idx}"
+                )
+            if ligand.get("ligands_per_peptide") is not None:
+                raise ValueError(
+                    f"ligands_per_peptide cannot be combined with axial ligand template {template_idx}"
+                )
+            if ligand.get("ligands_per_asym_unit") is not None:
+                raise ValueError(
+                    f"ligands_per_asym_unit cannot be combined with axial ligand template {template_idx}"
+                )
+
+            dist_mode = str(ligand.get("distribution", "fixed")).strip().lower()
+            if dist_mode in ("random", "even", "stratified", "random_even"):
+                dist_mode = "random_even"
+            else:
+                dist_mode = "fixed"
+
+            raw_z_range = ligand.get("z_range")
+            if raw_z_range is None:
+                z_range = [-5.0, 5.0]
+            elif isinstance(raw_z_range, (int, float)):
+                z_range = [-abs(float(raw_z_range)), abs(float(raw_z_range))]
+            elif isinstance(raw_z_range, (list, tuple)) and len(raw_z_range) == 2:
+                z_range = [float(raw_z_range[0]), float(raw_z_range[1])]
+            else:
+                raise ValueError(f"z_range must be a float or [min, max] list, got {raw_z_range}")
+
+            min_dist = float(
+                ligand.get(
+                    "min_ligand_distance", ligand.get("min_distance", 3.5)
+                )
+            )
+            min_prot_dist = float(ligand.get("min_protein_distance", 2.2))
+
+            count_val = ligand.get("count")
+            raw_axial_z = ligand.get("axial_z")
+            if raw_axial_z is None:
+                count = 1 if count_val is None else int(count_val)
+                if count == 1:
+                    z_offsets = [0.0]
+                elif count == 2:
+                    half_z = max(min_dist / 2.0, abs(z_range[1]) / 2.0)
+                    z_offsets = [-half_z, half_z]
+                else:
+                    w = (z_range[1] - z_range[0]) / count
+                    z_offsets = [z_range[0] + (i + 0.5) * w for i in range(count)]
+            elif isinstance(raw_axial_z, (list, tuple)):
+                z_offsets = [float(z) for z in raw_axial_z]
+                if count_val is not None and int(count_val) != len(z_offsets):
+                    raise ValueError(
+                        f"count={count_val} does not match len(axial_z)={len(z_offsets)}"
+                    )
+                count = len(z_offsets)
+            else:
+                val = float(raw_axial_z)
+                if count_val is None:
+                    count = 1 if placement_mode in ("center", "central") and val == 0.0 else 1
+                else:
+                    count = int(count_val)
+                if count == 1:
+                    z_offsets = [val]
+                elif count == 2:
+                    z_offsets = [-abs(val), abs(val)] if val != 0.0 else [-min_dist / 2.0, min_dist / 2.0]
+                else:
+                    raise ValueError("axial_z must be a list of floats when count > 2")
+
+            axial_ligands.append(
+                (template_idx, ligand, z_offsets, dist_mode, z_range, min_dist, min_prot_dist)
+            )
+            continue
+
         per_peptide = ligand.get("ligands_per_peptide")
         per_unit = ligand.get("ligands_per_asym_unit")
         if per_peptide is not None and per_unit is not None:
@@ -446,6 +540,40 @@ def expand_material_spec(
                     }
                 )
         unit_records.append(unit_record)
+
+    for (
+        template_idx,
+        ligand,
+        z_offsets,
+        dist_mode,
+        z_range,
+        min_dist,
+        min_prot_dist,
+    ) in axial_ligands:
+        for instance_idx, z_val in enumerate(z_offsets):
+            asym_index = len(entities)
+            chain_id = _chain_id(asym_index)
+            entities.append(_make_entity("ligand", ligand, chain_id, None))
+            records.append(
+                {
+                    "asym_index": asym_index,
+                    "chain_id": chain_id,
+                    "role": "ligand",
+                    "placement_index": None,
+                    "ligand_template_index": template_idx,
+                    "ligand_instance_index": instance_idx,
+                    "attachment_scope": "axial",
+                    "constraint": "z_axis",
+                    "parent_asym_index": None,
+                    "parent_protein_slot_index": None,
+                    "axial_z": z_val,
+                    "distribution": dist_mode,
+                    "z_range": z_range,
+                    "min_distance": min_dist,
+                    "min_ligand_distance": min_dist,
+                    "min_protein_distance": min_prot_dist,
+                }
+            )
 
     layout = {
         "version": 1,

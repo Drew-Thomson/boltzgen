@@ -23,7 +23,14 @@ Ligand entries may specify exactly one of:
 
 - `ligands_per_peptide` (positive integer or ratio): Number of ligand copies per parent peptide across the assembly. Integer values support multiple ligands per peptide; rational values such as `0.5` mean one ligand per two peptides. The total across all copies must be an integer, and the deterministic expansion distributes ligand instances across placements.
 - `ligands_per_asym_unit` (positive integer): Number of copies generated per topology placement, independent of the number of peptide templates.
-- `attach_to` (protein template name or zero-based protein-template index): Required with `ligands_per_peptide` when the asymmetric unit contains more than one protein template. With one protein template it may be omitted. It is not valid with `ligands_per_asym_unit`.
+- `placement: z_axis` (or `axial`, `center`, `central`): Positions assembly-scoped ligand(s) strictly on the assembly's symmetry $z$-axis (e.g. at the pore center or opposite heights $\pm z$). Steric clash resolution operates strictly along the $z$-axis, preserving the on-axis constraint.
+  - `constraint: z_axis`: Explicitly constrains the ligand to the $z$-axis.
+  - `count` (positive integer, default `1`): Number of axial ligands.
+  - `axial_z` (float or list of floats): Fixed axial position(s) along the $z$-axis. A scalar $z_0$ places 1 ligand at $z_0$ (default `0.0`), or 2 ligands symmetrically at $+z_0$ and $-z_0$.
+  - `distribution` (`'fixed'` or `'random_even'`): When `'random_even'`, partitions `z_range` into `count` intervals and randomly samples positions within each sub-segment (respecting `min_distance`) per diffusion design candidate.
+  - `z_range` (float or `[z_min, z_max]`, default `[-5.0, 5.0]`): Axial interval along $z$ for placement.
+  - `min_distance` (float, default `3.5`): Minimum separation between ligands along $z$.
+- `attach_to` (protein template name or zero-based protein-template index): Required with `ligands_per_peptide` when the asymmetric unit contains more than one protein template. With one protein template it may be omitted. It is not valid with `ligands_per_asym_unit` or axial ligands.
 
 Ligands can also specify residue anchoring options to space metal ions/ligands out along the peptide rather than collapsing into the assembly core:
 

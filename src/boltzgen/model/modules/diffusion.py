@@ -676,6 +676,7 @@ class AtomDiffusion(Module):
         # exact same values.
         sampled_anchor_residues: dict[tuple[int, int, int], int] = {}
         sampled_anchor_distances: dict[tuple[int, int, int], float] = {}
+        sampled_axial_positions: dict[tuple[int, int], list[float]] = {}
 
         # gradually denoise
         coords_traj = [atom_coords]
@@ -1637,7 +1638,119 @@ class AtomDiffusion(Module):
                                         "placements", []
                                     )
                                 }
+
+                                axial_records = [
+                                    (ligand_asym, record, ligand_mask)
+                                    for ligand_asym, record, ligand_mask in ligand_layout
+                                    if record.get("attachment_scope") == "axial"
+                                ]
+                                if axial_records:
+                                    if "R_kabsch" in locals() and R_kabsch is not None:
+                                        v_axis = R_kabsch[:, 2]
+                                        rot = R_kabsch.T
+                                    else:
+                                        v_axis = torch.tensor(
+                                            [0.0, 0.0, 1.0],
+                                            device=P_mean.device,
+                                            dtype=P_mean.dtype,
+                                        )
+                                        rot = torch.eye(
+                                            3,
+                                            device=atom_coords_denoised.device,
+                                            dtype=atom_coords_denoised.dtype,
+                                        )
+
+                                    if chain_masks:
+                                        all_protein_atoms = torch.stack(chain_masks).any(dim=0)
+                                        protein_coords = atom_coords_denoised[batch_idx, all_protein_atoms]
+                                    else:
+                                        protein_coords = None
+
+                                    axial_target_positions = []
+                                    axial_min_distances = []
+
+                                    for ligand_asym, record, ligand_mask in axial_records:
+                                        t_idx = int(record.get("ligand_template_index", 0))
+                                        inst_idx = int(record.get("ligand_instance_index", 0))
+                                        dist_mode = record.get("distribution", "fixed")
+                                        min_lig_dist = float(
+                                            record.get("min_ligand_distance", record.get("min_distance", 3.5))
+                                        )
+                                        axial_min_distances.append(min_lig_dist)
+
+                                        if dist_mode == "random_even":
+                                            cache_key = (batch_idx, t_idx)
+                                            if cache_key not in sampled_axial_positions:
+                                                z_range = record.get("z_range", [-5.0, 5.0])
+                                                template_ligands = [
+                                                    r
+                                                    for _, r, _ in ligand_layout
+                                                    if r.get("attachment_scope") == "axial"
+                                                    and int(r.get("ligand_template_index", 0)) == t_idx
+                                                ]
+                                                count = len(template_ligands) if template_ligands else 1
+                                                is_anti = (
+                                                    bool(feats.get("is_antiparallel", [False])[batch_idx].item())
+                                                    if "is_antiparallel" in feats
+                                                    else False
+                                                )
+                                                symmetric = is_anti and count == 2
+                                                sampled_axial_positions[cache_key] = (
+                                                    materials.sample_stratified_axial_positions(
+                                                        count=count,
+                                                        z_range=z_range,
+                                                        min_distance=min_lig_dist,
+                                                        symmetric=symmetric,
+                                                        device=self.device,
+                                                    )
+                                                )
+                                            z_val = sampled_axial_positions[cache_key][inst_idx]
+                                        else:
+                                            z_val = float(record.get("axial_z", 0.0))
+
+                                        target_lig_pos = P_mean + z_val * v_axis
+
+                                        if protein_coords is not None:
+                                            min_prot_dist = float(
+                                                record.get("min_protein_distance", 2.2)
+                                            )
+                                            target_lig_pos = materials.resolve_protein_metal_clashes(
+                                                target_lig_pos,
+                                                protein_coords=protein_coords,
+                                                assembly_com=P_mean,
+                                                min_distance=min_prot_dist,
+                                                axis=v_axis,
+                                            )
+                                        axial_target_positions.append(target_lig_pos)
+
+                                    if len(axial_records) > 1:
+                                        stacked_targets = torch.stack(axial_target_positions, dim=0)
+                                        min_sep = max(axial_min_distances) if axial_min_distances else 3.5
+                                        separated_targets = materials.enforce_minimum_axial_separation(
+                                            stacked_targets,
+                                            axis=v_axis,
+                                            min_distance=min_sep,
+                                        )
+                                    else:
+                                        separated_targets = axial_target_positions
+
+                                    for i, (ligand_asym, record, ligand_mask) in enumerate(axial_records):
+                                        ligand_indices = ligand_mask.nonzero(as_tuple=True)[0]
+                                        original_ligand = atom_coords_denoised[batch_idx, ligand_indices].clone()
+                                        target_pos = separated_targets[i]
+                                        lig_centered = original_ligand - original_ligand.mean(
+                                            dim=0, keepdim=True
+                                        )
+                                        carried = lig_centered @ rot + target_pos
+                                        atom_coords_denoised[batch_idx, ligand_indices] = (
+                                            1 - guidance_scale
+                                        ) * original_ligand + guidance_scale * carried
+
                                 for ligand_asym, record, ligand_mask in ligand_layout:
+                                    scope = record.get("attachment_scope", "per_peptide")
+                                    if scope == "axial":
+                                        continue
+
                                     placement_idx = int(record["placement_index"])
                                     ligand_indices = ligand_mask.nonzero(as_tuple=True)[
                                         0

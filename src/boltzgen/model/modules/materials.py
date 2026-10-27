@@ -707,10 +707,14 @@ def resolve_protein_metal_clashes(
     assembly_com: torch.Tensor | None = None,
     min_distance: float = 2.8,
     max_iterations: int = 8,
+    axis: torch.Tensor | None = None,
 ) -> torch.Tensor:
     r"""Iteratively repel metal position away from protein atoms to prevent embedding.
 
-    If the metal atom is within ``min_distance`` of any protein atom, pushes it outward:
+    If ``axis`` is provided, repulsions are constrained strictly along the axis:
+    $$\Delta\mathbf{x} \parallel \hat{\mathbf{v}}_{\text{axis}}, \quad \Delta\mathbf{x} \cdot \mathbf{r}_\perp = 0$$
+    ensuring axial ligands remain on the symmetry axis without transverse radial displacement.
+    If ``axis`` is None, pushes outward in 3D:
     $$\mathbf{x}_{\text{metal}} \leftarrow \mathbf{x}_{\text{metal}} + \sum_{j \in \text{clash}} (d_{\min} - d_j) \frac{\mathbf{x}_{\text{metal}} - \mathbf{x}_j}{d_j}$$
 
     Parameters
@@ -725,6 +729,8 @@ def resolve_protein_metal_clashes(
         Minimum clearance distance in Angstroms (default: 2.8).
     max_iterations : int
         Maximum push-out iterations.
+    axis : torch.Tensor | None
+        Optional symmetry unit axis of shape ``(3,)`` for 1D axial clash resolution.
 
     Returns
     -------
@@ -735,6 +741,13 @@ def resolve_protein_metal_clashes(
     is_1d = pos.dim() == 1
     if is_1d:
         pos = pos.unsqueeze(0)
+
+    u_axis = None
+    if axis is not None:
+        ax_norm = axis.norm()
+        if ax_norm > 1e-6:
+            u_axis = (axis / ax_norm).to(device=pos.device, dtype=pos.dtype)
+
     for _ in range(max_iterations):
         dists = torch.cdist(pos, protein_coords)
         clash_mask = dists < min_distance
@@ -744,30 +757,202 @@ def resolve_protein_metal_clashes(
             clashing = clash_mask[m_idx].nonzero(as_tuple=True)[0]
             if len(clashing) == 0:
                 continue
-            push = torch.zeros(3, device=pos.device, dtype=pos.dtype)
-            max_deficit = 0.0
-            for at_idx in clashing:
-                diff = pos[m_idx] - protein_coords[at_idx]
-                d = dists[m_idx, at_idx].item()
-                if d > 1e-4:
-                    deficit = min_distance - d
-                    max_deficit = max(max_deficit, deficit)
-                    push = push + (diff / d) * deficit
-            push_norm = push.norm()
-            if push_norm > 1e-4 and max_deficit > 0.0:
-                # Clamp step size to max penetration deficit to prevent multi-atom push explosion
-                step_size = min(push_norm.item(), max_deficit * 1.1)
-                push = (push / push_norm) * step_size
-            elif push_norm < 1e-4:
+
+            if u_axis is not None:
+                # 1D Axial clash resolution: displace strictly parallel to u_axis
+                pos_shift = 0.0
+                neg_shift = 0.0
                 ref_com = assembly_com if assembly_com is not None else protein_coords.mean(dim=0)
-                out_vec = pos[m_idx] - ref_com
-                out_norm = out_vec.norm()
-                if out_norm > 1e-4:
-                    push = (out_vec / out_norm) * (min_distance - dists[m_idx].min().item())
+                for at_idx in clashing:
+                    diff = pos[m_idx] - protein_coords[at_idx]
+                    dz = torch.dot(diff, u_axis).item()
+                    r_perp = diff - dz * u_axis
+                    rho = r_perp.norm().item()
+                    if rho < min_distance:
+                        req_dz = math.sqrt(max(0.0, min_distance**2 - rho**2))
+                        deficit = req_dz - abs(dz)
+                        if deficit > 0.0:
+                            if dz > 1e-4:
+                                pos_shift = max(pos_shift, deficit)
+                            elif dz < -1e-4:
+                                neg_shift = max(neg_shift, deficit)
+                            else:
+                                com_dz = torch.dot(pos[m_idx] - ref_com, u_axis).item()
+                                if com_dz >= 0.0:
+                                    pos_shift = max(pos_shift, deficit)
+                                else:
+                                    neg_shift = max(neg_shift, deficit)
+
+                if pos_shift > 0.0 and neg_shift > 0.0:
+                    total_dz = pos_shift if pos_shift < neg_shift else -neg_shift
+                elif pos_shift > 0.0:
+                    total_dz = pos_shift
+                elif neg_shift > 0.0:
+                    total_dz = -neg_shift
                 else:
-                    push = torch.tensor([1.0, 0.0, 0.0], device=pos.device, dtype=pos.dtype) * min_distance
-            pos[m_idx] = pos[m_idx] + push
+                    total_dz = 0.0
+
+                pos[m_idx] = pos[m_idx] + total_dz * u_axis
+            else:
+                push = torch.zeros(3, device=pos.device, dtype=pos.dtype)
+                max_deficit = 0.0
+                for at_idx in clashing:
+                    diff = pos[m_idx] - protein_coords[at_idx]
+                    d = dists[m_idx, at_idx].item()
+                    if d > 1e-4:
+                        deficit = min_distance - d
+                        max_deficit = max(max_deficit, deficit)
+                        push = push + (diff / d) * deficit
+                push_norm = push.norm()
+                if push_norm > 1e-4 and max_deficit > 0.0:
+                    # Clamp step size to max penetration deficit to prevent multi-atom push explosion
+                    step_size = min(push_norm.item(), max_deficit * 1.1)
+                    push = (push / push_norm) * step_size
+                elif push_norm < 1e-4:
+                    ref_com = assembly_com if assembly_com is not None else protein_coords.mean(dim=0)
+                    out_vec = pos[m_idx] - ref_com
+                    out_norm = out_vec.norm()
+                    if out_norm > 1e-4:
+                        push = (out_vec / out_norm) * (min_distance - dists[m_idx].min().item())
+                    else:
+                        push = torch.tensor([1.0, 0.0, 0.0], device=pos.device, dtype=pos.dtype) * min_distance
+                pos[m_idx] = pos[m_idx] + push
     return pos.squeeze(0) if is_1d else pos
+
+
+def sample_stratified_axial_positions(
+    count: int,
+    z_range: tuple[float, float] | list[float] | float = 5.0,
+    min_distance: float = 3.5,
+    symmetric: bool = False,
+    generator: torch.Generator | None = None,
+    device: torch.device | None = None,
+) -> list[float]:
+    r"""Sample randomly evenly distributed axial positions along the z-axis.
+
+    Parameters
+    ----------
+    count : int
+        Number of axial positions to sample ($K \ge 1$).
+    z_range : tuple[float, float] | list[float] | float
+        Either [z_min, z_max] or scalar h meaning [-h, h]. Default: 5.0.
+    min_distance : float
+        Minimum separation distance along the axis between consecutive positions.
+    symmetric : bool
+        If True and count == 2, samples z > 0 and pairs it with -z to preserve
+        dihedral/inversion symmetry.
+    generator : torch.Generator | None
+        Optional PyTorch random generator for reproducibility.
+    device : torch.device | None
+        PyTorch device.
+
+    Returns
+    -------
+    list[float]
+        Sorted list of sampled axial z coordinates.
+    """
+    if count < 1:
+        raise ValueError("count must be at least 1")
+
+    if isinstance(z_range, (int, float)):
+        z_min, z_max = -abs(float(z_range)), abs(float(z_range))
+    else:
+        z_min, z_max = float(z_range[0]), float(z_range[1])
+
+    if z_min > z_max:
+        z_min, z_max = z_max, z_min
+
+    if count == 1:
+        if symmetric or math.isclose(z_min, -z_max, abs_tol=1e-5):
+            return [0.0]
+        u = torch.rand(1, generator=generator, device=device).item()
+        return [z_min + u * (z_max - z_min)]
+
+    if symmetric and count == 2:
+        half_span = z_max
+        low = max(min_distance / 2.0, 0.5)
+        high = max(low + 0.1, half_span)
+        u = torch.rand(1, generator=generator, device=device).item()
+        z = low + u * (high - low)
+        return [-float(z), float(z)]
+
+    span = z_max - z_min
+    bin_w = span / count
+    positions: list[float] = []
+
+    for i in range(count):
+        bin_start = z_min + i * bin_w
+        bin_end = bin_start + bin_w
+        margin = min(0.2 * bin_w, 0.5)
+        low = bin_start + margin
+        high = bin_end - margin
+        if high <= low:
+            low, high = bin_start, bin_end
+        u = torch.rand(1, generator=generator, device=device).item()
+        z = low + u * (high - low)
+        positions.append(float(z))
+
+    positions.sort()
+
+    for i in range(1, count):
+        if positions[i] - positions[i - 1] < min_distance:
+            positions[i] = positions[i - 1] + min_distance
+
+    if positions[-1] > z_max:
+        overflow = positions[-1] - z_max
+        for i in range(count):
+            positions[i] -= overflow
+
+    return [float(p) for p in positions]
+
+
+def enforce_minimum_axial_separation(
+    positions: torch.Tensor,
+    axis: torch.Tensor,
+    min_distance: float = 3.5,
+) -> torch.Tensor:
+    r"""Enforce minimum separation between distinct ligands along the symmetry axis.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Ligand center positions of shape ``(K, 3)``.
+    axis : torch.Tensor
+        Unit symmetry axis vector of shape ``(3,)``.
+    min_distance : float
+        Minimum required axial distance between distinct ligands.
+
+    Returns
+    -------
+    torch.Tensor
+        Adjusted positions of shape ``(K, 3)`` where $|z_i - z_{i-1}| \ge \text{min\_distance}$.
+    """
+    if positions.shape[0] <= 1:
+        return positions
+
+    u_axis = axis / (axis.norm() + 1e-8)
+    pos = positions.clone()
+    z_coords = torch.matmul(pos, u_axis)
+    order = torch.argsort(z_coords)
+    k = positions.shape[0]
+
+    for _ in range(8):
+        violated = False
+        for idx in range(1, k):
+            prev_idx = order[idx - 1]
+            curr_idx = order[idx]
+            dz = z_coords[curr_idx] - z_coords[prev_idx]
+            if dz < min_distance:
+                violated = True
+                deficit = min_distance - dz
+                shift = deficit / 2.0
+                z_coords[prev_idx] -= shift
+                z_coords[curr_idx] += shift
+        if not violated:
+            break
+
+    perp = pos - torch.outer(torch.matmul(pos, u_axis), u_axis)
+    return perp + torch.outer(z_coords, u_axis)
 
 
 def compute_element_trace(
