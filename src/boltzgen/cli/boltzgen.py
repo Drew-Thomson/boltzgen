@@ -214,6 +214,14 @@ def add_configure_arguments(
         help="Run A-only and B-only homomer counter-screen folds for a two-chain heteromer design",
     )
     p.add_argument(
+        "--ligand_counter_screen",
+        "--ligand-counter-screen",
+        "--apo_counter_screen",
+        "--apo-counter-screen",
+        action="store_true",
+        help="Run ligand-free (apo) counter-screen folds for ligand-bearing assemblies to discover ligand-dependent complexes",
+    )
+    p.add_argument(
         "--max_partner_identity",
         "--max-partner-identity",
         type=float,
@@ -240,6 +248,13 @@ def add_configure_arguments(
         type=float,
         default=0.0,
         help="Minimum allowed average target pLDDT for target models before discarding without running counter-screens (default: 0.0)",
+    )
+    p.add_argument(
+        "--min_ligand_distance",
+        "--min-ligand-distance",
+        type=float,
+        default=None,
+        help="Minimum allowed pairwise distance in Angstroms between distinct ligand centers before counter-screening (default: None; recommended 3.5 for metalloproteins)",
     )
 
     p.add_argument(
@@ -966,10 +981,12 @@ def execute_command(args: argparse.Namespace) -> None:
         os.environ["BOLTZGEN_PIPELINE_STEP"] = step_name
 
         if step_name == "counter_screen_folding":
-            cs_dir = Path(args.output) / "heteromer_counter_screens"
+            cs_dir_hetero = Path(args.output) / "heteromer_counter_screens"
+            cs_dir_ligand = Path(args.output) / "ligand_counter_screens"
+            cs_dir = cs_dir_ligand if getattr(args, "ligand_counter_screen", False) else cs_dir_hetero
             if cs_dir.is_dir() and not any(cs_dir.glob("*.cif")):
                 print(
-                    "No candidate heteromers passed the quality filter for counter-screening; "
+                    "No candidate designs passed the quality filter for counter-screening; "
                     "skipping counter_screen_folding."
                 )
                 continue
@@ -1112,9 +1129,11 @@ class BinderDesignPipeline:
         # after the CLI filtering args, so its last configured value wins here.
         target_max_rmsd = args.target_max_rmsd
         if target_max_rmsd is None:
+            topology = getattr(args, "topology", None) or os.environ.get("MAT_TOPOLOGY")
             target_max_rmsd = _effective_refolding_rmsd_threshold(
                 config_args_by_step.get("filtering", []),
                 args.refolding_rmsd_threshold,
+                topology=topology,
             )
 
         devices = (
@@ -1123,9 +1142,12 @@ class BinderDesignPipeline:
         print(f"Using {devices} devices")
 
         self.steps = []
-        if args.heteromer_counter_screen and args.skip_inverse_folding:
+        if (
+            (args.heteromer_counter_screen or getattr(args, "ligand_counter_screen", False))
+            and args.skip_inverse_folding
+        ):
             raise ValueError(
-                "heteromer counter-screening requires inverse folding and cannot be combined with --skip_inverse_folding"
+                "counter-screening requires inverse folding and cannot be combined with --skip_inverse_folding"
             )
 
         # Design generation
@@ -1348,7 +1370,7 @@ class BinderDesignPipeline:
                 + config_args_by_step["folding"],
             )
         )
-        if args.heteromer_counter_screen:
+        if args.heteromer_counter_screen or getattr(args, "ligand_counter_screen", False):
             self.steps[-1].args.append(
                 "keys_dict_out=[complex_plddt,protein_iptm,design_iptm,min_interaction_pae]"
             )
@@ -1420,16 +1442,19 @@ class BinderDesignPipeline:
             )
         )
         if args.heteromer_counter_screen and not args.skip_inverse_folding:
+            filter_candidate_args = [
+                f"design_dir={input_dir}",
+                f"max_rmsd={target_max_rmsd}",
+                f"min_complex_plddt={args.target_min_plddt}",
+                f"topology={topology}",
+            ]
+            if args.min_ligand_distance is not None:
+                filter_candidate_args.append(f"min_ligand_distance={args.min_ligand_distance}")
             self.steps.append(
                 PipelineStep(
                     name="filter_target_candidates",
                     config_path=args.config_dir / "filter_target_candidates.yaml",
-                    args=[
-                        f"design_dir={input_dir}",
-                        f"max_rmsd={target_max_rmsd}",
-                        f"min_complex_plddt={args.target_min_plddt}",
-                        f"topology={topology}",
-                    ],
+                    args=filter_candidate_args,
                 )
             )
             self.steps.append(
@@ -1478,6 +1503,73 @@ class BinderDesignPipeline:
                 )
             )
 
+        if getattr(args, "ligand_counter_screen", False) and not args.skip_inverse_folding:
+            source_dir = output_dir
+            counter_screen_dir = args.output / "ligand_counter_screens"
+            topology = os.environ.get("MAT_TOPOLOGY", "cyclic")
+            if args.target_max_rmsd is None:
+                target_max_rmsd = _effective_refolding_rmsd_threshold(
+                    config_args_by_step.get("filtering", []),
+                    args.refolding_rmsd_threshold,
+                    topology=topology,
+                )
+            filter_candidate_args = [
+                f"design_dir={input_dir}",
+                f"max_rmsd={target_max_rmsd}",
+                f"min_complex_plddt={args.target_min_plddt}",
+                f"topology={topology}",
+            ]
+            if args.min_ligand_distance is not None:
+                filter_candidate_args.append(f"min_ligand_distance={args.min_ligand_distance}")
+            self.steps.append(
+                PipelineStep(
+                    name="filter_target_candidates",
+                    config_path=args.config_dir / "filter_target_candidates.yaml",
+                    args=filter_candidate_args,
+                )
+            )
+            self.steps.append(
+                PipelineStep(
+                    name="prepare_counter_screens",
+                    config_path=args.config_dir / "prepare_ligand_counter_screens.yaml",
+                    args=[
+                        f"input_dir={source_dir}",
+                        f"output_dir={counter_screen_dir}",
+                        f"moldir={moldir}",
+                        f"candidates_path={input_dir}/counter_screen_candidates.json",
+                    ],
+                )
+            )
+            self.steps.append(
+                PipelineStep(
+                    name="counter_screen_folding",
+                    config_path=args.config_dir / "fold.yaml",
+                    args=[
+                        f"output={counter_screen_dir}",
+                        f"data.design_dir={counter_screen_dir}",
+                        f"trainer.devices={devices}",
+                        f"data.cfg.num_workers={args.num_workers}",
+                        f"data.skip_existing={args.reuse}",
+                        f"data.skip_existing_kind=folded",
+                        "data.cfg.target_id_regex='^(.+)$'",
+                        f"override.use_kernels={use_kernels}",
+                        f"checkpoint={get_artifact_path(args, args.folding_checkpoint)}",
+                        f"data.cfg.moldir={moldir}",
+                        "keys_dict_out=[complex_plddt,protein_iptm,design_iptm,min_interaction_pae]",
+                    ],
+                )
+            )
+            self.steps.append(
+                PipelineStep(
+                    name="merge_counter_screen_metrics",
+                    config_path=args.config_dir / "merge_counter_screen_metrics.yaml",
+                    args=[
+                        f"design_dir={input_dir}",
+                        f"counter_screen_dir={counter_screen_dir}",
+                    ],
+                )
+            )
+
         # Filtering
         output_dir = args.output / "final_ranked_designs"
         print(f"Final ranked designs will be saved to: {output_dir}")
@@ -1514,6 +1606,11 @@ class BinderDesignPipeline:
                     "neg_lattice_rmsd_refolded: null, "
                     "h_bonds_per_interface_refolded: null, packing_density_refolded: null}"
                 )
+        elif getattr(args, "ligand_counter_screen", False):
+            from boltzgen.task.filter.material_presets import (
+                format_ligand_counter_screen_metrics_override,
+            )
+            filter_args.append(format_ligand_counter_screen_metrics_override())
 
         # Add optional filtering arguments
         if args.alpha is not None:
@@ -1524,6 +1621,8 @@ class BinderDesignPipeline:
             filter_args.append(
                 f"refolding_rmsd_threshold={args.refolding_rmsd_threshold}"
             )
+        elif target_max_rmsd is not None:
+            filter_args.append(f"refolding_rmsd_threshold={target_max_rmsd}")
         if args.metrics_override is not None:
             parsed_metrics = parse_metrics_override(args.metrics_override)
             print(f"Filtering metrics override: {parsed_metrics}")

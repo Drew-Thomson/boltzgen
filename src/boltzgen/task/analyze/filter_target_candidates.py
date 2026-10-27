@@ -85,11 +85,13 @@ class FilterTargetCandidates(Task):
         topology: Optional[str] = None,
         max_rmsd: float = 5.0,
         min_complex_plddt: Optional[float] = None,
+        min_ligand_distance: Optional[float] = None,
     ) -> None:
         self.design_dir = Path(design_dir)
         self.topology = topology
         self.max_rmsd = max_rmsd
         self.min_complex_plddt = min_complex_plddt
+        self.min_ligand_distance = min_ligand_distance
 
     def run(self, config=None) -> None:  # noqa: ANN001, ARG002
         csv_paths = sorted(self.design_dir.glob("aggregate_metrics_*.csv"))
@@ -114,16 +116,23 @@ class FilterTargetCandidates(Task):
                     "min_complex_plddt requested but no complex_plddt column found"
                 )
             passed &= frame[col] >= self.min_complex_plddt
+        if self.min_ligand_distance is not None and "min_ligand_distance" in frame:
+            lig_valid = frame["min_ligand_distance"].isna() | (
+                frame["min_ligand_distance"] >= self.min_ligand_distance
+            )
+            passed &= lig_valid
         passed = passed.fillna(False)
 
         ids = frame.loc[passed, "id"].astype(str).tolist()
         logger.info(
             f"{len(ids)}/{len(frame)} target designs passed "
-            f"(rmsd <= {self.max_rmsd}, min_complex_plddt={self.min_complex_plddt})"
+            f"(rmsd <= {self.max_rmsd}, min_complex_plddt={self.min_complex_plddt}, "
+            f"min_ligand_distance={self.min_ligand_distance})"
         )
         print(
             f"Target candidate culling: {len(ids)}/{len(frame)} designs pass "
-            f"(rmsd <= {self.max_rmsd}, min_complex_plddt={self.min_complex_plddt})"
+            f"(rmsd <= {self.max_rmsd}, min_complex_plddt={self.min_complex_plddt}, "
+            f"min_ligand_distance={self.min_ligand_distance})"
         )
         if not ids:
             logger.warning(
@@ -135,6 +144,7 @@ class FilterTargetCandidates(Task):
                     {
                         "max_rmsd": self.max_rmsd,
                         "min_complex_plddt": self.min_complex_plddt,
+                        "min_ligand_distance": self.min_ligand_distance,
                         "candidate_ids": [],
                     },
                     indent=2,
@@ -146,6 +156,7 @@ class FilterTargetCandidates(Task):
                 {
                     "max_rmsd": self.max_rmsd,
                     "min_complex_plddt": self.min_complex_plddt,
+                    "min_ligand_distance": self.min_ligand_distance,
                     "candidate_ids": ids,
                 },
                 indent=2,

@@ -1,0 +1,6 @@
+_target_: boltzgen.task.predict.ligand_counter_screen.PrepareLigandCounterScreens
+input_dir: null
+output_dir: null
+moldir: null
+candidates_path: null
+layout_path: null

@@ -60,6 +60,46 @@ def heteromer_filtering_overrides() -> dict[str, Any]:
     }
 
 
+def ligand_counter_screen_filtering_overrides() -> dict[str, Any]:
+    """Return ranking weights for opt-in ligand (apo) counter-screen metrics.
+
+    Weights in Filter correspond to inverse importance (1 = primary priority,
+    higher values de-emphasize the metric).
+    """
+    return {
+        "delta_rmsd_vs_apo": 1,
+        "holo_apo_rmsd": 1,
+        "delta_protein_iptm_vs_apo": 1,
+        "neg_num_ligand_clashes": 1,
+        "apo_rmsd": 2,
+        "delta_complex_plddt_vs_apo": 2,
+        "min_ligand_distance": 2,
+        "ligand_iptm": 2,
+        "mean_ligand_coordination": 2,
+        "mean_ligand_plddt": 2,
+        "neg_lattice_rmsd_refolded": 3,
+        "complex_plddt": 3,
+        "neg_local_rmsd": None,
+        "neg_global_rmsd": None,
+        "design_ptm": None,
+        "neg_min_interaction_pae": None,
+        "design_to_target_iptm": None,
+        "neg_min_design_to_target_pae": None,
+        "h_bonds_per_interface_refolded": None,
+        "packing_density_refolded": None,
+    }
+
+
+def format_ligand_counter_screen_metrics_override() -> str:
+    """Format ligand counter-screen ranking overrides as a Hydra-compatible dictionary."""
+    overrides = ligand_counter_screen_filtering_overrides()
+    values = ", ".join(
+        f"{key}: {'null' if value is None else value}"
+        for key, value in overrides.items()
+    )
+    return f"metrics_override={{{values}}}"
+
+
 def format_metrics_override(topology: str) -> str | None:
     """Format material ranking overrides as a Hydra-compatible dictionary."""
     overrides = material_filtering_overrides(topology)

@@ -799,6 +799,155 @@ def get_delta_sasa(
     return delta, target_area.sum(), target_bound, contacts
 
 
+_STANDARD_AMINO_ACIDS: set[str] = {
+    "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
+    "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
+    "SEC", "PYL",
+}
+
+
+def compute_ligand_metrics(
+    cif_path: Path | str,
+    coord_shell_radius: float = 2.8,
+    clash_threshold: float = 3.5,
+) -> dict[str, float]:
+    r"""Compute ligand geometry, clash, and coordination confidence metrics.
+
+    Evaluates:
+    - Minimum distance across distinct ligand molecules/ions:
+      $$d_{\min} = \min_{i, j:\, \text{res}_i \ne \text{res}_j}
+      \|\mathbf{x}_i - \mathbf{x}_j\|_2$$
+    - Inter-ligand clashes:
+      $$N_{\text{clash}} = \sum_{i < j:\, \text{res}_i \ne \text{res}_j}
+      \mathbb{I}[\|\mathbf{x}_i - \mathbf{x}_j\|_2 < d_{\text{clash}}]$$
+    - Coordination to protein heteroatoms (N, O, S):
+      $$C_i = \sum_{j \in \text{prot},\, e_j \in \{N, O, S\}}
+      \mathbb{I}[\|\mathbf{x}_i^{\text{lig}} -
+      \mathbf{x}_j^{\text{prot}}\|_2 \le r_{\text{coord}}]$$
+
+    Parameters
+    ----------
+    cif_path : Path | str
+        Path to refolded MMCIF structure.
+    coord_shell_radius : float, default=2.8
+        Maximum distance in Angstroms to consider a protein N, O, or S atom
+        coordinated to a ligand/metal center.
+    clash_threshold : float, default=3.5
+        Distance cutoff in Angstroms below which two distinct ligand
+        molecules/ions are considered colliding/clashing.
+
+    Returns
+    -------
+    dict[str, float]
+        Dictionary containing:
+        - ``min_ligand_distance``: Minimum inter-residue ligand distance in
+          Angstroms (NaN if <= 1 ligand).
+        - ``num_ligand_clashes``: Count of ligand-ligand pairs with
+          distance < clash_threshold.
+        - ``neg_num_ligand_clashes``: Negated count of ligand clashes.
+        - ``ligand_clash_penalty``: Penalty score max(0, clash_threshold - min_dist).
+        - ``mean_ligand_plddt``: Mean pLDDT (b-factor) across all ligand atoms.
+        - ``min_ligand_plddt``: Minimum pLDDT across all ligand atoms.
+        - ``mean_ligand_coordination``: Average count of coordinating N/O/S
+          atoms within coord_shell_radius.
+        - ``min_ligand_coordination``: Minimum coordination count across all
+          ligand atoms.
+    """
+    path = Path(cif_path)
+    if not path.exists():
+        return {}
+
+    try:
+        import gemmi
+
+        st = gemmi.read_structure(str(path))
+    except (OSError, RuntimeError, ValueError) as exc:
+        warnings.warn(
+            f"Failed to read MMCIF structure at {path} for ligand metrics: {exc}",
+            stacklevel=2,
+        )
+        return {}
+
+    lig_coords_list: list[list[float]] = []
+    lig_plddts_list: list[float] = []
+    lig_res_keys_list: list[str] = []
+    prot_coords_list: list[list[float]] = []
+    prot_elems_list: list[str] = []
+
+    for model in st:
+        for chain in model:
+            for res in chain:
+                res_name = res.name.strip().upper()
+                if res_name in _STANDARD_AMINO_ACIDS:
+                    for atom in res:
+                        prot_coords_list.append([atom.pos.x, atom.pos.y, atom.pos.z])
+                        prot_elems_list.append(atom.element.name.strip().upper())
+                else:
+                    # Non-polymer / ligand residue
+                    res_key = f"{chain.name}_{res.seqid.num}_{res_name}"
+                    for atom in res:
+                        lig_coords_list.append([atom.pos.x, atom.pos.y, atom.pos.z])
+                        lig_plddts_list.append(atom.b_iso)
+                        lig_res_keys_list.append(res_key)
+        break  # Evaluate first model only
+
+    num_lig = len(lig_coords_list)
+    if num_lig == 0:
+        return {}
+
+    lig_coords = np.array(lig_coords_list, dtype=np.float32)
+    lig_plddts = np.array(lig_plddts_list, dtype=np.float32)
+    lig_res_keys = np.array(lig_res_keys_list)
+    if prot_coords_list:
+        prot_coords = np.array(prot_coords_list, dtype=np.float32)
+    else:
+        prot_coords = np.empty((0, 3), dtype=np.float32)
+
+    # 1. Inter-ligand distance and clash detection
+    if num_lig > 1:
+        dists = np.linalg.norm(
+            lig_coords[:, None, :] - lig_coords[None, :, :], axis=-1
+        )
+        diff_res_mask = lig_res_keys[:, None] != lig_res_keys[None, :]
+        if diff_res_mask.any():
+            inter_dists = dists[diff_res_mask]
+            min_dist = float(inter_dists.min())
+            clashes = int((inter_dists < clash_threshold).sum() // 2)
+            clash_pen = float(max(0.0, clash_threshold - min_dist))
+        else:
+            min_dist = float("nan")
+            clashes = 0
+            clash_pen = 0.0
+    else:
+        min_dist = float("nan")
+        clashes = 0
+        clash_pen = 0.0
+
+    # 2. Ligand coordination contacts to protein heteroatoms (N, O, S)
+    coord_counts: list[int] = []
+    if len(prot_coords) > 0 and num_lig > 0:
+        prot_dists = np.linalg.norm(
+            lig_coords[:, None, :] - prot_coords[None, :, :], axis=-1
+        )
+        coord_atoms_mask = np.isin(prot_elems_list, ("N", "O", "S"))
+        for i in range(num_lig):
+            within_shell = (prot_dists[i] <= coord_shell_radius) & coord_atoms_mask
+            coord_counts.append(int(within_shell.sum()))
+    else:
+        coord_counts = [0] * num_lig
+
+    return {
+        "min_ligand_distance": min_dist,
+        "num_ligand_clashes": float(clashes),
+        "neg_num_ligand_clashes": float(-clashes),
+        "ligand_clash_penalty": clash_pen,
+        "mean_ligand_plddt": float(np.mean(lig_plddts)),
+        "min_ligand_plddt": float(np.min(lig_plddts)),
+        "mean_ligand_coordination": float(np.mean(coord_counts)),
+        "min_ligand_coordination": float(np.min(coord_counts)),
+    }
+
+
 def compute_ss_metrics(dssp_pred, ss_conditioning_metricsed):
     ss_metrics = {}
     conditioned_mask = ss_conditioning_metricsed != 0

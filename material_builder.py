@@ -152,6 +152,14 @@ def main():
         help="Design a two-chain heteromer with alternating partner identities and run homomer counter-screens",
     )
     parser.add_argument(
+        "--ligand_counter_screen",
+        "--ligand-counter-screen",
+        "--apo_counter_screen",
+        "--apo-counter-screen",
+        action="store_true",
+        help="Run ligand-free (apo) counter-screen folds for ligand-bearing assemblies to discover ligand-dependent complexes",
+    )
+    parser.add_argument(
         "--heteromer_charge_bias",
         "--heteromer-charge-bias",
         type=float,
@@ -241,6 +249,13 @@ def main():
         type=float,
         default=0.0,
         help="Minimum allowed average target pLDDT (0-1 scale) for target models before discarding (default: 0.0)",
+    )
+    parser.add_argument(
+        "--min_ligand_distance",
+        "--min-ligand-distance",
+        type=float,
+        default=None,
+        help="Minimum allowed pairwise distance in Angstroms between distinct ligand centers before counter-screening (default: None; recommended 3.5 for metalloproteins)",
     )
     parser.add_argument(
         "--double_tape_core_bias",
@@ -372,6 +387,14 @@ def main():
             parser.error(
                 "--heteromer_counter_screen supports cyclic, cylindrical, linear_tape, "
                 "double_tape, open_arc, and helical topologies"
+            )
+    if args.ligand_counter_screen:
+        if not any(
+            str(item.get("type", "protein")).lower() == "ligand"
+            for item in asym_unit_def
+        ):
+            parser.error(
+                "--ligand_counter_screen requires at least one ligand in the asymmetric unit"
             )
     is_heteromer_assembly = args.heteromer_counter_screen or (
         len(protein_templates) == 2 and args.topology in supported_heteromer_topologies
@@ -571,21 +594,31 @@ def main():
             "--inverse_fold_num_sequences", str(args.seqs_per_backbone),
             "--config", "inverse_folding", f"override.inverse_fold_args.sampling_temperature={args.inverse_temp}"
         ]
+        effective_rmsd = (
+            args.target_max_rmsd
+            if args.target_max_rmsd is not None
+            else getattr(args, "refolding_rmsd_threshold", None)
+        )
+        if effective_rmsd is not None:
+            cmd.extend(["--target_max_rmsd", str(effective_rmsd), "--refolding_rmsd_threshold", str(effective_rmsd)])
+
         if args.heteromer_counter_screen:
             cmd.append("--heteromer_counter_screen")
             if hasattr(args, "max_partner_identity"):
                 cmd.extend(["--max_partner_identity", str(args.max_partner_identity)])
             if hasattr(args, "max_surviving_designs") and args.max_surviving_designs is not None:
                 cmd.extend(["--max_surviving_designs", str(args.max_surviving_designs)])
-            if args.target_max_rmsd is not None:
-                cmd.extend(["--target_max_rmsd", str(args.target_max_rmsd)])
-            elif getattr(args, "refolding_rmsd_threshold", None) is not None:
-                cmd.extend(["--target_max_rmsd", str(args.refolding_rmsd_threshold)])
             if hasattr(args, "target_min_plddt"):
                 cmd.extend(["--target_min_plddt", str(args.target_min_plddt)])
 
-        if getattr(args, "refolding_rmsd_threshold", None) is not None:
-            cmd.extend(["--refolding_rmsd_threshold", str(args.refolding_rmsd_threshold)])
+        if args.ligand_counter_screen:
+            cmd.append("--ligand_counter_screen")
+            if hasattr(args, "target_min_plddt"):
+                cmd.extend(["--target_min_plddt", str(args.target_min_plddt)])
+            if getattr(args, "min_ligand_distance", None) is not None:
+                cmd.extend(["--min_ligand_distance", str(args.min_ligand_distance)])
+        elif getattr(args, "min_ligand_distance", None) is not None:
+            cmd.extend(["--min_ligand_distance", str(args.min_ligand_distance)])
 
         if getattr(args, "anti_correlation_strength", 0.0) > 0.0:
             cmd.extend(["--anti_correlation_strength", str(args.anti_correlation_strength)])

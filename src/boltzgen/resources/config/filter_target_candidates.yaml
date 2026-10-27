@@ -4,3 +4,4 @@ design_dir: null
 topology: null
 max_rmsd: 5.0
 min_complex_plddt: null
+min_ligand_distance: null

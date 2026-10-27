@@ -3,16 +3,98 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 
 from boltzgen.data import const
 from boltzgen.task.task import Task
 
 
 _METRICS = ("complex_plddt", "design_iptm", "protein_iptm", "min_interaction_pae")
+
+
+def _extract_protein_backbone_coords(
+    cif_path: Path,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    """Extract protein backbone coordinates, chain IDs, and mask from MMCIF."""
+    if not cif_path.exists():
+        return None
+    try:
+        import gemmi
+
+        st = gemmi.read_structure(str(cif_path))
+        coords: list[list[float]] = []
+        chain_ids: list[int] = []
+        bb_mask: list[bool] = []
+        chain_counter = 0
+        for model in st:
+            for chain in model:
+                has_ca = any(atom.name == "CA" for res in chain for atom in res)
+                if not has_ca:
+                    continue
+                for res in chain:
+                    for atom in res:
+                        if atom.name in {"N", "CA", "C", "O"}:
+                            coords.append([atom.pos.x, atom.pos.y, atom.pos.z])
+                            chain_ids.append(chain_counter)
+                            bb_mask.append(True)
+                chain_counter += 1
+            break
+        if not coords:
+            return None
+        return (
+            torch.tensor(coords, dtype=torch.float32),
+            torch.tensor(chain_ids, dtype=torch.long),
+            torch.tensor(bb_mask, dtype=torch.bool),
+        )
+    except Exception as exc:
+        print(f"Warning: failed to read protein backbone from {cif_path}: {exc}")
+        return None
+
+
+def _compute_cif_backbone_rmsd(
+    refold_cif_path: Path, design_cif_path: Path, topology: str = "cyclic"
+) -> float:
+    """Compute chain-order independent backbone RMSD between refold and design CIFs.
+
+    Parameters
+    ----------
+    refold_cif_path : Path
+        Path to refolded MMCIF structure.
+    design_cif_path : Path
+        Path to reference design MMCIF structure.
+    topology : str, optional
+        Assembly topology constraint (default: 'cyclic').
+
+    Returns
+    -------
+    float
+        Chain-order independent backbone RMSD in Angstroms, or NaN if unavailable.
+    """
+    bb_r = _extract_protein_backbone_coords(refold_cif_path)
+    bb_i = _extract_protein_backbone_coords(design_cif_path)
+    if bb_r is None or bb_i is None:
+        return float("nan")
+    try:
+        from boltzgen.task.analyze.material_metrics import compute_chain_order_independent_rmsd
+
+        rmsd, _ = compute_chain_order_independent_rmsd(
+            coords_refold=bb_r[0],
+            coords_ideal=bb_i[0],
+            chain_ids_refold=bb_r[1],
+            chain_ids_ideal=bb_i[1],
+            bb_mask_refold=bb_r[2],
+            bb_mask_ideal=bb_i[2],
+            topology=topology,
+        )
+        return float(rmsd)
+    except Exception as exc:
+        print(f"Warning: failed to compute CIF backbone RMSD: {exc}")
+        return float("nan")
 
 
 def _load_prediction_metrics(path: Path) -> dict[str, float]:
@@ -60,6 +142,106 @@ class MergeCounterScreenMetrics(Task):
                 ]
                 if not matching_rows:
                     continue
+
+                if "apo" in partner_ids:
+                    screen_id = partner_ids["apo"]
+                    apo_pred_path = metrics_path / f"{screen_id}.npz"
+                    if not apo_pred_path.exists():
+                        apo_pred_path = self.counter_screen_dir / f"{screen_id}.npz"
+                    apo_prediction = (
+                        _load_prediction_metrics(apo_pred_path)
+                        if apo_pred_path.exists()
+                        else {}
+                    )
+
+                    refold_cif = (
+                        self.counter_screen_dir / const.refold_cif_dirname / f"{screen_id}.cif"
+                    )
+                    if (self.counter_screen_dir / f"{screen_id}.cif").exists():
+                        refold_cif = self.counter_screen_dir / f"{screen_id}.cif"
+
+                    base_parent = parent_id.rsplit("_", 1)[0] if "_" in parent_id else parent_id
+                    design_cif = self.design_dir / f"{parent_id}.cif"
+                    for cand in [
+                        self.design_dir / f"{parent_id}.cif",
+                        self.design_dir / f"{base_parent}.cif",
+                        self.design_dir.parent / "intermediate_designs" / f"{parent_id}.cif",
+                        self.design_dir.parent / "intermediate_designs" / f"{base_parent}.cif",
+                    ]:
+                        if cand.exists():
+                            design_cif = cand
+                            break
+
+                    holo_refold_cif = (
+                        self.design_dir / const.refold_cif_dirname / f"{parent_id}.cif"
+                    )
+                    for cand in [
+                        self.design_dir / const.refold_cif_dirname / f"{parent_id}.cif",
+                        self.design_dir / f"{parent_id}.cif",
+                        self.design_dir / const.refold_cif_dirname / f"{base_parent}.cif",
+                    ]:
+                        if cand.exists():
+                            holo_refold_cif = cand
+                            break
+
+                    apo_rmsd = _compute_cif_backbone_rmsd(refold_cif, design_cif)
+                    holo_apo_rmsd = (
+                        _compute_cif_backbone_rmsd(holo_refold_cif, refold_cif)
+                        if holo_refold_cif.exists()
+                        else float("nan")
+                    )
+                    holo_rmsd_cif = (
+                        _compute_cif_backbone_rmsd(holo_refold_cif, design_cif)
+                        if holo_refold_cif.exists() and design_cif.exists()
+                        else float("nan")
+                    )
+
+                    for matching_parent in matching_rows:
+                        row_idx = rows[matching_parent]
+                        for key, value in apo_prediction.items():
+                            frame.loc[row_idx, f"apo_{key}"] = value
+
+                        if not math.isnan(holo_apo_rmsd):
+                            frame.loc[row_idx, "holo_apo_rmsd"] = holo_apo_rmsd
+
+                        if not math.isnan(apo_rmsd):
+                            frame.loc[row_idx, "apo_rmsd"] = apo_rmsd
+                            holo_rmsd = (
+                                holo_rmsd_cif
+                                if not math.isnan(holo_rmsd_cif)
+                                else -float(frame.loc[row_idx, "neg_lattice_rmsd_refolded"])
+                                if "neg_lattice_rmsd_refolded" in frame
+                                and pd.notna(frame.loc[row_idx, "neg_lattice_rmsd_refolded"])
+                                else float(frame.loc[row_idx, "lattice_rmsd_refolded"])
+                                if "lattice_rmsd_refolded" in frame
+                                and pd.notna(frame.loc[row_idx, "lattice_rmsd_refolded"])
+                                else float(frame.loc[row_idx, "rmsd"])
+                                if "rmsd" in frame and pd.notna(frame.loc[row_idx, "rmsd"])
+                                else float("nan")
+                            )
+                            if not math.isnan(holo_rmsd):
+                                frame.loc[row_idx, "delta_rmsd_vs_apo"] = apo_rmsd - holo_rmsd
+
+                        for metric_key in ("complex_plddt", "protein_iptm", "design_iptm"):
+                            if (
+                                metric_key in apo_prediction
+                                and metric_key in frame
+                                and pd.notna(frame.loc[row_idx, metric_key])
+                            ):
+                                frame.loc[row_idx, f"delta_{metric_key}_vs_apo"] = (
+                                    float(frame.loc[row_idx, metric_key]) - apo_prediction[metric_key]
+                                )
+
+                        if (
+                            "min_interaction_pae" in apo_prediction
+                            and "min_interaction_pae" in frame
+                            and pd.notna(frame.loc[row_idx, "min_interaction_pae"])
+                        ):
+                            frame.loc[row_idx, "delta_neg_min_interaction_pae_vs_apo"] = (
+                                apo_prediction["min_interaction_pae"] - float(frame.loc[row_idx, "min_interaction_pae"])
+                            )
+                    continue
+
                 heteromer_metrics_path = (
                     self.design_dir / const.folding_dirname / f"{parent_id}.npz"
                 )
@@ -125,6 +307,20 @@ class MergeCounterScreenMetrics(Task):
                             if candidate_id == parent_id
                             or candidate_id.startswith(f"{parent_id}_")
                         ]
+                        if "apo" in partner_ids:
+                            screen_id = partner_ids["apo"]
+                            counter_row = counter_rows.get(str(screen_id))
+                            if counter_row is not None:
+                                for candidate_id in matching_rows:
+                                    row_idx = rows[candidate_id]
+                                    for metric in ("complex_plddt", "design_iptm", "protein_iptm", "min_interaction_pae"):
+                                        if metric in counter_row and pd.notna(counter_row[metric]):
+                                            frame.loc[row_idx, f"apo_{metric}"] = float(counter_row[metric])
+                                            if metric in frame and pd.notna(frame.loc[row_idx, metric]):
+                                                frame.loc[row_idx, f"delta_{metric}_vs_apo"] = (
+                                                    float(frame.loc[row_idx, metric]) - float(counter_row[metric])
+                                                )
+                            continue
                         for partner in ("A", "B"):
                             screen_id = partner_ids.get(partner)
                             counter_row = counter_rows.get(str(screen_id))

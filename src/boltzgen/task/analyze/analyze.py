@@ -1147,6 +1147,12 @@ class Analyze(Task):
                 metrics["neg_ligand_sasa_bound_refolded"] = -design_sasa_bound
                 metrics["ligand_coordination_contacts_refolded"] = contacts_refolded
 
+            cif_path_refolded = self.refold_cif_dir / f"{feat['id']}.cif"
+            if cif_path_refolded.exists():
+                from boltzgen.task.analyze.analyze_utils import compute_ligand_metrics
+                ligand_metrics = compute_ligand_metrics(cif_path_refolded)
+                metrics.update(ligand_metrics)
+
             # noncovalents metrics for refolded structure
             if self.noncovalents_refolded:
                 try:
@@ -1447,9 +1453,30 @@ class Analyze(Task):
                                         metrics["outward_ilv_fraction"] = 0.0
                                         metrics["outward_aromatic_fraction"] = 0.0
                         else:
-                            rmsd = torch.sqrt(torch.mean((c_r_aligned - Q)**2)).item()
+                            try:
+                                from boltzgen.task.analyze.material_metrics import (
+                                    compute_chain_order_independent_rmsd,
+                                )
+                                rmsd_ind, _ = compute_chain_order_independent_rmsd(
+                                    coords_refold=coords_refold,
+                                    coords_ideal=coords_ideal,
+                                    chain_ids_refold=atom_asym_id_refold,
+                                    chain_ids_ideal=atom_asym_id_ideal,
+                                    bb_mask_refold=bb_mask_refold,
+                                    bb_mask_ideal=bb_mask_ideal,
+                                    topology=topology,
+                                )
+                                rmsd = rmsd_ind
+                            except Exception as rmsd_err:
+                                print("Error computing chain-order independent RMSD:", rmsd_err)
+                                rmsd = torch.sqrt(torch.mean((c_r_aligned - Q)**2)).item()
+
                             if not has_two_chain_asym_unit or two_chain_metrics is None:
+                                metrics["lattice_rmsd_refolded"] = rmsd
                                 metrics["neg_lattice_rmsd_refolded"] = -rmsd
+                                metrics["bb_rmsd"] = rmsd
+                                if "rmsd_design" in metrics and rmsd < metrics["rmsd_design"]:
+                                    metrics["rmsd_design"] = rmsd
                         
                         # Twist angle roughly estimated by the angle of rotation matrix relative to identity 
                         # after aligning the primary axes. For simplicity, just use lattice_rmsd as primary geometry proxy.

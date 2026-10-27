@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import itertools
 import math
 
 import torch
@@ -932,3 +933,187 @@ def compute_double_tape_neatness_metrics(  # noqa: C901, PLR0912, PLR0915
         "bilayer_dist_std": bilayer_dist_std,
         "double_tape_neatness_score": double_tape_neatness_score,
     }
+
+
+def compute_chain_order_independent_rmsd(
+    coords_refold: torch.Tensor,
+    coords_ideal: torch.Tensor,
+    chain_ids_refold: torch.Tensor,
+    chain_ids_ideal: torch.Tensor,
+    bb_mask_refold: torch.Tensor,
+    bb_mask_ideal: torch.Tensor,
+    topology: str = "cyclic",
+) -> tuple[float, list[tuple[int, int]]]:
+    r"""Compute exact SE(3)-invariant, chain-permutation-independent backbone RMSD.
+
+    For an assembly of :math:`K` chains with equal backbone atom count :math:`L`,
+    evaluates the minimal RMSD across all valid chain permutations :math:`\sigma \in \mathcal{S}_K`:
+
+    .. math::
+        \text{RMSD}^* = \min_{\sigma \in \mathcal{S}_K} \min_{R \in SO(3)} \sqrt{\frac{1}{M} \sum_{k=0}^{K-1} \|(P_k - \bar{P}) R - (Q_{\sigma(k)} - \bar{Q})\|_F^2}
+
+    where :math:`M = K \cdot L`, :math:`P_k \in \mathbb{R}^{L \times 3}` is the backbone of predicted
+    chain :math:`k`, and :math:`Q_i \in \mathbb{R}^{L \times 3}` is the backbone of reference chain :math:`i`.
+    By the Kabsch theorem, evaluating cross-covariance blocks :math:`C_{k, i} = P_k^T Q_i` allows all
+    candidate permutations :math:`H_\sigma = \sum_{k=0}^{K-1} C_{k, \sigma(k)}` to be evaluated simultaneously
+    via batched SVD.
+
+    Parameters
+    ----------
+    coords_refold : torch.Tensor
+        Predicted atom coordinates of shape ``[N_refold, 3]``.
+    coords_ideal : torch.Tensor
+        Reference design atom coordinates of shape ``[N_ideal, 3]``.
+    chain_ids_refold : torch.Tensor
+        Per-atom chain indices of shape ``[N_refold]``.
+    chain_ids_ideal : torch.Tensor
+        Per-atom chain indices of shape ``[N_ideal]``.
+    bb_mask_refold : torch.Tensor
+        Boolean mask of backbone atoms of shape ``[N_refold]``.
+    bb_mask_ideal : torch.Tensor
+        Boolean mask of backbone atoms of shape ``[N_ideal]``.
+    topology : str, optional
+        Assembly topology constraint (e.g. ``'cyclic'``, ``'cylindrical'``).
+        Default is ``'cyclic'``.
+
+    Returns
+    -------
+    tuple[float, list[tuple[int, int]]]
+        Minimal RMSD in Angstroms and list of matched ``(refold_chain, ideal_chain)`` tuples.
+    """
+    n_r = min(coords_refold.shape[0], chain_ids_refold.shape[0], bb_mask_refold.shape[0])
+    n_i = min(coords_ideal.shape[0], chain_ids_ideal.shape[0], bb_mask_ideal.shape[0])
+    if n_r == 0 or n_i == 0:
+        return 99.0, []
+
+    c_refold = coords_refold[:n_r]
+    c_ideal = coords_ideal[:n_i]
+    ids_r = chain_ids_refold[:n_r]
+    ids_i = chain_ids_ideal[:n_i]
+    m_r = bb_mask_refold[:n_r].bool()
+    m_i = bb_mask_ideal[:n_i].bool()
+
+    unique_r = sorted([int(x.item() if isinstance(x, torch.Tensor) else x) for x in torch.unique(ids_r[m_r])])
+    unique_i = sorted([int(x.item() if isinstance(x, torch.Tensor) else x) for x in torch.unique(ids_i[m_i])])
+
+    k_count = len(unique_i)
+    if k_count == 0 or len(unique_r) != k_count:
+        bb_r = c_refold[m_r]
+        bb_i = c_ideal[m_i]
+        return _kabsch_rmsd(bb_r, bb_i), []
+
+    pts_r: list[torch.Tensor] = []
+    pts_i: list[torch.Tensor] = []
+    for c in unique_r:
+        pts_r.append(c_refold[(ids_r == c) & m_r])
+    for c in unique_i:
+        pts_i.append(c_ideal[(ids_i == c) & m_i])
+
+    chain_lens_r = [p.shape[0] for p in pts_r]
+    chain_lens_i = [p.shape[0] for p in pts_i]
+    if any(lr == 0 for lr in chain_lens_r) or any(li == 0 for li in chain_lens_i):
+        return 99.0, []
+
+    # Check if all chains have equal length across refold and ideal
+    equal_lengths = (len(set(chain_lens_r)) == 1 and len(set(chain_lens_i)) == 1 and chain_lens_r[0] == chain_lens_i[0])
+    if not equal_lengths:
+        bb_r = torch.cat(pts_r)
+        bb_i = torch.cat(pts_i)
+        return _kabsch_rmsd(bb_r, bb_i), []
+
+    device = c_refold.device
+    dtype = c_refold.dtype
+
+    # Center coordinates to global assembly center
+    all_r = torch.cat(pts_r, dim=0)
+    all_i = torch.cat(pts_i, dim=0)
+    center_r = all_r.mean(dim=0, keepdim=True)
+    center_i = all_i.mean(dim=0, keepdim=True)
+
+    centered_r = [p - center_r for p in pts_r]
+    centered_i = [p - center_i for p in pts_i]
+
+    norm_r = sum((p ** 2).sum() for p in centered_r)
+    norm_i = sum((p ** 2).sum() for p in centered_i)
+    m_atoms = all_r.shape[0]
+
+    # Precompute K x K cross-covariance blocks C[k, i] = P_k^T Q_i
+    cov_blocks = torch.zeros((k_count, k_count, 3, 3), device=device, dtype=dtype)
+    for k in range(k_count):
+        for i in range(k_count):
+            cov_blocks[k, i] = centered_r[k].T @ centered_i[i]
+
+    # Generate candidate permutations
+    perms_set: set[tuple[int, ...]] = set()
+
+    # 1. Dihedral permutations D_K (cyclic shifts and reflections)
+    for s in range(k_count):
+        shift_perm = tuple((k + s) % k_count for k in range(k_count))
+        perms_set.add(shift_perm)
+        refl_perm = tuple((s - k) % k_count for k in range(k_count))
+        perms_set.add(refl_perm)
+
+    # 2. Candidate permutations depending on topology constraint
+    if topology in ("cyclic", "cylindrical", "helical", "open_arc"):
+        # For 1D ring/helical topologies, candidate permutations are strictly
+        # the dihedral group D_K (cyclic shifts and reflections) to preserve cyclic symmetry.
+        pass
+    elif k_count <= 6:
+        # For unconstrained multi-chain assemblies of <= 6 chains, test full S_K
+        for p in itertools.permutations(range(k_count)):
+            perms_set.add(p)
+    else:
+        # 3. For K > 6, supplement with candidate SE(3) rotation + Hungarian matching
+        coms_r = torch.stack([p.mean(dim=0) for p in centered_r])
+        coms_i = torch.stack([p.mean(dim=0) for p in centered_i])
+        h_com = coms_r.T @ coms_i
+        u_com, _, vh_com = torch.linalg.svd(h_com)
+        d_com = torch.sign(torch.det(u_com @ vh_com))
+        d_mat = torch.eye(3, device=device, dtype=dtype)
+        d_mat[2, 2] = d_com
+        r0 = u_com @ d_mat @ vh_com
+
+        rot_cands = [r0]
+        rx = torch.diag(torch.tensor([1.0, -1.0, -1.0], device=device, dtype=dtype))
+        ry = torch.diag(torch.tensor([-1.0, 1.0, -1.0], device=device, dtype=dtype))
+        rz = torch.diag(torch.tensor([-1.0, -1.0, 1.0], device=device, dtype=dtype))
+        for flip in (rx, ry, rz):
+            rot_cands.append(r0 @ flip)
+
+        for r_cand in rot_cands:
+            rot_coms_r = coms_r @ r_cand
+            cost_mat = torch.cdist(rot_coms_r, coms_i).cpu().numpy()
+            row_ind, col_ind = linear_sum_assignment(cost_mat)
+            perm = [0] * k_count
+            for r_idx, c_idx in zip(row_ind, col_ind):
+                perm[r_idx] = int(c_idx)
+            perms_set.add(tuple(perm))
+
+    identity_perm = tuple(range(k_count))
+    perm_list = sorted(list(perms_set), key=lambda p: (0 if p == identity_perm else 1, p))
+    perm_tensor = torch.tensor(perm_list, dtype=torch.long, device=device)  # [P, K]
+
+    # Vectorized accumulation of H_sigma = sum_k C[k, sigma[k]]
+    # cov_blocks: [K, K, 3, 3] -> indexed by [k, perm_tensor[:, k]]
+    h_matrices = torch.zeros((len(perm_list), 3, 3), device=device, dtype=dtype)
+    for k in range(k_count):
+        target_indices = perm_tensor[:, k]  # [P]
+        h_matrices = h_matrices + cov_blocks[k, target_indices]
+
+    # Batched SVD over all candidate permutations
+    u, s, vh = torch.linalg.svd(h_matrices)  # u: [P, 3, 3], s: [P, 3], vh: [P, 3, 3]
+    det = torch.det(u @ vh)
+    d = torch.sign(det)
+    score = s[..., 0] + s[..., 1] + d * s[..., 2]  # [P]
+
+    mse = (norm_r + norm_i - 2.0 * score) / m_atoms
+    mse = torch.clamp(mse, min=0.0)
+    rmsds = torch.sqrt(mse)
+
+    best_idx = int(torch.argmin(rmsds).item())
+    best_rmsd = float(rmsds[best_idx].item())
+    best_perm = perm_list[best_idx]
+
+    matched_pairs = [(unique_r[k], unique_i[best_perm[k]]) for k in range(k_count)]
+    return best_rmsd, matched_pairs
+
