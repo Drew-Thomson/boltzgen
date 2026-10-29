@@ -393,6 +393,35 @@ def add_configure_arguments(
         help="Fixed noise scale to use (e.g. 0.98). Default is to use a schedule",
         default=None,
     )
+    p.add_argument(
+        "--save_traj",
+        action="store_true",
+        help="Save diffusion coordinate trajectories (coords_traj) during design.",
+    )
+    p.add_argument(
+        "--save_x0_traj",
+        action="store_true",
+        help="Save denoised coordinate trajectories (x0_coords_traj) during design.",
+    )
+    p.add_argument(
+        "--traj_stride",
+        type=int,
+        default=1,
+        help="Stride for subsampling trajectory frames saved to disk (default: 1).",
+    )
+    p.add_argument(
+        "--traj_align",
+        type=str,
+        default=None,
+        choices=["prev", "none"],
+        help="Alignment mode for saved trajectories ('prev' or 'none', default: 'prev').",
+    )
+    p.add_argument(
+        "--save_traj_npz",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether to save diffusion trajectories in compressed .npz format (default: True).",
+    )
 
     # Inverse folding configuration options
     p = parser.add_argument_group("inverse folding")
@@ -1249,6 +1278,18 @@ class BinderDesignPipeline:
             )
         else:
             # Designs from diffusion model
+            design_traj_args = []
+            if getattr(args, "save_traj", False):
+                design_traj_args.append("writer.save_traj=True")
+            if getattr(args, "save_x0_traj", False):
+                design_traj_args.append("writer.save_x0_traj=True")
+            if getattr(args, "traj_stride", 1) != 1:
+                design_traj_args.append(f"writer.traj_stride={args.traj_stride}")
+            if getattr(args, "traj_align", None) is not None:
+                design_traj_args.append(f"writer.traj_align={args.traj_align}")
+            if not getattr(args, "save_traj_npz", True):
+                design_traj_args.append("writer.save_traj_npz=False")
+
             self.steps.append(
                 PipelineStep(
                     name="design",
@@ -1265,6 +1306,7 @@ class BinderDesignPipeline:
                         f"data.cfg.moldir={moldir}",
                     ]
                     + design_step_and_noise_scale_args
+                    + design_traj_args
                     + checkpoint_args
                     + config_args_by_step["design"],
                 )

@@ -166,6 +166,9 @@ class DesignWriter(BasePredictionWriter):
         res_atoms_only: bool,
         save_traj: bool = False,
         save_x0_traj: bool = False,
+        traj_stride: int = 1,
+        traj_align: str = "prev",
+        save_traj_npz: bool = True,
         atom14: bool = True,
         atom37: bool = False,
         backbone_only: bool = False,
@@ -180,6 +183,32 @@ class DesignWriter(BasePredictionWriter):
         ----------
         output_dir : str
             The directory to save the predictions.
+        res_atoms_only : bool
+            Whether to keep only residue atoms.
+        save_traj : bool, default False
+            Whether to save diffusion coordinate trajectories.
+        save_x0_traj : bool, default False
+            Whether to save denoised x0 coordinate trajectories.
+        traj_stride : int, default 1
+            Stride for subsampling trajectory frames saved to disk.
+        traj_align : str, default "prev"
+            Trajectory alignment mode ("prev" or "none").
+        save_traj_npz : bool, default True
+            Whether to export trajectory point clouds to compressed .npz format.
+        atom14 : bool, default True
+            Whether coordinates use atom14 representation.
+        atom37 : bool, default False
+            Whether coordinates use atom37 representation.
+        backbone_only : bool, default False
+            Whether coordinates are backbone-only.
+        inverse_fold : bool, default False
+            Whether writer is running for inverse folding.
+        file_suffix : str, default ""
+            Suffix for output filenames.
+        write_native : bool, default True
+            Whether to write native CIF file.
+        design : bool, default True
+            Whether running in design mode.
 
         """
         super().__init__(write_interval="batch")
@@ -187,6 +216,9 @@ class DesignWriter(BasePredictionWriter):
         self.mol_dir.mkdir(parents=True, exist_ok=True)
         self.save_traj = save_traj
         self.save_x0_traj = save_x0_traj
+        self.traj_stride = traj_stride
+        self.traj_align = traj_align
+        self.save_traj_npz = save_traj_npz
         self.res_atoms_only = res_atoms_only
         self.file_suffix = file_suffix
         self.failed = 0
@@ -413,22 +445,35 @@ class DesignWriter(BasePredictionWriter):
                 np.savez_compressed(metadata_path, **metadata_dict)
 
                 # Write trajectories
-                if self.save_traj:
+                if (
+                    self.save_traj
+                    and "coords_traj" in prediction
+                    and prediction["coords_traj"] is not None
+                ):
                     trajs = torch.stack(prediction["coords_traj"], dim=1)
                     traj = trajs[n]
-                    aligned = [traj[0]]
-                    for frame in traj[1:]:
-                        with torch.autocast("cuda", enabled=False):
-                            aligned.append(
-                                weighted_rigid_align(
-                                    frame.float().unsqueeze(0),
-                                    aligned[-1].float().unsqueeze(0),
-                                    sample["atom_pad_mask"].float().unsqueeze(0),
-                                    sample["atom_pad_mask"].float().unsqueeze(0),
+                    stride = max(1, getattr(self, "traj_stride", 1))
+                    indices = list(range(0, len(traj), stride))
+                    if (len(traj) - 1) not in indices:
+                        indices.append(len(traj) - 1)
+                    traj = traj[indices]
+
+                    if getattr(self, "traj_align", "prev") != "none":
+                        aligned = [traj[0]]
+                        for frame in traj[1:]:
+                            with torch.autocast("cuda", enabled=False):
+                                aligned.append(
+                                    weighted_rigid_align(
+                                        frame.float().unsqueeze(0),
+                                        aligned[-1].float().unsqueeze(0),
+                                        sample["atom_pad_mask"].float().unsqueeze(0),
+                                        sample["atom_pad_mask"].float().unsqueeze(0),
+                                    )
+                                    .to(frame)
+                                    .squeeze()
                                 )
-                                .to(frame)
-                                .squeeze()
-                            )
+                    else:
+                        aligned = list(traj)
 
                     pdbs = []
                     all_coords = []
@@ -456,27 +501,40 @@ class DesignWriter(BasePredictionWriter):
                         )
                         atom_idx += len(str_frame.coords)
 
-                    open(self.outdir / f"{file_name}_traj.pdb", "w").write(
+                    (self.outdir / f"{file_name}_traj.pdb").write_text(
                         self.combine_pdb_models(pdbs)
                     )
 
                 # Write x0 trajectories
-                if self.save_x0_traj:
+                if (
+                    self.save_x0_traj
+                    and "x0_coords_traj" in prediction
+                    and prediction["x0_coords_traj"] is not None
+                ):
                     trajs = torch.stack(prediction["x0_coords_traj"], dim=1)
                     traj = trajs[n]
-                    aligned = [traj[0]]
-                    for frame in traj[1:]:
-                        with torch.autocast("cuda", enabled=False):
-                            aligned.append(
-                                weighted_rigid_align(
-                                    frame.float().unsqueeze(0),
-                                    aligned[-1].float().unsqueeze(0),
-                                    sample["atom_pad_mask"].float().unsqueeze(0),
-                                    sample["atom_pad_mask"].float().unsqueeze(0),
+                    stride = max(1, getattr(self, "traj_stride", 1))
+                    indices = list(range(0, len(traj), stride))
+                    if (len(traj) - 1) not in indices:
+                        indices.append(len(traj) - 1)
+                    traj = traj[indices]
+
+                    if getattr(self, "traj_align", "prev") != "none":
+                        aligned = [traj[0]]
+                        for frame in traj[1:]:
+                            with torch.autocast("cuda", enabled=False):
+                                aligned.append(
+                                    weighted_rigid_align(
+                                        frame.float().unsqueeze(0),
+                                        aligned[-1].float().unsqueeze(0),
+                                        sample["atom_pad_mask"].float().unsqueeze(0),
+                                        sample["atom_pad_mask"].float().unsqueeze(0),
+                                    )
+                                    .to(frame)
+                                    .squeeze()
                                 )
-                                .to(frame)
-                                .squeeze()
-                            )
+                    else:
+                        aligned = list(traj)
 
                     pdbs = []
                     all_coords = []
@@ -504,9 +562,72 @@ class DesignWriter(BasePredictionWriter):
                         )
                         atom_idx += len(str_frame.coords)
 
-                    open(self.outdir / f"{file_name}_x0_traj.pdb", "w").write(
+                    (self.outdir / f"{file_name}_x0_traj.pdb").write_text(
                         self.combine_pdb_models(pdbs)
                     )
+
+                # Write trajectory point clouds (.npz)
+                if (self.save_traj or self.save_x0_traj) and getattr(
+                    self, "save_traj_npz", True
+                ):
+                    has_x = (
+                        "coords_traj" in prediction
+                        and prediction["coords_traj"] is not None
+                    )
+                    traj_x = (
+                        torch.stack(prediction["coords_traj"], dim=1)[n]
+                        if has_x
+                        else None
+                    )
+                    has_x0 = (
+                        "x0_coords_traj" in prediction
+                        and prediction["x0_coords_traj"] is not None
+                    )
+                    traj_x0 = (
+                        torch.stack(prediction["x0_coords_traj"], dim=1)[n]
+                        if has_x0
+                        else None
+                    )
+
+                    if traj_x is not None or traj_x0 is not None:
+                        stride = max(1, getattr(self, "traj_stride", 1))
+
+                        design_vec = batch["design_mask"][0].unsqueeze(-1).float()
+                        atom_design_mask = (
+                            sample["atom_to_token"].float() @ design_vec
+                        ).squeeze().bool()
+
+                        token_indices = sample["atom_to_token"].long().argmax(dim=-1)
+                        atom_asym_id = sample["asym_id"][token_indices]
+
+                        npz_dict = {
+                            "is_target": (~atom_design_mask).cpu().numpy(),
+                            "asym_id": atom_asym_id.cpu().numpy(),
+                            "atom_pad_mask": sample["atom_pad_mask"].cpu().numpy(),
+                        }
+
+                        if traj_x is not None:
+                            n_steps_x = traj_x.shape[0]
+                            indices_x = list(range(0, n_steps_x, stride))
+                            if (n_steps_x - 1) not in indices_x:
+                                indices_x.append(n_steps_x - 1)
+                            npz_dict["coords"] = traj_x[indices_x].cpu().numpy()
+                            npz_dict["step_indices"] = np.array(indices_x)
+
+                        if traj_x0 is not None:
+                            n_steps_x0 = traj_x0.shape[0]
+                            indices_x0 = list(range(0, n_steps_x0, stride))
+                            if (n_steps_x0 - 1) not in indices_x0:
+                                indices_x0.append(n_steps_x0 - 1)
+                            npz_dict["x0_coords"] = traj_x0[indices_x0].cpu().numpy()
+                            if "step_indices" not in npz_dict:
+                                npz_dict["step_indices"] = np.array(indices_x0)
+                            npz_dict["x0_step_indices"] = np.array(indices_x0)
+
+                        np.savez_compressed(
+                            self.outdir / f"{file_name}_diffusion_traj.npz",
+                            **npz_dict,
+                        )
 
             except Exception as e:  # noqa: BLE001
                 import traceback

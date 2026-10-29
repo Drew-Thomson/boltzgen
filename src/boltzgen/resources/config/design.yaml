@@ -33,6 +33,11 @@ writer:
   atom37: ${data.cfg.atom37}
   backbone_only: ${data.cfg.backbone_only}
   write_native: false
+  save_traj: false
+  save_x0_traj: false
+  traj_stride: 1
+  traj_align: "prev"
+  save_traj_npz: true
 
 trainer:
   accelerator: gpu

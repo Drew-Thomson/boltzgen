@@ -1,0 +1,21 @@
+copies: 8
+topology: helical
+target_radius: 8
+target_angle: 30.0
+target_dz: 8.0
+antiparallel_prob: 0.0
+num_designs: 10
+spacing_noise: 1
+inverse_temp: 2
+steps:
+  - design
+run: true
+save_traj: true
+save_x0_traj: true
+traj_stride: 25
+traj_align: none
+asym_unit:
+  - type: protein
+    name: helical_peptide
+    length: 20
+    secondary_structure: H

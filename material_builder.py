@@ -90,7 +90,36 @@ def calculate_bsa(structure_file):
 
 def main():
     parser = argparse.ArgumentParser(description="Build peptide materials using BoltzGen")
-    parser.add_argument("--config", type=str, default=None, help="YAML configuration file for the material")
+    parser.add_argument(
+        "--config",
+        nargs="+",
+        action="append",
+        default=None,
+        help="YAML configuration file for the material, or pipeline step overrides in format '<step_name> <arg1>=<value1> ...'",
+    )
+    parser.add_argument(
+        "--save_traj",
+        action="store_true",
+        help="Save diffusion coordinate trajectories (coords_traj) during design",
+    )
+    parser.add_argument(
+        "--save_x0_traj",
+        action="store_true",
+        help="Save denoised coordinate trajectories (x0_coords_traj) during design",
+    )
+    parser.add_argument(
+        "--traj_stride",
+        type=int,
+        default=None,
+        help="Stride for subsampling trajectory frames saved to disk",
+    )
+    parser.add_argument(
+        "--traj_align",
+        type=str,
+        default=None,
+        choices=["prev", "none"],
+        help="Alignment mode for saved trajectories ('prev' or 'none')",
+    )
     parser.add_argument("--copies", type=int, default=4, help="Number of identical peptide chains")
     parser.add_argument("--length", type=int, default=15, help="Length of the peptide")
     parser.add_argument("--output_dir", type=str, default="material_out", help="Directory for BoltzGen outputs")
@@ -324,25 +353,35 @@ def main():
     args = parser.parse_args()
     
     config = {}
+    step_config_overrides = []
     if args.config:
-        with open(args.config, 'r') as f:
-            config = yaml.safe_load(f)
-            
-        action_map = {action.dest: action for action in parser._actions}
-        for k, v in config.items():
-            norm_k = k.replace("-", "_")
-            if norm_k in {"exclude_aa", "exclude_residues"}:
-                setattr(args, "avoid_aa", v)
-            elif hasattr(args, norm_k) and norm_k != "asym_unit":
-                action = action_map.get(norm_k)
-                if norm_k == "steps" and isinstance(v, str):
-                    v = [v]
-                elif action and action.type is not None and v is not None:
-                    try:
-                        v = action.type(v)
-                    except (ValueError, TypeError) as e:
-                        parser.error(f"Invalid value for config option '{k}': {e}")
-                setattr(args, norm_k, v)
+        for cfg_item in args.config:
+            if len(cfg_item) == 1 and (
+                cfg_item[0].endswith(".yaml")
+                or cfg_item[0].endswith(".yml")
+                or Path(cfg_item[0]).is_file()
+            ):
+                with open(cfg_item[0], "r") as f:
+                    config = yaml.safe_load(f)
+            else:
+                step_config_overrides.append(cfg_item)
+
+        if config:
+            action_map = {action.dest: action for action in parser._actions}
+            for k, v in config.items():
+                norm_k = k.replace("-", "_")
+                if norm_k in {"exclude_aa", "exclude_residues"}:
+                    setattr(args, "avoid_aa", v)
+                elif hasattr(args, norm_k) and norm_k != "asym_unit":
+                    action = action_map.get(norm_k)
+                    if norm_k == "steps" and isinstance(v, str):
+                        v = [v]
+                    elif action and action.type is not None and v is not None:
+                        try:
+                            v = action.type(v)
+                        except (ValueError, TypeError) as e:
+                            parser.error(f"Invalid value for config option '{k}': {e}")
+                    setattr(args, norm_k, v)
 
     if "asym_unit" in config:
         asym_unit_def = config["asym_unit"]
@@ -668,6 +707,18 @@ def main():
             cmd.extend(["--inverse_fold_avoid", args.avoid_aa])
         if args.aa_bias:
             cmd.append(f"override.inverse_fold_args.aa_bias={args.aa_bias}")
+        if getattr(args, "save_traj", False):
+            cmd.append("--save_traj")
+        if getattr(args, "save_x0_traj", False):
+            cmd.append("--save_x0_traj")
+        if getattr(args, "traj_stride", None) is not None:
+            cmd.extend(["--traj_stride", str(args.traj_stride)])
+        if getattr(args, "traj_align", None) is not None:
+            cmd.extend(["--traj_align", str(args.traj_align)])
+
+        for override in step_config_overrides:
+            cmd.extend(["--config"] + override)
+
         if getattr(args, "steps", None):
             steps_list = [args.steps] if isinstance(args.steps, str) else list(args.steps)
             cmd.extend(["--steps"] + steps_list)
