@@ -23,6 +23,10 @@ if TYPE_CHECKING:
     from mpl_toolkits.mplot3d import Axes3D
 
 EPSILON = 1e-8
+ATOM14_NUM_ATOMS = 14
+BACKBONE_ATOMS_PER_RES = 4
+CA_ATOM_OFFSET = 1
+TAB10_MAX_COLORS = 10
 
 
 def kabsch_rigid_align(
@@ -323,6 +327,8 @@ def prepare_binder_trajectory(
     *,
     num_timepoints: int = 5,
     frame_indices: Optional[List[int]] = None,
+    mainchain_only: bool = False,
+    ca_only: bool = False,
     align_target: bool = True,
 ) -> Tuple[List[np.ndarray], List[float], np.ndarray, np.ndarray]:
     r"""Extract and align key timepoints for traditional binder design.
@@ -336,6 +342,10 @@ def prepare_binder_trajectory(
     frame_indices : List[int], optional
         Explicit frame indices to extract. If None, auto-selects frames
         spanning the structural coalescence phase.
+    mainchain_only : bool, default False
+        Whether to render only main-chain backbone atoms (N, CA, C, O).
+    ca_only : bool, default False
+        Whether to render only alpha-carbon (CA) atoms.
     align_target : bool, default True
         Whether to rigidly align target atoms across all timepoints to the
         final denoised frame.
@@ -353,7 +363,16 @@ def prepare_binder_trajectory(
         Chain ID for valid atoms, shape `(N_valid,)`.
     """
     coords = traj_data["coords"]
-    valid_mask = traj_data["atom_pad_mask"]
+    valid_mask = traj_data["atom_pad_mask"].copy()
+    if mainchain_only or ca_only:
+        atom_indices = np.arange(len(valid_mask))
+        mc_filter = (
+            (atom_indices % ATOM14_NUM_ATOMS == CA_ATOM_OFFSET)
+            if ca_only
+            else (atom_indices % ATOM14_NUM_ATOMS < BACKBONE_ATOMS_PER_RES)
+        )
+        valid_mask = valid_mask & mc_filter
+
     is_target_valid = traj_data["is_target"][valid_mask]
     asym_id_valid = traj_data["asym_id"][valid_mask]
 
@@ -391,6 +410,8 @@ def prepare_helical_trajectory(
     *,
     num_timepoints: int = 5,
     frame_indices: Optional[List[int]] = None,
+    mainchain_only: bool = False,
+    ca_only: bool = False,
     align_to_axis: bool = True,
 ) -> Tuple[List[np.ndarray], List[float], np.ndarray, np.ndarray]:
     r"""Extract and align key timepoints for symmetry-driven helical design.
@@ -404,6 +425,10 @@ def prepare_helical_trajectory(
     frame_indices : List[int], optional
         Explicit frame indices to extract. If None, auto-selects frames
         spanning the structural coalescence phase.
+    mainchain_only : bool, default False
+        Whether to render only main-chain backbone atoms (N, CA, C, O).
+    ca_only : bool, default False
+        Whether to render only alpha-carbon (CA) atoms.
     align_to_axis : bool, default True
         Whether to align the principal helical axis along the vertical Z-axis
         and align all frames to the final structure.
@@ -422,7 +447,16 @@ def prepare_helical_trajectory(
         Original chain ID for valid atoms, shape `(N_valid,)`.
     """
     coords = traj_data["coords"]
-    valid_mask = traj_data["atom_pad_mask"]
+    valid_mask = traj_data["atom_pad_mask"].copy()
+    if mainchain_only or ca_only:
+        atom_indices = np.arange(len(valid_mask))
+        mc_filter = (
+            (atom_indices % ATOM14_NUM_ATOMS == CA_ATOM_OFFSET)
+            if ca_only
+            else (atom_indices % ATOM14_NUM_ATOMS < BACKBONE_ATOMS_PER_RES)
+        )
+        valid_mask = valid_mask & mc_filter
+
     asym_id_valid = traj_data["asym_id"][valid_mask]
 
     if frame_indices is not None:
@@ -512,6 +546,8 @@ def _plot_binder_row(
     total_rows: int,
     num_timepoints: int,
     frame_indices: Optional[List[int]] = None,
+    mainchain_only: bool = False,
+    ca_only: bool = False,
     elev: float,
     azim: float,
     target_color: str,
@@ -525,6 +561,8 @@ def _plot_binder_row(
         binder_traj,
         num_timepoints=num_timepoints,
         frame_indices=frame_indices,
+        mainchain_only=mainchain_only,
+        ca_only=ca_only,
         align_target=True,
     )
 
@@ -561,6 +599,8 @@ def _plot_binder_row(
             )
 
         if len(binder_pts) > 0:
+            edge_c = "black" if (mainchain_only or ca_only) else "none"
+            lw = 0.25 if (mainchain_only or ca_only) else 0.0
             ax.scatter(
                 binder_pts[:, 0],
                 binder_pts[:, 1],
@@ -568,8 +608,8 @@ def _plot_binder_row(
                 c=binder_color,
                 s=point_size_binder,
                 alpha=0.85,
-                edgecolors="black",
-                linewidths=0.3,
+                edgecolors=edge_c,
+                linewidths=lw,
                 label="Binder Subunit",
                 rasterized=True,
             )
@@ -610,6 +650,38 @@ def _plot_binder_row(
                 handle.set_sizes([30])
 
 
+def get_discrete_colormap(
+    cmap_name: str,
+    num_colors: int,
+) -> Tuple[colors.ListedColormap, colors.BoundaryNorm]:
+    """Create a discrete ListedColormap and BoundaryNorm for qualitative styling."""
+    effective_cmap_name = cmap_name
+    if effective_cmap_name == "tab10" and num_colors > TAB10_MAX_COLORS:
+        effective_cmap_name = "tab20"
+
+    base_cmap = colormaps[effective_cmap_name]
+    if hasattr(base_cmap, "colors") and len(base_cmap.colors) >= num_colors:
+        colors_list = [
+            base_cmap.colors[i % len(base_cmap.colors)]
+            for i in range(num_colors)
+        ]
+    elif hasattr(base_cmap, "resampled"):
+        resampled = base_cmap.resampled(num_colors)
+        colors_list = [resampled(i) for i in range(num_colors)]
+    else:
+        colors_list = [
+            base_cmap(i / max(1, num_colors - 1))
+            for i in range(num_colors)
+        ]
+
+    discrete_cmap = colors.ListedColormap(colors_list)
+    norm = colors.BoundaryNorm(
+        boundaries=np.arange(num_colors + 1) - 0.5,
+        ncolors=num_colors,
+    )
+    return discrete_cmap, norm
+
+
 def _plot_helical_row(
     fig: plt.Figure,
     helical_traj: Dict[str, np.ndarray],
@@ -618,6 +690,8 @@ def _plot_helical_row(
     total_rows: int,
     num_timepoints: int,
     frame_indices: Optional[List[int]] = None,
+    mainchain_only: bool = False,
+    ca_only: bool = False,
     elev: float,
     azim: float,
     cmap_name: str,
@@ -630,6 +704,8 @@ def _plot_helical_row(
         helical_traj,
         num_timepoints=num_timepoints,
         frame_indices=frame_indices,
+        mainchain_only=mainchain_only,
+        ca_only=ca_only,
         align_to_axis=True,
     )
 
@@ -640,8 +716,7 @@ def _plot_helical_row(
     h_span = max(float(np.max(h_max - h_min) * 0.70 * box_scale), 1.0)
 
     num_chains = len(np.unique(h_chains))
-    cmap = colormaps[cmap_name]
-    norm = colors.Normalize(vmin=0, vmax=max(1, num_chains - 1))
+    cmap, norm = get_discrete_colormap(cmap_name, num_chains)
     chain_colors = cmap(norm(h_chains))
 
     for col_idx in range(len(h_frames)):
@@ -654,14 +729,17 @@ def _plot_helical_row(
         ax.set_facecolor("white")
 
         frame_pts = h_frames[col_idx]
+        edge_c = "black" if (mainchain_only or ca_only) else "none"
+        lw = 0.25 if (mainchain_only or ca_only) else 0.0
         ax.scatter(
             frame_pts[:, 0],
             frame_pts[:, 1],
             frame_pts[:, 2],
             c=chain_colors,
             s=point_size,
-            alpha=0.80,
-            edgecolors="none",
+            alpha=0.85,
+            edgecolors=edge_c,
+            linewidths=lw,
             rasterized=True,
         )
 
@@ -691,15 +769,18 @@ def _plot_helical_row(
                 color="#1E293B",
             )
 
-    cbar_ax = fig.add_axes([0.92, 0.15, 0.015, 0.30])
+    cbar_height = 0.65 if total_rows == 1 else 0.30
+    cbar_bottom = 0.18 if total_rows == 1 else 0.15
+    cbar_ax = fig.add_axes([0.92, cbar_bottom, 0.015, cbar_height])
     sm = plt.cm.ScalarMappable(
         cmap=cmap,
-        norm=colors.Normalize(vmin=1, vmax=num_chains),
+        norm=norm,
     )
     sm.set_array([])
     cbar = fig.colorbar(sm, cax=cbar_ax, orientation="vertical")
     cbar.set_label("Subunit Index Along Screw Axis", fontsize=10, weight="bold")
-    cbar.set_ticks(np.linspace(1, num_chains, min(5, num_chains)).astype(int))
+    cbar.set_ticks(np.arange(num_chains))
+    cbar.set_ticklabels([str(i + 1) for i in range(num_chains)])
 
 
 def plot_point_cloud_comparison(
@@ -709,6 +790,8 @@ def plot_point_cloud_comparison(
     *,
     num_timepoints: int = 5,
     frame_indices: Optional[List[int]] = None,
+    mainchain_only: bool = False,
+    ca_only: bool = False,
     elev: float = 20.0,
     azim: float = 35.0,
     binder_elev: Optional[float] = None,
@@ -720,7 +803,7 @@ def plot_point_cloud_comparison(
     point_size_helical: float = 16.0,
     target_color: str = "#64748B",
     binder_color: str = "#FF6B6B",
-    helical_cmap_name: str = "viridis",
+    helical_cmap_name: str = "tab10",
     box_scale: float = 1.4,
     dpi: int = 300,
     figsize: Tuple[float, float] = (18.0, 7.5),
@@ -747,6 +830,8 @@ def plot_point_cloud_comparison(
             total_rows=n_rows,
             num_timepoints=num_timepoints,
             frame_indices=frame_indices,
+            mainchain_only=mainchain_only,
+            ca_only=ca_only,
             elev=b_elev,
             azim=b_azim,
             target_color=target_color,
@@ -767,6 +852,8 @@ def plot_point_cloud_comparison(
             total_rows=n_rows,
             num_timepoints=num_timepoints,
             frame_indices=frame_indices,
+            mainchain_only=mainchain_only,
+            ca_only=ca_only,
             elev=h_elev,
             azim=h_azim,
             cmap_name=helical_cmap_name,
@@ -824,6 +911,25 @@ def main() -> None:
         action="store_true",
         default=False,
         help="Plot denoised coordinates (x_0) instead of noisy point clouds (x_t)",
+    )
+    parser.add_argument(
+        "--mainchain_only",
+        "--backbone_only",
+        action="store_true",
+        dest="mainchain_only",
+        help="Render only main-chain backbone atoms (N, CA, C, O)",
+    )
+    parser.add_argument(
+        "--ca_only",
+        action="store_true",
+        help="Render only alpha-carbon (CA) atoms",
+    )
+    parser.add_argument(
+        "--helical_cmap",
+        type=str,
+        default="tab10",
+        dest="helical_cmap_name",
+        help="Colormap for helical subunits (e.g. 'tab10', 'tab20', 'Paired', 'Set1')",
     )
     parser.add_argument(
         "--box_scale",
@@ -923,6 +1029,8 @@ def main() -> None:
         output_path=args.output,
         num_timepoints=args.num_timepoints,
         frame_indices=args.frame_indices,
+        mainchain_only=args.mainchain_only,
+        ca_only=args.ca_only,
         elev=args.elev,
         azim=args.azim,
         binder_elev=args.binder_elev,
@@ -932,6 +1040,7 @@ def main() -> None:
         point_size_target=args.point_size_target,
         point_size_binder=args.point_size_binder,
         point_size_helical=args.point_size_helical,
+        helical_cmap_name=args.helical_cmap_name,
         box_scale=args.box_scale,
         dpi=args.dpi,
     )

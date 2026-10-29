@@ -287,3 +287,37 @@ def test_select_coalescence_frames() -> None:
     assert len(selected) == num_targets
     assert selected == sorted(selected)
     assert selected[-1] == num_frames - 1
+
+
+def test_plot_mainchain_and_discrete_colormap(tmp_path: Path) -> None:
+    """Verify figure generation with mainchain_only and discontinuous colormap."""
+    num_frames = 6
+    num_atoms = 28  # 2 residues * 14 atoms
+
+    rng = np.random.default_rng(44)
+    h_coords = rng.normal(size=(num_frames, num_atoms, 3))
+    h_is_target = np.zeros(num_atoms, dtype=bool)
+    h_asym = np.repeat([0, 1], 14)
+    h_mask = np.ones(num_atoms, dtype=bool)
+
+    helical_data = {
+        "coords": h_coords,
+        "is_target": h_is_target,
+        "asym_id": h_asym,
+        "atom_pad_mask": h_mask,
+        "step_indices": np.arange(num_frames),
+    }
+
+    out_file = tmp_path / "mainchain_discrete.png"
+    plot_point_cloud_comparison(
+        binder_traj=None,
+        helical_traj=helical_data,
+        output_path=out_file,
+        mainchain_only=True,
+        helical_cmap_name="tab10",
+        num_timepoints=5,
+        dpi=100,
+    )
+
+    assert out_file.exists()
+    assert out_file.stat().st_size > 0
