@@ -234,16 +234,52 @@ def load_trajectory_data(
     }
 
 
+def compute_diffusion_times(
+    step_indices: Optional[np.ndarray],
+    num_frames: int,
+) -> np.ndarray:
+    r"""Compute diffusion time parameter $t \in [1.0, 0.0]$ for trajectory frames.
+
+    Parameters
+    ----------
+    step_indices : np.ndarray, optional
+        1D array of diffusion step indices, shape `(T,)`.
+    num_frames : int
+        Total number of trajectory frames $T$.
+
+    Returns
+    -------
+    np.ndarray
+        Array of normalized diffusion time values in $[0.0, 1.0]$, shape `(T,)`.
+    """
+    if step_indices is not None and len(step_indices) > 0:
+        max_step = (
+            float(step_indices[-2])
+            if (len(step_indices) > 1 and step_indices[-1] > step_indices[-2])
+            else float(step_indices[-1])
+        )
+        if max_step <= 0.0:
+            max_step = 1.0
+        return np.clip(1.0 - (step_indices.astype(float) / max_step), 0.0, 1.0)
+    if num_frames <= 1:
+        return np.zeros(num_frames, dtype=float)
+    return np.linspace(1.0, 0.0, num_frames)
+
+
 def select_coalescence_frames(
     coords: np.ndarray,
     is_target: Optional[np.ndarray] = None,
+    step_indices: Optional[np.ndarray] = None,
+    *,
     num_timepoints: int = 5,
+    t_start: float = 0.9,
+    spacing_mode: str = "rmsd",
 ) -> List[int]:
-    """Select trajectory frames that capture structural coalescence.
+    r"""Select trajectory frames that capture structural coalescence.
 
     Computes RMSD of designed atoms relative to the converged final frame,
-    identifies the earliest frame where the dispersed point cloud enters the
-    observable volume, and selects logarithmically spaced coalescence frames.
+    identifies the earliest frame matching `t_start`, and selects intermediate
+    coalescence frames via geometric RMSD progression or linear time decay.
 
     Parameters
     ----------
@@ -251,8 +287,15 @@ def select_coalescence_frames(
         Trajectory coordinates, shape `(T, N, 3)`.
     is_target : np.ndarray, optional
         Boolean mask of fixed target atoms, shape `(N,)`.
+    step_indices : np.ndarray, optional
+        Array of diffusion step indices corresponding to frames, shape `(T,)`.
     num_timepoints : int, default 5
         Number of timepoints to select.
+    t_start : float, default 0.9
+        Initial diffusion time $t \in [0.0, 1.0]$ for the first frame.
+    spacing_mode : str, default "rmsd"
+        Spacing strategy: "rmsd" for geometric RMSD progression or
+        "linear_t" for linear time decay.
 
     Returns
     -------
@@ -263,6 +306,8 @@ def select_coalescence_frames(
     if total_frames <= num_timepoints:
         return list(range(total_frames))
 
+    t_arr = compute_diffusion_times(step_indices, total_frames)
+
     mask = (
         ~is_target
         if (is_target is not None and np.any(~is_target))
@@ -270,9 +315,6 @@ def select_coalescence_frames(
     )
     ref_coords = coords[-1][mask]
     c_ref = ref_coords - np.mean(ref_coords, axis=0, keepdims=True)
-
-    ref_span = float(np.max(np.ptp(ref_coords, axis=0)))
-    target_max_rmsd = max(ref_span * 0.90, 10.0)
 
     rmsds: List[float] = []
     for i in range(total_frames):
@@ -290,24 +332,36 @@ def select_coalescence_frames(
 
     rmsd_arr = np.array(rmsds)
 
-    valid_starts = np.where(rmsd_arr <= target_max_rmsd * 1.5)[0]
-    start_idx = int(valid_starts[0]) if len(valid_starts) > 0 else 0
+    start_idx = int(np.argmin(np.abs(t_arr - t_start)))
     end_idx = total_frames - 1
 
-    min_target = max(float(rmsd_arr[end_idx - 1]), 2.0)
-    target_levels = np.geomspace(
-        rmsd_arr[start_idx], min_target, num_timepoints - 1
-    )
-
-    chosen: List[int] = [start_idx]
-    last_idx = start_idx
-    for lvl in target_levels[1:]:
-        remaining = range(last_idx + 1, end_idx)
-        if not remaining:
-            break
-        best = min(remaining, key=lambda i: abs(rmsd_arr[i] - lvl))
-        chosen.append(best)
-        last_idx = best
+    if spacing_mode == "linear_t":
+        target_ts = np.linspace(t_arr[start_idx], 0.0, num_timepoints)
+        chosen: List[int] = [start_idx]
+        last_idx = start_idx
+        for target_t in target_ts[1:-1]:
+            remaining = range(last_idx + 1, end_idx)
+            if not remaining:
+                break
+            best = min(remaining, key=lambda i: abs(t_arr[i] - target_t))
+            chosen.append(best)
+            last_idx = best
+    else:
+        min_target = max(float(rmsd_arr[end_idx - 1]), 2.0)
+        target_levels = np.geomspace(
+            max(rmsd_arr[start_idx], min_target + 0.1),
+            min_target,
+            num_timepoints - 1,
+        )
+        chosen = [start_idx]
+        last_idx = start_idx
+        for lvl in target_levels[1:]:
+            remaining = range(last_idx + 1, end_idx)
+            if not remaining:
+                break
+            best = min(remaining, key=lambda i: abs(rmsd_arr[i] - lvl))
+            chosen.append(best)
+            last_idx = best
 
     chosen.append(end_idx)
     chosen = sorted(dict.fromkeys(chosen))
@@ -327,6 +381,8 @@ def prepare_binder_trajectory(
     *,
     num_timepoints: int = 5,
     frame_indices: Optional[List[int]] = None,
+    t_start: float = 0.9,
+    spacing_mode: str = "rmsd",
     mainchain_only: bool = False,
     ca_only: bool = False,
     align_target: bool = True,
@@ -342,6 +398,10 @@ def prepare_binder_trajectory(
     frame_indices : List[int], optional
         Explicit frame indices to extract. If None, auto-selects frames
         spanning the structural coalescence phase.
+    t_start : float, default 0.9
+        Initial diffusion time $t \in [0.0, 1.0]$ for the first frame.
+    spacing_mode : str, default "rmsd"
+        Frame spacing strategy: "rmsd" or "linear_t".
     mainchain_only : bool, default False
         Whether to render only main-chain backbone atoms (N, CA, C, O).
     ca_only : bool, default False
@@ -363,6 +423,10 @@ def prepare_binder_trajectory(
         Chain ID for valid atoms, shape `(N_valid,)`.
     """
     coords = traj_data["coords"]
+    step_indices = traj_data.get("step_indices")
+    total_frames = coords.shape[0]
+    all_t_vals = compute_diffusion_times(step_indices, total_frames)
+
     valid_mask = traj_data["atom_pad_mask"].copy()
     if mainchain_only or ca_only:
         atom_indices = np.arange(len(valid_mask))
@@ -382,10 +446,13 @@ def prepare_binder_trajectory(
         selected_indices = select_coalescence_frames(
             coords[:, valid_mask],
             is_target=is_target_valid,
+            step_indices=step_indices,
             num_timepoints=num_timepoints,
+            t_start=t_start,
+            spacing_mode=spacing_mode,
         )
 
-    t_vals = np.linspace(1.0, 0.0, len(selected_indices)).tolist()
+    t_vals = [float(all_t_vals[idx]) for idx in selected_indices]
     ref_frame_raw = coords[-1][valid_mask]
     target_mask = is_target_valid
 
@@ -410,6 +477,8 @@ def prepare_helical_trajectory(
     *,
     num_timepoints: int = 5,
     frame_indices: Optional[List[int]] = None,
+    t_start: float = 0.9,
+    spacing_mode: str = "rmsd",
     mainchain_only: bool = False,
     ca_only: bool = False,
     align_to_axis: bool = True,
@@ -425,6 +494,10 @@ def prepare_helical_trajectory(
     frame_indices : List[int], optional
         Explicit frame indices to extract. If None, auto-selects frames
         spanning the structural coalescence phase.
+    t_start : float, default 0.9
+        Initial diffusion time $t \in [0.0, 1.0]$ for the first frame.
+    spacing_mode : str, default "rmsd"
+        Frame spacing strategy: "rmsd" or "linear_t".
     mainchain_only : bool, default False
         Whether to render only main-chain backbone atoms (N, CA, C, O).
     ca_only : bool, default False
@@ -447,6 +520,10 @@ def prepare_helical_trajectory(
         Original chain ID for valid atoms, shape `(N_valid,)`.
     """
     coords = traj_data["coords"]
+    step_indices = traj_data.get("step_indices")
+    total_frames = coords.shape[0]
+    all_t_vals = compute_diffusion_times(step_indices, total_frames)
+
     valid_mask = traj_data["atom_pad_mask"].copy()
     if mainchain_only or ca_only:
         atom_indices = np.arange(len(valid_mask))
@@ -465,10 +542,13 @@ def prepare_helical_trajectory(
         selected_indices = select_coalescence_frames(
             coords[:, valid_mask],
             is_target=None,
+            step_indices=step_indices,
             num_timepoints=num_timepoints,
+            t_start=t_start,
+            spacing_mode=spacing_mode,
         )
 
-    t_vals = np.linspace(1.0, 0.0, len(selected_indices)).tolist()
+    t_vals = [float(all_t_vals[idx]) for idx in selected_indices]
     final_raw = coords[-1][valid_mask]
 
     if align_to_axis:
@@ -503,13 +583,6 @@ def prepare_helical_trajectory(
     )
 
     return aligned_frames, t_vals, chain_indices, asym_id_valid
-    sorted_chains = sorted(unique_chains, key=lambda cid: chain_mean_z[cid])
-    chain_to_order = {cid: idx for idx, cid in enumerate(sorted_chains)}
-    chain_indices = np.array(
-        [chain_to_order[cid] for cid in asym_id_valid], dtype=int
-    )
-
-    return aligned_frames, t_vals, chain_indices, asym_id_valid
 
 
 def _style_3d_axes(
@@ -518,13 +591,15 @@ def _style_3d_axes(
     span: float,
     elev: float,
     azim: float,
+    dist: float = 7.0,
 ) -> None:
-    """Apply uniform bounding box and clean styling to 3D axes."""
+    """Apply uniform bounding box, camera zoom, and clean styling to 3D axes."""
     ax.set_xlim(center[0] - span, center[0] + span)
     ax.set_ylim(center[1] - span, center[1] + span)
     ax.set_zlim(center[2] - span, center[2] + span)
     ax.set_box_aspect([1, 1, 1])
     ax.view_init(elev=elev, azim=azim)
+    ax.dist = dist
 
     ax.xaxis.pane.fill = False
     ax.yaxis.pane.fill = False
@@ -546,21 +621,27 @@ def _plot_binder_row(
     total_rows: int,
     num_timepoints: int,
     frame_indices: Optional[List[int]] = None,
+    t_start: float = 0.9,
+    spacing_mode: str = "rmsd",
     mainchain_only: bool = False,
     ca_only: bool = False,
     elev: float,
     azim: float,
+    dist: float = 7.0,
     target_color: str,
     binder_color: str,
     point_size_target: float,
     point_size_binder: float,
-    box_scale: float = 1.4,
+    box_scale: float = 1.0,
+    show_row_label: bool = True,
 ) -> None:
     """Plot traditional binder design point-cloud trajectory row."""
     b_frames, b_t_vals, b_is_target, _ = prepare_binder_trajectory(
         binder_traj,
         num_timepoints=num_timepoints,
         frame_indices=frame_indices,
+        t_start=t_start,
+        spacing_mode=spacing_mode,
         mainchain_only=mainchain_only,
         ca_only=ca_only,
         align_target=True,
@@ -570,7 +651,7 @@ def _plot_binder_row(
     b_min = np.min(ref_frame, axis=0)
     b_max = np.max(ref_frame, axis=0)
     b_center = (b_min + b_max) / 2.0
-    b_span = max(float(np.max(b_max - b_min) * 0.70 * box_scale), 1.0)
+    b_span = max(float(np.max(b_max - b_min) * 0.55 * box_scale), 1.0)
 
     for col_idx in range(len(b_frames)):
         ax = fig.add_subplot(
@@ -616,28 +697,29 @@ def _plot_binder_row(
 
         t_val = b_t_vals[col_idx]
         if col_idx == 0:
-            col_title = r"$t = 1.0$" + "\n(Dispersed Cloud)"
+            col_title = f"$t = {t_val:.2f}$" + "\n(Dispersed Cloud)"
         elif col_idx == len(b_frames) - 1:
-            col_title = r"$t = 0.0$" + "\n(Coalesced Binder)"
+            col_title = f"$t = {t_val:.2f}$" + "\n(Coalesced Binder)"
         else:
             col_title = f"$t = {t_val:.2f}$"
-        ax.set_title(col_title, fontsize=12, pad=10, weight="bold")
+        ax.set_title(col_title, fontsize=11, pad=4, weight="bold")
 
-        _style_3d_axes(ax, b_center, b_span, elev, azim)
+        _style_3d_axes(ax, b_center, b_span, elev, azim, dist=dist)
 
         if col_idx == 0:
-            ax.text2D(
-                -0.18,
-                0.5,
-                "Traditional Binder Design\n(Fixed Target Context)",
-                transform=ax.transAxes,
-                fontsize=12,
-                weight="bold",
-                va="center",
-                ha="center",
-                rotation=90,
-                color="#1E293B",
-            )
+            if show_row_label:
+                ax.text2D(
+                    -0.18,
+                    0.5,
+                    "Traditional Binder Design\n(Fixed Target Context)",
+                    transform=ax.transAxes,
+                    fontsize=11,
+                    weight="bold",
+                    va="center",
+                    ha="center",
+                    rotation=90,
+                    color="#1E293B",
+                )
             legend = ax.legend(
                 loc="upper left",
                 bbox_to_anchor=(-0.05, 1.05),
@@ -690,20 +772,27 @@ def _plot_helical_row(
     total_rows: int,
     num_timepoints: int,
     frame_indices: Optional[List[int]] = None,
+    t_start: float = 0.9,
+    spacing_mode: str = "rmsd",
     mainchain_only: bool = False,
     ca_only: bool = False,
     elev: float,
     azim: float,
+    dist: float = 7.0,
     cmap_name: str,
     point_size: float,
     show_titles: bool,
-    box_scale: float = 1.4,
+    box_scale: float = 1.0,
+    show_row_label: bool = True,
+    show_colorbar: bool = True,
 ) -> None:
     """Plot symmetry-driven helical design point-cloud trajectory row."""
     h_frames, h_t_vals, h_chains, _ = prepare_helical_trajectory(
         helical_traj,
         num_timepoints=num_timepoints,
         frame_indices=frame_indices,
+        t_start=t_start,
+        spacing_mode=spacing_mode,
         mainchain_only=mainchain_only,
         ca_only=ca_only,
         align_to_axis=True,
@@ -713,7 +802,7 @@ def _plot_helical_row(
     h_min = np.min(ref_frame, axis=0)
     h_max = np.max(ref_frame, axis=0)
     h_center = (h_min + h_max) / 2.0
-    h_span = max(float(np.max(h_max - h_min) * 0.70 * box_scale), 1.0)
+    h_span = max(float(np.max(h_max - h_min) * 0.55 * box_scale), 1.0)
 
     num_chains = len(np.unique(h_chains))
     cmap, norm = get_discrete_colormap(cmap_name, num_chains)
@@ -746,22 +835,22 @@ def _plot_helical_row(
         if show_titles:
             t_val = h_t_vals[col_idx]
             if col_idx == 0:
-                col_title = r"$t = 1.0$" + "\n(Dispersed Cloud)"
+                col_title = f"$t = {t_val:.2f}$" + "\n(Dispersed Cloud)"
             elif col_idx == len(h_frames) - 1:
-                col_title = r"$t = 0.0$" + "\n(Self-Assembled Helix)"
+                col_title = f"$t = {t_val:.2f}$" + "\n(Self-Assembled Helix)"
             else:
                 col_title = f"$t = {t_val:.2f}$"
-            ax.set_title(col_title, fontsize=12, pad=10, weight="bold")
+            ax.set_title(col_title, fontsize=11, pad=4, weight="bold")
 
-        _style_3d_axes(ax, h_center, h_span, elev, azim)
+        _style_3d_axes(ax, h_center, h_span, elev, azim, dist=dist)
 
-        if col_idx == 0:
+        if col_idx == 0 and show_row_label:
             ax.text2D(
                 -0.18,
                 0.5,
                 "Symmetry-Driven Helical Design\n(Self-Context Assembly)",
                 transform=ax.transAxes,
-                fontsize=12,
+                fontsize=11,
                 weight="bold",
                 va="center",
                 ha="center",
@@ -769,18 +858,19 @@ def _plot_helical_row(
                 color="#1E293B",
             )
 
-    cbar_height = 0.65 if total_rows == 1 else 0.30
-    cbar_bottom = 0.18 if total_rows == 1 else 0.15
-    cbar_ax = fig.add_axes([0.92, cbar_bottom, 0.015, cbar_height])
-    sm = plt.cm.ScalarMappable(
-        cmap=cmap,
-        norm=norm,
-    )
-    sm.set_array([])
-    cbar = fig.colorbar(sm, cax=cbar_ax, orientation="vertical")
-    cbar.set_label("Subunit Index Along Screw Axis", fontsize=10, weight="bold")
-    cbar.set_ticks(np.arange(num_chains))
-    cbar.set_ticklabels([str(i + 1) for i in range(num_chains)])
+    if show_colorbar:
+        cbar_height = 0.65 if total_rows == 1 else 0.32
+        cbar_bottom = 0.16 if total_rows == 1 else 0.12
+        cbar_ax = fig.add_axes([0.915, cbar_bottom, 0.012, cbar_height])
+        sm = plt.cm.ScalarMappable(
+            cmap=cmap,
+            norm=norm,
+        )
+        sm.set_array([])
+        cbar = fig.colorbar(sm, cax=cbar_ax, orientation="vertical")
+        cbar.set_label("Subunit Index Along Screw Axis", fontsize=9, weight="bold")
+        cbar.set_ticks(np.arange(num_chains))
+        cbar.set_ticklabels([str(i + 1) for i in range(num_chains)])
 
 
 def plot_point_cloud_comparison(
@@ -790,10 +880,13 @@ def plot_point_cloud_comparison(
     *,
     num_timepoints: int = 5,
     frame_indices: Optional[List[int]] = None,
+    t_start: float = 0.9,
+    spacing_mode: str = "rmsd",
     mainchain_only: bool = False,
     ca_only: bool = False,
     elev: float = 20.0,
     azim: float = 35.0,
+    camera_dist: float = 7.0,
     binder_elev: Optional[float] = None,
     binder_azim: Optional[float] = None,
     helical_elev: Optional[float] = None,
@@ -804,9 +897,11 @@ def plot_point_cloud_comparison(
     target_color: str = "#64748B",
     binder_color: str = "#FF6B6B",
     helical_cmap_name: str = "tab10",
-    box_scale: float = 1.4,
+    box_scale: float = 1.0,
+    show_row_labels: bool = True,
+    show_colorbar: bool = True,
     dpi: int = 300,
-    figsize: Tuple[float, float] = (18.0, 7.5),
+    figsize: Optional[Tuple[float, float]] = None,
 ) -> None:
     """Render comparison figure of diffusion point-cloud trajectories."""
     has_binder = binder_traj is not None
@@ -817,7 +912,14 @@ def plot_point_cloud_comparison(
         msg = "At least one of binder_traj or helical_traj must be provided."
         raise ValueError(msg)
 
-    fig = plt.figure(figsize=figsize, dpi=dpi, facecolor="white")
+    if figsize is None:
+        width = 3.0 * num_timepoints + (0.8 if show_colorbar else 0.2)
+        height = 3.6 if n_rows == 1 else 6.8
+        eff_figsize = (width, height)
+    else:
+        eff_figsize = figsize
+
+    fig = plt.figure(figsize=eff_figsize, dpi=dpi, facecolor="white")
     current_row = 0
 
     if has_binder and binder_traj is not None:
@@ -830,15 +932,19 @@ def plot_point_cloud_comparison(
             total_rows=n_rows,
             num_timepoints=num_timepoints,
             frame_indices=frame_indices,
+            t_start=t_start,
+            spacing_mode=spacing_mode,
             mainchain_only=mainchain_only,
             ca_only=ca_only,
             elev=b_elev,
             azim=b_azim,
+            dist=camera_dist,
             target_color=target_color,
             binder_color=binder_color,
             point_size_target=point_size_target,
             point_size_binder=point_size_binder,
             box_scale=box_scale,
+            show_row_label=show_row_labels,
         )
         current_row += 1
 
@@ -852,24 +958,31 @@ def plot_point_cloud_comparison(
             total_rows=n_rows,
             num_timepoints=num_timepoints,
             frame_indices=frame_indices,
+            t_start=t_start,
+            spacing_mode=spacing_mode,
             mainchain_only=mainchain_only,
             ca_only=ca_only,
             elev=h_elev,
             azim=h_azim,
+            dist=camera_dist,
             cmap_name=helical_cmap_name,
             point_size=point_size_helical,
             show_titles=(not has_binder),
             box_scale=box_scale,
+            show_row_label=show_row_labels,
+            show_colorbar=show_colorbar,
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    left_margin = 0.06 if show_row_labels else 0.02
+    right_margin = 0.90 if show_colorbar else 0.98
     plt.subplots_adjust(
-        left=0.08,
-        right=0.90,
-        top=0.90,
-        bottom=0.08,
-        wspace=0.05,
-        hspace=0.15,
+        left=left_margin,
+        right=right_margin,
+        top=0.88,
+        bottom=0.06,
+        wspace=0.02,
+        hspace=0.12,
     )
     plt.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
@@ -907,6 +1020,45 @@ def main() -> None:
         help="Explicit trajectory frame indices (e.g. --frame_indices 4 6 7 12 21)",
     )
     parser.add_argument(
+        "--t_start",
+        type=float,
+        default=0.9,
+        help="Initial diffusion time parameter in [0.0, 1.0] for the first frame (default: 0.9)",
+    )
+    parser.add_argument(
+        "--spacing_mode",
+        type=str,
+        choices=["rmsd", "linear_t"],
+        default="rmsd",
+        help="Intermediate frame selection strategy: 'rmsd' (geometric progression) or 'linear_t'",
+    )
+    parser.add_argument(
+        "--camera_dist",
+        type=float,
+        default=7.0,
+        help="3D camera distance zoom factor (smaller = zoomed in, default: 7.0)",
+    )
+    parser.add_argument(
+        "--figsize",
+        type=float,
+        nargs=2,
+        default=None,
+        metavar=("WIDTH", "HEIGHT"),
+        help="Explicit figure size in inches (default: dynamically computed from row/column count)",
+    )
+    parser.add_argument(
+        "--hide_row_labels",
+        action="store_true",
+        default=False,
+        help="Hide vertical row description labels on the left margin",
+    )
+    parser.add_argument(
+        "--no_colorbar",
+        action="store_true",
+        default=False,
+        help="Suppress colorbar for helical subunit chains",
+    )
+    parser.add_argument(
         "--use_x0",
         action="store_true",
         default=False,
@@ -934,8 +1086,8 @@ def main() -> None:
     parser.add_argument(
         "--box_scale",
         type=float,
-        default=1.4,
-        help="Viewport scaling multiplier relative to the final assembled structure",
+        default=1.0,
+        help="Viewport scaling multiplier relative to the final assembled structure (default: 1.0)",
     )
     parser.add_argument(
         "--num_timepoints",
@@ -1023,16 +1175,21 @@ def main() -> None:
         print(f"Loading helical trajectory: {helical_file}")
         helical_traj = load_trajectory_data(helical_file, use_x0=use_x0)
 
+    custom_figsize = tuple(args.figsize) if args.figsize is not None else None
+
     plot_point_cloud_comparison(
         binder_traj=binder_traj,
         helical_traj=helical_traj,
         output_path=args.output,
         num_timepoints=args.num_timepoints,
         frame_indices=args.frame_indices,
+        t_start=args.t_start,
+        spacing_mode=args.spacing_mode,
         mainchain_only=args.mainchain_only,
         ca_only=args.ca_only,
         elev=args.elev,
         azim=args.azim,
+        camera_dist=args.camera_dist,
         binder_elev=args.binder_elev,
         binder_azim=args.binder_azim,
         helical_elev=args.helical_elev,
@@ -1042,7 +1199,10 @@ def main() -> None:
         point_size_helical=args.point_size_helical,
         helical_cmap_name=args.helical_cmap_name,
         box_scale=args.box_scale,
+        show_row_labels=(not args.hide_row_labels),
+        show_colorbar=(not args.no_colorbar),
         dpi=args.dpi,
+        figsize=custom_figsize,
     )
 
 
