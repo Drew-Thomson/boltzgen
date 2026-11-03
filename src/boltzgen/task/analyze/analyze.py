@@ -1152,6 +1152,13 @@ class Analyze(Task):
                 from boltzgen.task.analyze.analyze_utils import compute_ligand_metrics
                 ligand_metrics = compute_ligand_metrics(cif_path_refolded)
                 metrics.update(ligand_metrics)
+                # Coordination sphere + fitted-axis ring symmetry (cyclic assemblies only)
+                if os.environ.get("MAT_TOPOLOGY", "cyclic") == "cyclic":
+                    from boltzgen.task.analyze.analyze_utils import (
+                        compute_ligand_symmetry_metrics,
+                    )
+
+                    metrics.update(compute_ligand_symmetry_metrics(cif_path_refolded))
 
             # noncovalents metrics for refolded structure
             if self.noncovalents_refolded:

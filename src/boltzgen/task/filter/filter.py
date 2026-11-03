@@ -224,6 +224,7 @@ class Filter(Task):
             }
 
         # override metrics
+        self._metrics_override_given = metrics_override is not None
         if not metrics_override is None:
             for k in metrics_override:
                 if metrics_override[k] is None:
@@ -312,6 +313,54 @@ class Filter(Task):
         self.top_dir.mkdir(parents=True, exist_ok=True)
         self.div_dir.mkdir(parents=True, exist_ok=True)
 
+    def _apply_cyclic_ligand_symmetry_preset(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Auto-apply the cyclic metal-ligand preset when its metrics are present.
+
+        Active when analysis emitted fitted-axis symmetry/coordination columns
+        and the user gave no ``metrics_override``. Ranking is switched to
+        symmetry + coordination, template RMSD filters are relaxed, and hard
+        coordination/symmetry filters are added. Missing values are set to the
+        worst observed value so they rank last.
+        """
+        from boltzgen.task.filter.material_presets import (
+            CYCLIC_LIGAND_SYMMETRY_COLUMNS,
+            CYCLIC_LIGAND_SYMMETRY_RMSD_THRESHOLD,
+            cyclic_ligand_symmetry_filtering_overrides,
+            cyclic_ligand_symmetry_filters,
+        )
+
+        self.cyclic_ligand_preset = False
+        if getattr(self, "_metrics_override_given", False):
+            return df
+        if not all(c in df.columns and df[c].notna().any() for c in CYCLIC_LIGAND_SYMMETRY_COLUMNS):
+            return df
+
+        self.cyclic_ligand_preset = True
+        print("Cyclic metal-ligand assembly detected: ranking by symmetry and coordination sphere.")
+        for key, weight in cyclic_ligand_symmetry_filtering_overrides().items():
+            if weight is None:
+                self.metrics.pop(key, None)
+            else:
+                self.metrics[key] = weight
+
+        for flt in self.filters:
+            if flt["feature"] in ("local_rmsd", "global_rmsd", "designfolding_rmsd"):
+                flt["threshold"] = CYCLIC_LIGAND_SYMMETRY_RMSD_THRESHOLD
+        present = {f["feature"] for f in self.filters}
+        for flt in cyclic_ligand_symmetry_filters():
+            if flt["feature"] in df.columns and flt["feature"] not in present:
+                self.filters.append(flt)
+
+        lower_better = {"sym_chain_rmsd", "sym_ligand_rmsd", "ligand_coord_bond_dev"}
+        for col in set(self.metrics) | {f["feature"] for f in self.filters}:
+            if col in df.columns and col.startswith(("neg_sym", "neg_ligand", "sym_", "ligand_")):
+                df[col] = df[col].replace([np.inf, -np.inf], np.nan)
+                finite = df[col].dropna()
+                if len(finite):
+                    worst = float(finite.max() if col in lower_better else finite.min())
+                    df[col] = df[col].fillna(worst)
+        return df
+
     def load_dataframe(self):
         csv_files = sorted(self.design_dir.glob("aggregate_metrics_*.csv"))
         if not csv_files:
@@ -373,6 +422,8 @@ class Filter(Task):
 
         df["neg_local_rmsd"] = -df["local_rmsd"]
         df["neg_global_rmsd"] = -df["global_rmsd"]
+
+        df = self._apply_cyclic_ligand_symmetry_preset(df)
 
         if "designfolding-rmsd" in df:
             df["designfolding_rmsd"] = df["designfolding-rmsd"]

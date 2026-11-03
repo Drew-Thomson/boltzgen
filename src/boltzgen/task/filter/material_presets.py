@@ -90,6 +90,57 @@ def ligand_counter_screen_filtering_overrides() -> dict[str, Any]:
     }
 
 
+CYCLIC_LIGAND_SYMMETRY_COLUMNS: tuple[str, ...] = (
+    "neg_sym_chain_rmsd",
+    "neg_sym_ligand_rmsd",
+    "neg_ligand_coord_geom_dev",
+    "neg_ligand_coord_bond_dev",
+    "ligand_min_coord_number",
+)
+"""Analysis columns whose presence triggers the cyclic ligand-symmetry preset."""
+
+CYCLIC_LIGAND_SYMMETRY_RMSD_THRESHOLD: float = 15.0
+"""Relaxed template-RMSD hard-filter threshold (Å); symmetry/coordination dominate."""
+
+
+def cyclic_ligand_symmetry_filtering_overrides() -> dict[str, Any]:
+    """Return ranking weights for cyclic assemblies with metal ligands.
+
+    Weights are inverse importances (1 = primary). Fitted-axis symmetry and the
+    metal coordination sphere dominate; template RMSD metrics are disabled.
+    """
+    return {
+        "neg_sym_chain_rmsd": 1,
+        "neg_sym_ligand_rmsd": 1,
+        "neg_ligand_coord_geom_dev": 1,
+        "neg_ligand_coord_bond_dev": 1,
+        "ligand_min_coord_number": 1,
+        "neg_ligand_coord_geom_dev_std": 2,
+        "neg_ligand_coord_cn_std": 2,
+        "neg_num_ligand_clashes": 2,
+        "mean_ligand_plddt": 2,
+        "complex_plddt": 2,
+        "design_ptm": 3,
+        "neg_min_interaction_pae": 3,
+        "neg_local_rmsd": None,
+        "neg_global_rmsd": None,
+        "neg_lattice_rmsd_refolded": None,
+        "neg_min_design_to_target_pae": None,
+        "design_to_target_iptm": None,
+    }
+
+
+def cyclic_ligand_symmetry_filters() -> list[dict[str, Any]]:
+    """Hard filters (metal coordination and ring symmetry) for the cyclic ligand preset."""
+    return [
+        {"feature": "ligand_min_coord_number", "threshold": 3.0, "lower_is_better": False},
+        {"feature": "ligand_coord_bond_dev", "threshold": 0.5, "lower_is_better": True},
+        {"feature": "sym_ligand_rmsd", "threshold": 1.0, "lower_is_better": True},
+        {"feature": "sym_chain_rmsd", "threshold": 2.0, "lower_is_better": True},
+        {"feature": "sym_ligand_orbit_ok", "threshold": 1.0, "lower_is_better": False},
+    ]
+
+
 def format_ligand_counter_screen_metrics_override() -> str:
     """Format ligand counter-screen ranking overrides as a Hydra-compatible dictionary."""
     overrides = ligand_counter_screen_filtering_overrides()

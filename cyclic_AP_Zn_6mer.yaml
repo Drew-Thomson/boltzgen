@@ -4,6 +4,7 @@ target_radius: 9.0
 antiparallel_prob: 1.0
 num_designs: 10
 spacing_noise: 1
+avoid_aa: 'M'
 inverse_temp: 2
 asym_unit:
   - type: protein
@@ -12,7 +13,5 @@ asym_unit:
     secondary_structure: H
   - type: ligand
     ccd: ZN
-    ligands_per_peptide: 1
+    ligands_per_peptide: 0.5
     attach_to: helical_peptide
-    anchor_residue: random      # 1-indexed specific residue (e.g. 10) or 'random' (default)
-    anchor_distance: 4.0       # Distance in Angstroms from C_alpha (default: 4.0)

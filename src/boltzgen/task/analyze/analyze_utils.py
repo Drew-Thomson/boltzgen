@@ -1,4 +1,5 @@
 import io
+import math
 import warnings
 from pathlib import Path
 import random
@@ -946,6 +947,324 @@ def compute_ligand_metrics(
         "mean_ligand_coordination": float(np.mean(coord_counts)),
         "min_ligand_coordination": float(np.min(coord_counts)),
     }
+
+
+def _unit(v: list[float] | np.ndarray) -> np.ndarray:
+    """Return ``v / ||v||`` for a vector of shape ``(3,)``."""
+    v = np.asarray(v, dtype=np.float64)
+    return v / np.linalg.norm(v)
+
+
+def _ring(n: int, z: float = 0.0, phase_deg: float = 0.0) -> list[np.ndarray]:
+    """Unit-normalised vertices of an ``n``-gon at height ``z`` (each shape ``(3,)``)."""
+    phis = np.deg2rad(phase_deg) + 2.0 * np.pi * np.arange(n) / n
+    return [_unit([np.cos(p), np.sin(p), z]) for p in phis]
+
+
+def _build_ideal_polyhedra() -> dict[int, list[np.ndarray]]:
+    """Ideal coordination polyhedra keyed by coordination number.
+
+    Returns
+    -------
+    dict[int, list[np.ndarray]]
+        For each coordination number ``k`` (2-10), a list of sorted pairwise
+        vertex-angle vectors (degrees, shape ``(k*(k-1)/2,)``). Besides the
+        complete polyhedra, every single-vertex-deleted variant of the
+        ``k+1`` polyhedra is included (seesaw, square pyramid, ...).
+    """
+    z = np.array([0.0, 0.0, 1.0])
+    full: list[list[np.ndarray]] = [
+        [np.array([1.0, 0, 0]), np.array([-1.0, 0, 0])],  # linear
+        _ring(3),  # trigonal planar
+        [_unit(v) for v in ([1, 1, 1], [1, -1, -1], [-1, 1, -1], [-1, -1, 1])],  # tetra
+        _ring(4),  # square planar
+        [z, -z, *_ring(3)],  # trigonal bipyramid
+        [z, *_ring(4, z=np.cos(np.deg2rad(104)) / np.sin(np.deg2rad(104)))],  # sq. pyramid
+        [z, -z, *_ring(4)],  # octahedron
+        _ring(3, 0.7) + _ring(3, -0.7),  # trigonal prism
+        [z, -z, *_ring(5)],  # pentagonal bipyramid
+        _ring(4, 0.6) + _ring(4, -0.6, 45.0),  # square antiprism
+        _ring(3, 0.7) + _ring(3, -0.7) + _ring(3, 0.0, 60.0),  # tricapped trig. prism
+    ]
+    candidates: dict[int, list[np.ndarray]] = {}
+
+    def add(vectors: list[np.ndarray]) -> None:
+        arr = np.stack(vectors)
+        cos = np.clip(arr @ arr.T, -1.0, 1.0)
+        iu = np.triu_indices(len(arr), k=1)
+        candidates.setdefault(len(arr), []).append(
+            np.sort(np.degrees(np.arccos(cos[iu])))
+        )
+
+    for polyhedron in full:
+        add(polyhedron)
+        if len(polyhedron) > 2:
+            for drop in range(len(polyhedron)):
+                add([v for i, v in enumerate(polyhedron) if i != drop])
+    return candidates
+
+
+_IDEAL_POLYHEDRA_ANGLES = _build_ideal_polyhedra()
+_GEOM_DEV_FALLBACK_DEG = 90.0
+
+
+def coordination_geometry_deviation(donor_vectors: np.ndarray) -> float:
+    r"""Geometry-agnostic deviation of a donor shell from the nearest ideal polyhedron.
+
+    .. math::
+        \delta = \min_{P \in \mathcal{P}_k} \sqrt{\frac{1}{M}\sum_{m=1}^{M}
+        (\theta^{\text{obs}}_{(m)} - \theta^{P}_{(m)})^2}
+
+    where :math:`\theta_{(m)}` are the sorted donor-metal-donor angles
+    (:math:`M = k(k-1)/2`) and :math:`\mathcal{P}_k` the ideal polyhedra
+    (including vacancy variants) with ``k`` vertices. No particular geometry
+    is preferred.
+
+    Parameters
+    ----------
+    donor_vectors : np.ndarray
+        Metal-to-donor vectors, shape ``(k, 3)``.
+
+    Returns
+    -------
+    float
+        RMS angle deviation in degrees; ``90.0`` if ``k < 2`` or no ideal
+        polyhedron exists for ``k``.
+    """
+    k = len(donor_vectors)
+    if k < 2 or k not in _IDEAL_POLYHEDRA_ANGLES:
+        return _GEOM_DEV_FALLBACK_DEG
+    norms = np.linalg.norm(donor_vectors, axis=1, keepdims=True)
+    unit = donor_vectors / np.maximum(norms, 1e-9)
+    cos = np.clip(unit @ unit.T, -1.0, 1.0)
+    obs = np.sort(np.degrees(np.arccos(cos[np.triu_indices(k, k=1)])))
+    return float(
+        min(
+            np.sqrt(np.mean((obs - ideal) ** 2))
+            for ideal in _IDEAL_POLYHEDRA_ANGLES[k]
+        )
+    )
+
+
+def _rotation_matrix(axis: np.ndarray, angle: float) -> np.ndarray:
+    """Rodrigues rotation about unit ``axis`` (shape ``(3,)``); returns ``(3, 3)``."""
+    ux, uy, uz = axis
+    K = np.array([[0.0, -uz, uy], [uz, 0.0, -ux], [-uy, ux, 0.0]])
+    return np.cos(angle) * np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * np.outer(axis, axis)
+
+
+def _matched_rms(rotated: np.ndarray, target: np.ndarray) -> float:
+    """RMS distance after optimal one-to-one assignment; both ``(M, 3)``."""
+    from scipy.optimize import linear_sum_assignment
+
+    d = np.linalg.norm(rotated[:, None, :] - target[None, :, :], axis=-1)
+    r, c = linear_sum_assignment(d)
+    return float(np.sqrt(np.mean(d[r, c] ** 2)))
+
+
+def compute_cyclic_symmetry_metrics(
+    chain_ca: list[np.ndarray],
+    ligand_centers: np.ndarray,
+) -> dict[str, float]:
+    r"""Symmetry of a refolded ring assembly relative to its own fitted axis.
+
+    The axis is the normal of the best-fit plane through the chain Cα
+    centroids (smallest right singular vector), passing through their mean.
+    The rotation order is :math:`k=N` for chains with uniform axial direction
+    and :math:`k=N/2` when chain directions strictly alternate
+    (antiparallel ring). Each object set :math:`X` is rotated by
+    :math:`2\pi/k` about the axis and compared with itself:
+
+    .. math::
+        \text{RMSD}_{\text{sym}} = \min_{\pi}\sqrt{\frac{1}{M}\sum_i
+        \|R_{2\pi/k}\,x_i - x_{\pi(i)}\|^2}
+
+    Parameters
+    ----------
+    chain_ca : list[np.ndarray]
+        Per-chain Cα coordinates, each ``(L_c, 3)``.
+    ligand_centers : np.ndarray
+        Ligand residue centroids, shape ``(n_lig, 3)``.
+
+    Returns
+    -------
+    dict[str, float]
+        ``sym_order``, ``sym_chain_rmsd``, ``neg_sym_chain_rmsd``,
+        ``sym_ligand_rmsd``, ``neg_sym_ligand_rmsd``, ``sym_ligand_orbit_ok``;
+        empty if fewer than 3 chains.
+    """
+    n = len(chain_ca)
+    if n < 3:
+        return {}
+    centroids = np.stack([c.mean(axis=0) for c in chain_ca])
+    origin = centroids.mean(axis=0)
+    axis = _unit(np.linalg.svd(centroids - origin)[2][-1])
+
+    # chain axial directions, ordered by azimuth around the axis
+    e1 = _unit(centroids[0] - origin - np.dot(centroids[0] - origin, axis) * axis)
+    e2 = np.cross(axis, e1)
+    azimuth = np.arctan2((centroids - origin) @ e2, (centroids - origin) @ e1)
+    order = np.argsort(azimuth)
+    signs = []
+    for idx in order:
+        ca = chain_ca[idx]
+        q = max(1, len(ca) // 4)
+        signs.append(np.sign(np.dot(ca[-q:].mean(axis=0) - ca[:q].mean(axis=0), axis)))
+    signs_arr = np.array(signs)
+    alternating = (
+        n % 2 == 0 and n >= 4 and bool(np.all(signs_arr * np.roll(signs_arr, -1) < 0))
+    )
+    k = n // 2 if alternating else n
+    R = _rotation_matrix(axis, 2.0 * np.pi / k)
+
+    # chain RMSD with assignment (unequal lengths -> prohibitive cost)
+    from scipy.optimize import linear_sum_assignment
+
+    cost = np.full((n, n), 1e3)
+    for i in range(n):
+        rot = (chain_ca[i] - origin) @ R.T
+        for j in range(n):
+            if len(chain_ca[j]) == len(rot):
+                cost[i, j] = np.sqrt(np.mean(np.sum((rot - (chain_ca[j] - origin)) ** 2, axis=1)))
+    r, c = linear_sum_assignment(cost)
+    chain_rmsd = float(np.sqrt(np.mean(cost[r, c] ** 2)))
+
+    out: dict[str, float] = {
+        "sym_order": float(k),
+        "sym_chain_rmsd": chain_rmsd,
+        "neg_sym_chain_rmsd": -chain_rmsd,
+    }
+    m = len(ligand_centers)
+    if m >= 1:
+        rel = ligand_centers - origin
+        off_axis = np.linalg.norm(rel - np.outer(rel @ axis, axis), axis=1)
+        if m == 1 or np.all(off_axis < 1.0):
+            lig_rmsd = float(np.sqrt(np.mean(off_axis**2)))
+            orbit_ok = 1.0 if np.all(off_axis < 1.0) else 0.0
+        else:
+            # ligands may occupy a sub-orbit (e.g. 3 metals on a C6 ring -> C3)
+            orbit_ok = 1.0 if (m % k == 0 or k % m == 0) else 0.0
+            k_lig = math.gcd(k, m) if orbit_ok else k
+            R_lig = _rotation_matrix(axis, 2.0 * np.pi / k_lig)
+            lig_rmsd = _matched_rms(rel @ R_lig.T, rel)
+        out["sym_ligand_rmsd"] = lig_rmsd
+        out["neg_sym_ligand_rmsd"] = -lig_rmsd
+        out["sym_ligand_orbit_ok"] = orbit_ok
+    return out
+
+
+def compute_ligand_symmetry_metrics(
+    cif_path: Path | str,
+    coord_tolerance: float = 0.45,
+) -> dict[str, float]:
+    r"""Metal coordination-sphere and ring-symmetry metrics of a refolded structure.
+
+    Coordination: every metal ligand atom is paired with protein N/O/S atoms
+    (any residue, incl. backbone amides/carbonyls, Tyr-OH, ...) closer than
+    :math:`r_{\text{cov}}(M) + r_{\text{cov}}(D) + \text{tol}`. Element-agnostic
+    so unusual metals (e.g. lanthanides) are handled.
+
+    Per metal: coordination number :math:`k`, bond deviation
+    :math:`\frac{1}{k}\sum_j |d_j - r_{\text{cov}}(M) - r_{\text{cov}}(D_j)|`,
+    geometry deviation (see :func:`coordination_geometry_deviation`) and the
+    number of contributing chains. Cross-metal consistency is the std of
+    :math:`k` and of the geometry deviation.
+
+    Parameters
+    ----------
+    cif_path : Path | str
+        Refolded MMCIF.
+    coord_tolerance : float, default=0.45
+        Added to the covalent-radius sum (Å) for the coordination cutoff.
+
+    Returns
+    -------
+    dict[str, float]
+        Coordination keys: ``ligand_min_coord_number``,
+        ``ligand_mean_coord_number``, ``ligand_coord_bond_dev``,
+        ``ligand_coord_geom_dev``, ``ligand_coord_n_chains``,
+        ``ligand_coord_cn_std``, ``ligand_coord_geom_dev_std`` (+ ``neg_``
+        variants of the deviations/stds). Symmetry keys from
+        :func:`compute_cyclic_symmetry_metrics`. Empty if no ligands or
+        the file is unreadable.
+    """
+    path = Path(cif_path)
+    if not path.exists():
+        return {}
+    try:
+        import gemmi
+
+        st = gemmi.read_structure(str(path))
+    except (OSError, RuntimeError, ValueError) as exc:
+        warnings.warn(f"Failed to read {path} for symmetry metrics: {exc}", stacklevel=2)
+        return {}
+
+    chain_ca: list[np.ndarray] = []
+    donors: list[tuple[np.ndarray, float, int]] = []  # (xyz, cov_radius, chain_idx)
+    metals: list[tuple[np.ndarray, float]] = []
+    lig_centers: list[np.ndarray] = []
+    for chain in st[0]:
+        ca: list[list[float]] = []
+        chain_idx = len(chain_ca)
+        for res in chain:
+            if res.name.strip().upper() in _STANDARD_AMINO_ACIDS:
+                for atom in res:
+                    el = atom.element
+                    if el.name.upper() in ("N", "O", "S"):
+                        donors.append((np.array(atom.pos.tolist()), el.covalent_r, chain_idx))
+                    if atom.name.strip() == "CA":
+                        ca.append(atom.pos.tolist())
+            else:
+                xyz = np.array([a.pos.tolist() for a in res])
+                if len(xyz):
+                    lig_centers.append(xyz.mean(axis=0))
+                for atom in res:
+                    if atom.element.is_metal:
+                        metals.append((np.array(atom.pos.tolist()), atom.element.covalent_r))
+        if ca:
+            chain_ca.append(np.array(ca))
+    if not lig_centers:
+        return {}
+
+    out: dict[str, float] = {}
+    if metals and donors:
+        d_xyz = np.stack([d[0] for d in donors])
+        d_r = np.array([d[1] for d in donors])
+        d_chain = np.array([d[2] for d in donors])
+        cn, bond_dev, geom_dev, n_ch = [], [], [], []
+        for m_xyz, m_r in metals:
+            dist = np.linalg.norm(d_xyz - m_xyz, axis=1)
+            ref = m_r + d_r
+            sel = dist <= ref + coord_tolerance
+            cn.append(int(sel.sum()))
+            bond_dev.append(float(np.mean(np.abs(dist[sel] - ref[sel]))) if sel.any() else 2.0)
+            geom_dev.append(coordination_geometry_deviation(d_xyz[sel] - m_xyz))
+            n_ch.append(len(set(d_chain[sel].tolist())))
+        cn_arr = np.array(cn, dtype=float)
+        out.update(
+            {
+                "ligand_min_coord_number": float(cn_arr.min()),
+                "ligand_mean_coord_number": float(cn_arr.mean()),
+                "ligand_coord_bond_dev": float(np.mean(bond_dev)),
+                "ligand_coord_geom_dev": float(np.mean(geom_dev)),
+                "ligand_coord_n_chains": float(np.mean(n_ch)),
+                "ligand_coord_cn_std": float(cn_arr.std()),
+                "ligand_coord_geom_dev_std": float(np.std(geom_dev)),
+            }
+        )
+        for key in ("bond_dev", "geom_dev", "cn_std", "geom_dev_std"):
+            out[f"neg_ligand_coord_{key}"] = -out[f"ligand_coord_{key}"]
+    elif metals:
+        out.update({"ligand_min_coord_number": 0.0, "ligand_mean_coord_number": 0.0,
+                    "ligand_coord_bond_dev": 2.0, "neg_ligand_coord_bond_dev": -2.0,
+                    "ligand_coord_geom_dev": _GEOM_DEV_FALLBACK_DEG,
+                    "neg_ligand_coord_geom_dev": -_GEOM_DEV_FALLBACK_DEG,
+                    "ligand_coord_n_chains": 0.0, "ligand_coord_cn_std": 0.0,
+                    "ligand_coord_geom_dev_std": 0.0, "neg_ligand_coord_cn_std": 0.0,
+                    "neg_ligand_coord_geom_dev_std": 0.0})
+
+    out.update(compute_cyclic_symmetry_metrics(chain_ca, np.stack(lig_centers)))
+    return out
 
 
 def compute_ss_metrics(dssp_pred, ss_conditioning_metricsed):
