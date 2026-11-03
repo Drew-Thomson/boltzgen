@@ -1,0 +1,22 @@
+entities:
+  # Designed 20-residue helical peptide binder
+  - protein:
+      id: B
+      sequence: 20
+      secondary_structure:
+        helix: 1..20
+
+  # Target protein from 2BEP.pdb
+  - file:
+      path: 2BEP.pdb
+      include:
+        - chain:
+            id: A
+      # Target residues F13 and F36 on chain A
+      # Note: In 2BEP.pdb, 3 leading unresolved residues (GLY, ALA, MET) in SEQRES
+      # offset the 1-indexed label_seq_id relative to author numbering (F13 -> 17, F36 -> 40)
+      binding_types:
+        - chain:
+            id: A
+            binding: 17,40
+      structure_groups: "all"

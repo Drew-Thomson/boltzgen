@@ -123,6 +123,60 @@ def orient_coords_along_z(coords: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return oriented, rot
 
 
+def orient_binder_vertical_right(
+    coords: np.ndarray,
+    is_target: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    r"""Derive rotation and center orienting binder helix vertically on the right.
+
+    Aligns the principal axis of the binder atoms along the vertical Z-axis,
+    and rotates the target-to-binder vector onto the horizontal X-axis such that
+    the binder is situated at $x > 0$ (right side of image) and the target at
+    $x < 0$ (left side of image).
+
+    Parameters
+    ----------
+    coords : np.ndarray
+        Reference frame atomic coordinates, shape `(N, 3)`.
+    is_target : np.ndarray
+        Boolean mask of fixed target atoms, shape `(N,)`.
+
+    Returns
+    -------
+    oriented_coords : np.ndarray
+        Transformed coordinates, shape `(N, 3)`.
+    rot_matrix : np.ndarray
+        Orthonormal rotation matrix applied, shape `(3, 3)`.
+    center : np.ndarray
+        Centering offset applied prior to rotation, shape `(3,)`.
+    """
+    binder_pts = coords[~is_target]
+    target_pts = coords[is_target]
+    if len(binder_pts) == 0 or len(target_pts) == 0:
+        center = np.mean(coords, axis=0) if len(coords) > 0 else np.zeros(3)
+        return coords, np.eye(3), center
+
+    c_b = np.mean(binder_pts, axis=0)
+    c_t = np.mean(target_pts, axis=0)
+    cov_b = (binder_pts - c_b).T @ (binder_pts - c_b)
+    u_b, _, _ = np.linalg.svd(cov_b)
+    axis_z = u_b[:, 0]
+
+    v_tb = c_b - c_t
+    v_x = v_tb - np.dot(v_tb, axis_z) * axis_z
+    norm_x = np.linalg.norm(v_x)
+    axis_x = v_x / norm_x if norm_x > EPSILON else u_b[:, 1]
+    axis_y = np.cross(axis_z, axis_x)
+    norm_y = np.linalg.norm(axis_y)
+    axis_y = axis_y / norm_y if norm_y > EPSILON else np.array([0.0, 1.0, 0.0])
+    axis_x = np.cross(axis_y, axis_z)
+
+    rot = np.stack([axis_x, axis_y, axis_z], axis=0)
+    center = (np.min(coords, axis=0) + np.max(coords, axis=0)) / 2.0
+    oriented = (coords - center) @ rot.T
+    return oriented, rot, center
+
+
 def resolve_filepath(pattern_or_path: str) -> Path:
     """Resolve a file path or glob pattern to a single existing file.
 
@@ -386,6 +440,8 @@ def prepare_binder_trajectory(
     mainchain_only: bool = False,
     ca_only: bool = False,
     align_target: bool = True,
+    align_vertical_right: bool = False,
+    target_all_atoms: bool = True,
 ) -> Tuple[List[np.ndarray], List[float], np.ndarray, np.ndarray]:
     r"""Extract and align key timepoints for traditional binder design.
 
@@ -409,6 +465,12 @@ def prepare_binder_trajectory(
     align_target : bool, default True
         Whether to rigidly align target atoms across all timepoints to the
         final denoised frame.
+    align_vertical_right : bool, default False
+        Whether to align the binder helix vertically along Z on the right (+X)
+        with the target on the left (-X).
+    target_all_atoms : bool, default True
+        Whether to preserve all heavy atoms for target context while applying
+        backbone/CA filtering only to the designed binder atoms.
 
     Returns
     -------
@@ -427,7 +489,9 @@ def prepare_binder_trajectory(
     total_frames = coords.shape[0]
     all_t_vals = compute_diffusion_times(step_indices, total_frames)
 
-    valid_mask = traj_data["atom_pad_mask"].copy()
+    valid_mask = traj_data["atom_pad_mask"].astype(bool).copy()
+    is_target_raw = traj_data["is_target"].astype(bool)
+
     if mainchain_only or ca_only:
         atom_indices = np.arange(len(valid_mask))
         mc_filter = (
@@ -435,7 +499,11 @@ def prepare_binder_trajectory(
             if ca_only
             else (atom_indices % ATOM14_NUM_ATOMS < BACKBONE_ATOMS_PER_RES)
         )
-        valid_mask = valid_mask & mc_filter
+        if target_all_atoms:
+            is_binder = ~is_target_raw
+            valid_mask[is_binder] = valid_mask[is_binder] & mc_filter[is_binder]
+        else:
+            valid_mask = valid_mask & mc_filter
 
     is_target_valid = traj_data["is_target"][valid_mask]
     asym_id_valid = traj_data["asym_id"][valid_mask]
@@ -456,6 +524,11 @@ def prepare_binder_trajectory(
     ref_frame_raw = coords[-1][valid_mask]
     target_mask = is_target_valid
 
+    if align_vertical_right:
+        _, rot_align, center_align = orient_binder_vertical_right(
+            ref_frame_raw, target_mask
+        )
+
     aligned_frames: List[np.ndarray] = []
     for idx in selected_indices:
         frame_raw = coords[idx][valid_mask]
@@ -467,9 +540,14 @@ def prepare_binder_trajectory(
             )
         else:
             aligned = frame_raw
+
+        if align_vertical_right:
+            aligned = (aligned - center_align) @ rot_align.T
+
         aligned_frames.append(aligned)
 
     return aligned_frames, t_vals, is_target_valid, asym_id_valid
+
 
 
 def prepare_helical_trajectory(
@@ -629,11 +707,15 @@ def _plot_binder_row(
     azim: float,
     dist: float = 7.0,
     target_color: str,
+    target_alpha: float = 0.35,
+    static_target: bool = True,
+    target_all_atoms: bool = True,
     binder_color: str,
     point_size_target: float,
     point_size_binder: float,
     box_scale: float = 1.0,
     show_row_label: bool = True,
+    orient_vertical_right: bool = False,
 ) -> None:
     """Plot traditional binder design point-cloud trajectory row."""
     b_frames, b_t_vals, b_is_target, _ = prepare_binder_trajectory(
@@ -645,9 +727,12 @@ def _plot_binder_row(
         mainchain_only=mainchain_only,
         ca_only=ca_only,
         align_target=True,
+        align_vertical_right=orient_vertical_right,
+        target_all_atoms=target_all_atoms,
     )
 
     ref_frame = b_frames[-1]
+    ref_target_pts = ref_frame[b_is_target]
     b_min = np.min(ref_frame, axis=0)
     b_max = np.max(ref_frame, axis=0)
     b_center = (b_min + b_max) / 2.0
@@ -663,7 +748,7 @@ def _plot_binder_row(
         ax.set_facecolor("white")
 
         frame_pts = b_frames[col_idx]
-        target_pts = frame_pts[b_is_target]
+        target_pts = ref_target_pts if static_target else frame_pts[b_is_target]
         binder_pts = frame_pts[~b_is_target]
 
         if len(target_pts) > 0:
@@ -673,8 +758,9 @@ def _plot_binder_row(
                 target_pts[:, 2],
                 c=target_color,
                 s=point_size_target,
-                alpha=0.35,
+                alpha=target_alpha,
                 edgecolors="none",
+                marker="o",
                 label="Target Context",
                 rasterized=True,
             )
@@ -894,7 +980,11 @@ def plot_point_cloud_comparison(
     point_size_target: float = 8.0,
     point_size_binder: float = 22.0,
     point_size_helical: float = 16.0,
-    target_color: str = "#64748B",
+    target_color: str = "#94A3B8",
+    target_alpha: float = 0.35,
+    static_target: bool = True,
+    target_all_atoms: bool = True,
+    orient_vertical_right: bool = False,
     binder_color: str = "#FF6B6B",
     helical_cmap_name: str = "tab10",
     box_scale: float = 1.0,
@@ -912,6 +1002,8 @@ def plot_point_cloud_comparison(
         msg = "At least one of binder_traj or helical_traj must be provided."
         raise ValueError(msg)
 
+    out_path = Path(output_path)
+
     if figsize is None:
         width = 3.0 * num_timepoints + (0.8 if show_colorbar else 0.2)
         height = 3.6 if n_rows == 1 else 6.8
@@ -923,8 +1015,12 @@ def plot_point_cloud_comparison(
     current_row = 0
 
     if has_binder and binder_traj is not None:
-        b_elev = binder_elev if binder_elev is not None else elev
-        b_azim = binder_azim if binder_azim is not None else azim
+        if orient_vertical_right:
+            b_elev = binder_elev if binder_elev is not None else 5.0
+            b_azim = binder_azim if binder_azim is not None else -75.0
+        else:
+            b_elev = binder_elev if binder_elev is not None else elev
+            b_azim = binder_azim if binder_azim is not None else azim
         _plot_binder_row(
             fig,
             binder_traj,
@@ -940,11 +1036,15 @@ def plot_point_cloud_comparison(
             azim=b_azim,
             dist=camera_dist,
             target_color=target_color,
+            target_alpha=target_alpha,
+            static_target=static_target,
+            target_all_atoms=target_all_atoms,
             binder_color=binder_color,
             point_size_target=point_size_target,
             point_size_binder=point_size_binder,
             box_scale=box_scale,
             show_row_label=show_row_labels,
+            orient_vertical_right=orient_vertical_right,
         )
         current_row += 1
 
@@ -973,7 +1073,7 @@ def plot_point_cloud_comparison(
             show_colorbar=show_colorbar,
         )
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     left_margin = 0.06 if show_row_labels else 0.02
     right_margin = 0.90 if show_colorbar else 0.98
     plt.subplots_adjust(
@@ -984,9 +1084,9 @@ def plot_point_cloud_comparison(
         wspace=0.02,
         hspace=0.12,
     )
-    plt.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    plt.savefig(out_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
-    print(f"Figure successfully written to {output_path}")
+    print(f"Figure successfully written to {out_path}")
 
 
 def main() -> None:
@@ -1134,8 +1234,55 @@ def main() -> None:
     parser.add_argument(
         "--point_size_target",
         type=float,
-        default=8.0,
-        help="Point size for target atoms",
+        default=16.0,
+        help="Point size for target atoms (default: 16.0)",
+    )
+    parser.add_argument(
+        "--target_color",
+        type=str,
+        default="#94A3B8",
+        help="Color for target context points (default: #94A3B8)",
+    )
+    parser.add_argument(
+        "--target_alpha",
+        type=float,
+        default=0.35,
+        help="Transparency alpha for target atoms (default: 0.35)",
+    )
+    parser.add_argument(
+        "--orient_vertical_right",
+        "--orient_helix_right",
+        action="store_true",
+        default=False,
+        dest="orient_vertical_right",
+        help="Orient complex with vertical binder helix on the right",
+    )
+    parser.add_argument(
+        "--static_target",
+        "--non_diffused_target",
+        action="store_true",
+        default=True,
+        dest="static_target",
+        help="Render fixed, non-diffused target across all frames (default: True)",
+    )
+    parser.add_argument(
+        "--no_static_target",
+        action="store_false",
+        dest="static_target",
+        help="Allow target atoms to drift/diffuse across timepoints",
+    )
+    parser.add_argument(
+        "--target_all_atoms",
+        action="store_true",
+        default=True,
+        dest="target_all_atoms",
+        help="Keep all heavy atoms for target context (default: True)",
+    )
+    parser.add_argument(
+        "--no_target_all_atoms",
+        action="store_false",
+        dest="target_all_atoms",
+        help="Filter target atoms using the same modular filter as the binder",
     )
     parser.add_argument(
         "--point_size_binder",
@@ -1197,6 +1344,11 @@ def main() -> None:
         point_size_target=args.point_size_target,
         point_size_binder=args.point_size_binder,
         point_size_helical=args.point_size_helical,
+        target_color=args.target_color,
+        target_alpha=args.target_alpha,
+        static_target=args.static_target,
+        target_all_atoms=args.target_all_atoms,
+        orient_vertical_right=args.orient_vertical_right,
         helical_cmap_name=args.helical_cmap_name,
         box_scale=args.box_scale,
         show_row_labels=(not args.hide_row_labels),

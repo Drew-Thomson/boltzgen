@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from scripts.plot_diffusion_points_figure import (
     kabsch_rigid_align,
+    orient_binder_vertical_right,
     orient_coords_along_z,
     plot_point_cloud_comparison,
     select_coalescence_frames,
@@ -321,3 +322,59 @@ def test_plot_mainchain_and_discrete_colormap(tmp_path: Path) -> None:
 
     assert out_file.exists()
     assert out_file.stat().st_size > 0
+
+
+def test_orient_binder_vertical_right(tmp_path: Path) -> None:
+    """Verify binder helix aligns along Z and target sits on the left (-X)."""
+    rng = np.random.default_rng(42)
+    target_pts = rng.normal(scale=3.0, size=(50, 3)) + np.array([-10.0, 0.0, 0.0])
+    helix_pts = np.zeros((30, 3))
+    helix_pts[:, 0] = np.linspace(-15.0, 15.0, 30)  # initially along X
+    helix_pts[:, 1] = rng.normal(scale=0.5, size=30)
+    helix_pts[:, 2] = rng.normal(scale=0.5, size=30) + 8.0
+
+    is_target = np.array([True] * 50 + [False] * 30)
+    all_pts = np.vstack([target_pts, helix_pts])
+
+    oriented, _, _ = orient_binder_vertical_right(all_pts, is_target)
+    trans_target = oriented[is_target]
+    trans_binder = oriented[~is_target]
+
+    # Binder helix principal axis must be along Z
+    assert np.ptp(trans_binder[:, 2]) > np.ptp(trans_binder[:, 0]) * 3.0
+    # Binder center must be to the right (+X) of target center
+    assert np.mean(trans_binder[:, 0]) > np.mean(trans_target[:, 0])
+
+    # Plot figure with static target and vertical right alignment
+    num_frames = 5
+    num_atoms = 80
+    b_coords = np.stack(
+        [
+            all_pts + rng.normal(scale=1.0, size=all_pts.shape)
+            for _ in range(num_frames - 1)
+        ]
+        + [all_pts]
+    )
+    binder_data = {
+        "coords": b_coords,
+        "is_target": is_target,
+        "asym_id": np.zeros(num_atoms, dtype=int),
+        "atom_pad_mask": np.ones(num_atoms, dtype=bool),
+        "step_indices": np.arange(num_frames),
+    }
+
+    fig_path = tmp_path / "binder_vertical_right.png"
+    plot_point_cloud_comparison(
+        binder_traj=binder_data,
+        helical_traj=None,
+        output_path=fig_path,
+        static_target=True,
+        orient_vertical_right=True,
+        target_color="#94A3B8",
+        target_alpha=0.35,
+        num_timepoints=4,
+        dpi=100,
+    )
+    assert fig_path.exists()
+    assert fig_path.stat().st_size > 0
+
