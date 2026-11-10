@@ -378,3 +378,55 @@ def test_orient_binder_vertical_right(tmp_path: Path) -> None:
     assert fig_path.exists()
     assert fig_path.stat().st_size > 0
 
+
+def test_axial_strain_helical_trajectory_comparison(tmp_path: Path) -> None:
+    """Verify axial strain deformation and 3-row comparison figure generation."""
+    rng = np.random.default_rng(42)
+    num_frames = 6
+    num_atoms = 56  # 4 chains x 14 atoms
+    base_coords = rng.normal(scale=4.0, size=(num_atoms, 3))
+    base_coords[:, 2] = np.linspace(-10.0, 10.0, num_atoms)
+
+    h_coords = np.stack(
+        [
+            base_coords + rng.normal(scale=1.5, size=(num_atoms, 3))
+            for _ in range(num_frames - 1)
+        ]
+        + [base_coords]
+    )
+    traj_data = {
+        "coords": h_coords,
+        "is_target": np.zeros(num_atoms, dtype=bool),
+        "asym_id": np.repeat([0, 1, 2, 3], 14),
+        "atom_pad_mask": np.ones(num_atoms, dtype=bool),
+        "step_indices": np.arange(num_frames),
+    }
+
+    # Test single-row strained figure
+    single_strained_fig = tmp_path / "strained_helical.png"
+    plot_point_cloud_comparison(
+        binder_traj=None,
+        helical_traj=traj_data,
+        output_path=single_strained_fig,
+        axial_strain=0.20,
+        num_timepoints=4,
+        dpi=100,
+    )
+    assert single_strained_fig.exists()
+    assert single_strained_fig.stat().st_size > 0
+
+    # Test 2-row relaxed vs strained comparison
+    comparison_fig = tmp_path / "relaxed_vs_strained_comparison.png"
+    plot_point_cloud_comparison(
+        binder_traj=None,
+        helical_traj=traj_data,
+        output_path=comparison_fig,
+        axial_strain=0.20,
+        show_strain_comparison=True,
+        num_timepoints=4,
+        dpi=100,
+    )
+    assert comparison_fig.exists()
+    assert comparison_fig.stat().st_size > 0
+
+

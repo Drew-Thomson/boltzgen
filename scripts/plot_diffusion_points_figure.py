@@ -560,6 +560,7 @@ def prepare_helical_trajectory(
     mainchain_only: bool = False,
     ca_only: bool = False,
     align_to_axis: bool = True,
+    axial_strain: float = 0.0,
 ) -> Tuple[List[np.ndarray], List[float], np.ndarray, np.ndarray]:
     r"""Extract and align key timepoints for symmetry-driven helical design.
 
@@ -647,6 +648,16 @@ def prepare_helical_trajectory(
             aligned_frames.append(frame_oriented)
     else:
         aligned_frames = [coords[idx][valid_mask] for idx in selected_indices]
+        final_oriented = aligned_frames[-1]
+
+    if axial_strain != 0.0:
+        z_ref = float(np.mean(final_oriented[:, 2]))
+        strained_frames: List[np.ndarray] = []
+        for frame in aligned_frames:
+            f = frame.copy()
+            f[:, 2] = z_ref + (f[:, 2] - z_ref) * (1.0 + axial_strain)
+            strained_frames.append(f)
+        aligned_frames = strained_frames
         final_oriented = aligned_frames[-1]
 
     unique_chains = np.unique(asym_id_valid)
@@ -871,6 +882,9 @@ def _plot_helical_row(
     box_scale: float = 1.0,
     show_row_label: bool = True,
     show_colorbar: bool = True,
+    axial_strain: float = 0.0,
+    row_title: Optional[str] = None,
+    final_frame_subtitle: Optional[str] = None,
 ) -> None:
     """Plot symmetry-driven helical design point-cloud trajectory row."""
     h_frames, h_t_vals, h_chains, _ = prepare_helical_trajectory(
@@ -882,6 +896,7 @@ def _plot_helical_row(
         mainchain_only=mainchain_only,
         ca_only=ca_only,
         align_to_axis=True,
+        axial_strain=axial_strain,
     )
 
     ref_frame = h_frames[-1]
@@ -923,7 +938,13 @@ def _plot_helical_row(
             if col_idx == 0:
                 col_title = f"$t = {t_val:.2f}$" + "\n(Dispersed Cloud)"
             elif col_idx == len(h_frames) - 1:
-                col_title = f"$t = {t_val:.2f}$" + "\n(Self-Assembled Helix)"
+                if final_frame_subtitle:
+                    col_title = f"$t = {t_val:.2f}$" + f"\n({final_frame_subtitle})"
+                elif axial_strain != 0.0:
+                    sign = "+" if axial_strain > 0 else ""
+                    col_title = f"$t = {t_val:.2f}$" + f"\n(Strained, ε = {sign}{axial_strain:.2f})"
+                else:
+                    col_title = f"$t = {t_val:.2f}$" + "\n(Self-Assembled Helix)"
             else:
                 col_title = f"$t = {t_val:.2f}$"
             ax.set_title(col_title, fontsize=11, pad=4, weight="bold")
@@ -931,10 +952,19 @@ def _plot_helical_row(
         _style_3d_axes(ax, h_center, h_span, elev, azim, dist=dist)
 
         if col_idx == 0 and show_row_label:
+            if row_title:
+                effective_title = row_title
+            elif axial_strain != 0.0:
+                sign = "+" if axial_strain > 0 else ""
+                effective_title = (
+                    f"Symmetry-Driven Helical Design\n(Axially Strained, ε = {sign}{axial_strain:.2f})"
+                )
+            else:
+                effective_title = "Symmetry-Driven Helical Design\n(Self-Context Assembly)"
             ax.text2D(
                 -0.18,
                 0.5,
-                "Symmetry-Driven Helical Design\n(Self-Context Assembly)",
+                effective_title,
                 transform=ax.transAxes,
                 fontsize=11,
                 weight="bold",
@@ -964,6 +994,11 @@ def plot_point_cloud_comparison(
     helical_traj: Optional[Dict[str, np.ndarray]],
     output_path: Path,
     *,
+    strained_helical_traj: Optional[Dict[str, np.ndarray]] = None,
+    axial_strain: float = 0.0,
+    show_strain_comparison: bool = False,
+    helical_row_title: Optional[str] = None,
+    strained_row_title: Optional[str] = None,
     num_timepoints: int = 5,
     frame_indices: Optional[List[int]] = None,
     t_start: float = 0.9,
@@ -996,17 +1031,30 @@ def plot_point_cloud_comparison(
     """Render comparison figure of diffusion point-cloud trajectories."""
     has_binder = binder_traj is not None
     has_helical = helical_traj is not None
-    n_rows = (1 if has_binder else 0) + (1 if has_helical else 0)
+    has_strained = (strained_helical_traj is not None) or (
+        show_strain_comparison and has_helical
+    )
+
+    n_rows = (
+        (1 if has_binder else 0)
+        + (1 if has_helical else 0)
+        + (1 if has_strained else 0)
+    )
 
     if n_rows == 0:
-        msg = "At least one of binder_traj or helical_traj must be provided."
+        msg = "At least one trajectory (binder, helical, or strained_helical) must be provided."
         raise ValueError(msg)
 
     out_path = Path(output_path)
 
     if figsize is None:
         width = 3.0 * num_timepoints + (0.8 if show_colorbar else 0.2)
-        height = 3.6 if n_rows == 1 else 6.8
+        if n_rows == 1:
+            height = 3.6
+        elif n_rows == 2:
+            height = 6.8
+        else:
+            height = 10.0
         eff_figsize = (width, height)
     else:
         eff_figsize = figsize
@@ -1051,6 +1099,16 @@ def plot_point_cloud_comparison(
     if has_helical and helical_traj is not None:
         h_elev = helical_elev if helical_elev is not None else elev
         h_azim = helical_azim if helical_azim is not None else azim
+        # If comparison is requested, the primary helical row is relaxed (strain = 0.0)
+        eff_helical_strain = 0.0 if has_strained else axial_strain
+        eff_row_title = (
+            helical_row_title
+            or (
+                "Symmetry-Driven Helical Design\n(Equilibrium / Relaxed)"
+                if has_strained
+                else None
+            )
+        )
         _plot_helical_row(
             fig,
             helical_traj,
@@ -1067,10 +1125,60 @@ def plot_point_cloud_comparison(
             dist=camera_dist,
             cmap_name=helical_cmap_name,
             point_size=point_size_helical,
-            show_titles=(not has_binder),
+            show_titles=(current_row == 0),
             box_scale=box_scale,
             show_row_label=show_row_labels,
             show_colorbar=show_colorbar,
+            axial_strain=eff_helical_strain,
+            row_title=eff_row_title,
+        )
+        current_row += 1
+
+    if has_strained:
+        h_elev = helical_elev if helical_elev is not None else elev
+        h_azim = helical_azim if helical_azim is not None else azim
+
+        source_strained_traj = (
+            strained_helical_traj
+            if strained_helical_traj is not None
+            else helical_traj
+        )
+        strain_to_apply = (
+            0.0 if strained_helical_traj is not None else (axial_strain or 0.20)
+        )
+        sign_str = (
+            f"ε = {axial_strain:+.2f}"
+            if axial_strain != 0.0
+            else "Simulated Lattice Strain"
+        )
+        eff_strained_title = (
+            strained_row_title
+            or f"Symmetry-Driven Helical Design\n(Axially Strained, {sign_str})"
+        )
+
+        _plot_helical_row(
+            fig,
+            source_strained_traj,
+            row_idx=current_row,
+            total_rows=n_rows,
+            num_timepoints=num_timepoints,
+            frame_indices=frame_indices,
+            t_start=t_start,
+            spacing_mode=spacing_mode,
+            mainchain_only=mainchain_only,
+            ca_only=ca_only,
+            elev=h_elev,
+            azim=h_azim,
+            dist=camera_dist,
+            cmap_name=helical_cmap_name,
+            point_size=point_size_helical,
+            show_titles=(current_row == 0),
+            box_scale=box_scale,
+            show_row_label=show_row_labels,
+            show_colorbar=False,  # Avoid duplicate colorbar
+            axial_strain=strain_to_apply,
+            row_title=eff_strained_title,
+            final_frame_subtitle=f"Strained Helix, {sign_str}",
         )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1105,6 +1213,24 @@ def main() -> None:
         type=str,
         default=None,
         help="Path or glob pattern to helical trajectory archive",
+    )
+    parser.add_argument(
+        "--strained_helical",
+        type=str,
+        default=None,
+        help="Path or glob pattern to strained helical trajectory archive",
+    )
+    parser.add_argument(
+        "--axial_strain",
+        type=float,
+        default=0.0,
+        help="Axial strain (dL/L) applied along the vertical Z axis for visualization or simulation (default: 0.0, e.g. 0.20)",
+    )
+    parser.add_argument(
+        "--show_strain_comparison",
+        action="store_true",
+        default=False,
+        help="Show a separate strained helical row in addition to the relaxed helical row",
     )
     parser.add_argument(
         "--output",
@@ -1305,8 +1431,14 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.binder is None and args.helical is None:
-        parser.error("At least one of --binder or --helical must be specified.")
+    if (
+        args.binder is None
+        and args.helical is None
+        and args.strained_helical is None
+    ):
+        parser.error(
+            "At least one of --binder, --helical, or --strained_helical must be specified."
+        )
 
     use_x0 = args.use_x0
 
@@ -1322,11 +1454,20 @@ def main() -> None:
         print(f"Loading helical trajectory: {helical_file}")
         helical_traj = load_trajectory_data(helical_file, use_x0=use_x0)
 
+    strained_helical_traj = None
+    if args.strained_helical is not None:
+        strained_file = resolve_filepath(args.strained_helical)
+        print(f"Loading strained helical trajectory: {strained_file}")
+        strained_helical_traj = load_trajectory_data(strained_file, use_x0=use_x0)
+
     custom_figsize = tuple(args.figsize) if args.figsize is not None else None
 
     plot_point_cloud_comparison(
         binder_traj=binder_traj,
         helical_traj=helical_traj,
+        strained_helical_traj=strained_helical_traj,
+        axial_strain=args.axial_strain,
+        show_strain_comparison=args.show_strain_comparison,
         output_path=args.output,
         num_timepoints=args.num_timepoints,
         frame_indices=args.frame_indices,
