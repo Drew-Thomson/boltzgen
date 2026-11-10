@@ -1499,6 +1499,7 @@ class Analyze(Task):
                         try:
                             from boltzgen.task.analyze.material_metrics import (
                                 backbone_ca_coords,
+                                backbone_ca_coords_by_chain,
                                 compute_material_metrics,
                             )
                         except ImportError:
@@ -1512,11 +1513,18 @@ class Analyze(Task):
                             "hexagonal_mesh",
                             "nanotube",
                             "cylindrical",
+                            "helical",
+                            "multi_helical",
                         } and compute_material_metrics is not None:
                             backbone_coords = coords_refold[
                                 bb_mask_refold[: coords_refold.shape[0]]
                             ]
                             material_ca_coords = backbone_ca_coords(
+                                coords_refold,
+                                atom_asym_id_refold,
+                                bb_mask_refold,
+                            )
+                            chain_ca_list = backbone_ca_coords_by_chain(
                                 coords_refold,
                                 atom_asym_id_refold,
                                 bb_mask_refold,
@@ -1527,6 +1535,7 @@ class Analyze(Task):
                                     coms_refold,
                                     backbone_coords,
                                     material_ca_coords,
+                                    chain_ca_list=chain_ca_list,
                                 )
                             except (ValueError, RuntimeError) as metric_error:
                                 print(

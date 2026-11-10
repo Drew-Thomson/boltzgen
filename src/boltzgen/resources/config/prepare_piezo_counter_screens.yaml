@@ -1,0 +1,6 @@
+_target_: boltzgen.task.predict.piezo_counter_screen.PreparePiezoCounterScreens
+input_dir: null
+output_dir: null
+strain_amplitude: 0.10
+candidates_path: null
+moldir: null

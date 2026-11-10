@@ -137,6 +137,18 @@ def backbone_ca_coords(
     backbone_mask: torch.Tensor,
 ) -> torch.Tensor:
     """Extract CA coordinates from N/CA/C/O backbone atoms, chain by chain."""
+    ca_by_chain = backbone_ca_coords_by_chain(atom_coords, atom_chain_ids, backbone_mask)
+    if not ca_by_chain:
+        return atom_coords.new_empty((0, 3))
+    return torch.cat(ca_by_chain, dim=0)
+
+
+def backbone_ca_coords_by_chain(
+    atom_coords: torch.Tensor,
+    atom_chain_ids: torch.Tensor,
+    backbone_mask: torch.Tensor,
+) -> list[torch.Tensor]:
+    """Extract CA coordinates as a list of per-chain tensors [L_k, 3]."""
     if atom_coords.ndim != 2 or atom_coords.shape[1] != 3:
         raise ValueError("atom_coords must have shape [N, 3]")
     if atom_chain_ids.ndim != 1 or backbone_mask.ndim != 1:
@@ -151,9 +163,7 @@ def backbone_ca_coords(
         if chain_coords.shape[0] % 4 != 0:
             continue
         ca_by_chain.append(chain_coords.reshape(-1, 4, 3)[:, 1, :])
-    if not ca_by_chain:
-        return atom_coords.new_empty((0, 3))
-    return torch.cat(ca_by_chain, dim=0)
+    return ca_by_chain
 
 
 def cylinder_metrics(
@@ -233,6 +243,8 @@ def compute_material_metrics(
     chain_coms: torch.Tensor,
     backbone_coords: torch.Tensor,
     ca_coords: torch.Tensor,
+    chain_ca_list: list[torch.Tensor] | None = None,
+    atom_res_names: list[str] | None = None,
 ) -> dict[str, float]:
     """Dispatch applicable material metrics for one topology."""
     result: dict[str, float] = {}
@@ -252,6 +264,36 @@ def compute_material_metrics(
             result["neg_pore_aspect_ratio"] = -aspect_ratio
     elif topology == "cylindrical":
         result.update(cylinder_metrics(chain_coms, ca_coords))
+
+    # Evaluate dipole and polar order metrics for polar helical/tubular topologies
+    if topology in {"helical", "cylindrical", "multi_helical", "nanotube"}:
+        try:
+            from boltzgen.task.analyze.piezo_metrics import (
+                compute_assembly_dipole,
+                compute_polar_order_parameter,
+            )
+
+            if chain_ca_list:
+                s_polar = compute_polar_order_parameter(chain_ca_list)
+                result["polar_order_parameter"] = s_polar
+
+                dipole_dict = compute_assembly_dipole(
+                    atom_coords=backbone_coords,
+                    atom_res_names=atom_res_names or [],
+                    chain_ca_coords=chain_ca_list,
+                )
+                result.update(dipole_dict)
+
+                # Approximate volume of bounding cylinder V = pi * R^2 * H
+                if ca_coords.shape[0] > 0:
+                    z_span = float((ca_coords[:, 2].max() - ca_coords[:, 2].min()).item())
+                    xy_dist = torch.sqrt(ca_coords[:, 0] ** 2 + ca_coords[:, 1] ** 2)
+                    radius = float(xy_dist.mean().item())
+                    vol = float(math.pi * (radius**2) * max(z_span, 1.0))
+                    result["assembly_volume_angstrom3"] = vol
+        except Exception as err:
+            print("Warning: failed to compute piezo metrics in compute_material_metrics:", err)
+
     return result
 
 

@@ -43,6 +43,8 @@ def generate_yaml_from_spec(
     topology=None,
     topology_params=None,
     charge_bias_strength=None,
+    piezo_screening=False,
+    axial_strain=0.10,
 ):
     entities, layout = expand_material_spec(
         num_copies,
@@ -52,6 +54,11 @@ def generate_yaml_from_spec(
         topology_params=topology_params,
         charge_bias_strength=charge_bias_strength,
     )
+    if piezo_screening:
+        layout["piezo_screening"] = {
+            "enabled": True,
+            "axial_strain": float(axial_strain),
+        }
     spec = {"entities": entities}
     with open(output_file, "w") as f:
         yaml.dump(spec, f, sort_keys=False)
@@ -349,6 +356,20 @@ def main():
         default=None,
         help="Specific pipeline steps to run (e.g. '--steps design' to generate backbone topologies without the full design pipeline)",
     )
+    parser.add_argument(
+        "--piezo_screen",
+        "--piezo-screen",
+        action="store_true",
+        default=False,
+        help="Enable tri-state mechanical deformation screening for piezoelectric helical assemblies",
+    )
+    parser.add_argument(
+        "--axial_strain",
+        "--axial-strain",
+        type=float,
+        default=0.10,
+        help="Strain amplitude for tension (+eps) and compression (-eps) in piezo screening (default: 0.10)",
+    )
     
     args = parser.parse_args()
     
@@ -518,6 +539,16 @@ def main():
                 f"({args.num_starts})"
             )
 
+    if args.piezo_screen:
+        args.antiparallel_prob = 0.0
+        if not args.secondary_structure:
+            args.secondary_structure = "H"
+        supported_piezo_topologies = {"helical", "cylindrical", "multi_helical", "nanotube"}
+        if args.topology not in supported_piezo_topologies:
+            parser.error(
+                f"--piezo_screen requires a polar helical/tubular topology ({sorted(supported_piezo_topologies)}); got {args.topology}"
+            )
+
     if args.target_cage_radius is None:
         args.target_cage_radius = 20.0 if args.topology == "cage_tetrahedral" else 35.0
 
@@ -613,6 +644,8 @@ def main():
             "antiparallel_prob": args.antiparallel_prob,
         },
         charge_bias_strength=args.heteromer_charge_bias,
+        piezo_screening=args.piezo_screen,
+        axial_strain=args.axial_strain,
     )
     
     if args.run:
@@ -649,6 +682,9 @@ def main():
                 cmd.extend(["--max_surviving_designs", str(args.max_surviving_designs)])
             if hasattr(args, "target_min_plddt"):
                 cmd.extend(["--target_min_plddt", str(args.target_min_plddt)])
+
+        if getattr(args, "piezo_screen", False):
+            cmd.extend(["--piezo_counter_screen", "--axial_strain", str(args.axial_strain)])
 
         if args.ligand_counter_screen:
             cmd.append("--ligand_counter_screen")

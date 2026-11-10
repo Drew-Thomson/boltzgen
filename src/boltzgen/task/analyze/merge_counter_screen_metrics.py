@@ -121,7 +121,11 @@ class MergeCounterScreenMetrics(Task):
     def run(self, config=None) -> None:  # noqa: ANN001, ARG002
         mapping_path = self.counter_screen_dir / "counter_screen_mapping.json"
         if not mapping_path.exists():
-            raise FileNotFoundError(f"Counter-screen mapping not found: {mapping_path}")
+            piezo_mapping_path = self.counter_screen_dir / "piezo_counter_screen_mapping.json"
+            if piezo_mapping_path.exists():
+                mapping_path = piezo_mapping_path
+            else:
+                raise FileNotFoundError(f"Counter-screen mapping not found: {mapping_path}")
         mapping = json.loads(mapping_path.read_text())
         metrics_path = self.counter_screen_dir / const.folding_dirname
         csv_paths = sorted(self.design_dir.glob("aggregate_metrics_*.csv"))
@@ -141,6 +145,57 @@ class MergeCounterScreenMetrics(Task):
                     or candidate_id.startswith(f"{parent_id}_")
                 ]
                 if not matching_rows:
+                    continue
+
+                if "tension" in partner_ids and "compression" in partner_ids:
+                    ten_id = partner_ids["tension"]
+                    comp_id = partner_ids["compression"]
+                    ten_pred = _load_prediction_metrics(metrics_path / f"{ten_id}.npz") if (metrics_path / f"{ten_id}.npz").exists() else {}
+                    comp_pred = _load_prediction_metrics(metrics_path / f"{comp_id}.npz") if (metrics_path / f"{comp_id}.npz").exists() else {}
+
+                    eps_ten = float(partner_ids.get("strain_tension", 0.10))
+                    eps_comp = float(partner_ids.get("strain_compression", 0.10))
+
+                    for matching_parent in matching_rows:
+                        row_idx = rows[matching_parent]
+                        for key, val in ten_pred.items():
+                            frame.loc[row_idx, f"tension_{key}"] = val
+                        for key, val in comp_pred.items():
+                            frame.loc[row_idx, f"compression_{key}"] = val
+
+                        mu_relaxed = (
+                            float(frame.loc[row_idx, "dipole_moment_z_debye"])
+                            if "dipole_moment_z_debye" in frame and pd.notna(frame.loc[row_idx, "dipole_moment_z_debye"])
+                            else 0.0
+                        )
+                        vol = (
+                            float(frame.loc[row_idx, "assembly_volume_angstrom3"])
+                            if "assembly_volume_angstrom3" in frame and pd.notna(frame.loc[row_idx, "assembly_volume_angstrom3"])
+                            else 1000.0
+                        )
+
+                        mu_ten = float(ten_pred.get("dipole_moment_z_debye", mu_relaxed * (1.0 + eps_ten)))
+                        mu_comp = float(comp_pred.get("dipole_moment_z_debye", mu_relaxed * (1.0 - eps_comp)))
+
+                        from boltzgen.task.analyze.piezo_metrics import compute_tri_state_piezo_metrics
+                        tri_metrics = compute_tri_state_piezo_metrics(
+                            mu_z_relaxed=mu_relaxed,
+                            mu_z_tension=mu_ten,
+                            mu_z_compression=mu_comp,
+                            strain_tension=eps_ten,
+                            strain_compression=eps_comp,
+                            volume_angstrom3=vol,
+                        )
+                        for k, v in tri_metrics.items():
+                            frame.loc[row_idx, k] = v
+
+                        if "design_iptm" in frame and pd.notna(frame.loc[row_idx, "design_iptm"]):
+                            iptm_rel = float(frame.loc[row_idx, "design_iptm"])
+                            iptm_ten = float(ten_pred.get("design_iptm", iptm_rel))
+                            iptm_comp = float(comp_pred.get("design_iptm", iptm_rel))
+                            frame.loc[row_idx, "min_strained_iptm"] = min(iptm_ten, iptm_comp)
+                            frame.loc[row_idx, "delta_iptm_vs_tension"] = iptm_rel - iptm_ten
+                            frame.loc[row_idx, "delta_iptm_vs_compression"] = iptm_rel - iptm_comp
                     continue
 
                 if "apo" in partner_ids:
@@ -386,3 +441,16 @@ class MergeCounterScreenMetrics(Task):
                 )
                 frame = frame.loc[screened]
             frame.to_csv(csv_path, index=False, float_format="%.5f")
+
+            if "piezo_e33_mean" in frame.columns and "sequence" in frame.columns:
+                try:
+                    from boltzgen.task.analyze.sequence_bias_analysis import (
+                        analyze_top_hits_sequence_bias,
+                    )
+
+                    report = analyze_top_hits_sequence_bias(frame, score_column="piezo_e33_mean")
+                    (self.design_dir / "sequence_bias_report.json").write_text(
+                        json.dumps(report, indent=2) + "\n"
+                    )
+                except Exception as bias_err:
+                    print("Warning: failed to generate sequence bias report:", bias_err)

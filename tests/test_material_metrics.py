@@ -643,3 +643,34 @@ def test_double_tape_neatness_tot_intra_zero_returns_zero() -> None:
     assert res_dispersed["intra_sheet_alternation_ratio"] == pytest.approx(0.0)
     assert res_dispersed["double_tape_neatness_score"] == pytest.approx(0.0)
 
+
+def test_compute_material_metrics_helical_dipole() -> None:
+    """Verify compute_material_metrics calculates polar order and dipole for helical topology."""
+    from boltzgen.task.analyze.material_metrics import compute_material_metrics
+
+    # 4 parallel helices
+    chain_ca_list = [
+        torch.tensor([[0.0, 0.0, float(z * 1.5)] for z in range(15)], dtype=torch.float32),
+        torch.tensor([[10.0, 0.0, float(z * 1.5)] for z in range(15)], dtype=torch.float32),
+        torch.tensor([[0.0, 10.0, float(z * 1.5)] for z in range(15)], dtype=torch.float32),
+        torch.tensor([[10.0, 10.0, float(z * 1.5)] for z in range(15)], dtype=torch.float32),
+    ]
+    ca_coords = torch.cat(chain_ca_list, dim=0)
+    chain_coms = torch.stack([ca.mean(dim=0) for ca in chain_ca_list])
+    backbone_coords = ca_coords.repeat_interleave(4, dim=0)
+
+    metrics = compute_material_metrics(
+        topology="helical",
+        chain_coms=chain_coms,
+        backbone_coords=backbone_coords,
+        ca_coords=ca_coords,
+        chain_ca_list=chain_ca_list,
+    )
+
+    assert "polar_order_parameter" in metrics
+    assert metrics["polar_order_parameter"] == pytest.approx(1.0, abs=1e-4)
+    assert "dipole_moment_z_debye" in metrics
+    assert metrics["dipole_moment_z_debye"] > 0.0
+    assert "assembly_volume_angstrom3" in metrics
+    assert metrics["assembly_volume_angstrom3"] > 0.0
+

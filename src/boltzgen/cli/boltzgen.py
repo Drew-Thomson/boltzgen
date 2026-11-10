@@ -222,6 +222,19 @@ def add_configure_arguments(
         help="Run ligand-free (apo) counter-screen folds for ligand-bearing assemblies to discover ligand-dependent complexes",
     )
     p.add_argument(
+        "--piezo_counter_screen",
+        "--piezo-counter-screen",
+        action="store_true",
+        help="Run tri-state tensile and compressive deformation counter-screens for piezoelectric evaluation",
+    )
+    p.add_argument(
+        "--axial_strain",
+        "--axial-strain",
+        type=float,
+        default=0.10,
+        help="Strain amplitude for tension (+eps) and compression (-eps) in piezo screening (default: 0.10)",
+    )
+    p.add_argument(
         "--max_partner_identity",
         "--max-partner-identity",
         type=float,
@@ -1624,6 +1637,54 @@ class BinderDesignPipeline:
                     ],
                 )
             )
+        elif getattr(args, "piezo_counter_screen", False):
+            counter_screen_dir = args.output / "piezo_counter_screens"
+            source_dir = (
+                input_dir / const.folding_dirname
+                if (input_dir / const.folding_dirname).is_dir()
+                else input_dir / "intermediate_designs"
+            )
+            self.steps.append(
+                PipelineStep(
+                    name="prepare_counter_screens",
+                    config_path=args.config_dir / "prepare_piezo_counter_screens.yaml",
+                    args=[
+                        f"input_dir={source_dir}",
+                        f"output_dir={counter_screen_dir}",
+                        f"strain_amplitude={args.axial_strain}",
+                        f"moldir={moldir}",
+                    ],
+                )
+            )
+            self.steps.append(
+                PipelineStep(
+                    name="counter_screen_folding",
+                    config_path=args.config_dir / "fold.yaml",
+                    args=[
+                        f"output={counter_screen_dir}",
+                        f"data.design_dir={counter_screen_dir}",
+                        f"trainer.devices={devices}",
+                        f"data.cfg.num_workers={args.num_workers}",
+                        f"data.skip_existing={args.reuse}",
+                        f"data.skip_existing_kind=folded",
+                        "data.cfg.target_id_regex='^(.+)$'",
+                        f"override.use_kernels={use_kernels}",
+                        f"checkpoint={get_artifact_path(args, args.folding_checkpoint)}",
+                        f"data.cfg.moldir={moldir}",
+                        "keys_dict_out=[complex_plddt,protein_iptm,design_iptm,min_interaction_pae]",
+                    ],
+                )
+            )
+            self.steps.append(
+                PipelineStep(
+                    name="merge_counter_screen_metrics",
+                    config_path=args.config_dir / "merge_counter_screen_metrics.yaml",
+                    args=[
+                        f"design_dir={input_dir}",
+                        f"counter_screen_dir={counter_screen_dir}",
+                    ],
+                )
+            )
 
         # Filtering
         output_dir = args.output / "final_ranked_designs"
@@ -1666,6 +1727,11 @@ class BinderDesignPipeline:
                 format_ligand_counter_screen_metrics_override,
             )
             filter_args.append(format_ligand_counter_screen_metrics_override())
+        elif getattr(args, "piezo_counter_screen", False):
+            filter_args.append(
+                "metrics_override={piezo_e33_mean: 1, polar_order_parameter: 1, "
+                "min_strained_iptm: 1, design_iptm: 1}"
+            )
 
         # Add optional filtering arguments
         if args.alpha is not None:
