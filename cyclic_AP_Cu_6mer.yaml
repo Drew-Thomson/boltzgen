@@ -1,8 +1,9 @@
 copies: 6
 topology: cyclic
-target_radius: 10.0
+target_radius: 9.5
 antiparallel_prob: 1.0
-num_designs: 10
+num_designs: 20
+seqs_per_backbone: 5
 spacing_noise: 1
 inverse_temp: 2
 ligand_counter_screen: true

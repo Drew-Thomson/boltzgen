@@ -4,3 +4,5 @@ output_dir: null
 strain_amplitude: 0.10
 candidates_path: null
 moldir: null
+mode: rigid_centroid
+poisson_ratio: 0.35

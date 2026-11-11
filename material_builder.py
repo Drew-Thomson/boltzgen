@@ -45,6 +45,8 @@ def generate_yaml_from_spec(
     charge_bias_strength=None,
     piezo_screening=False,
     axial_strain=0.10,
+    piezo_mode="rigid_centroid",
+    piezo_poisson_ratio=0.35,
 ):
     entities, layout = expand_material_spec(
         num_copies,
@@ -58,6 +60,8 @@ def generate_yaml_from_spec(
         layout["piezo_screening"] = {
             "enabled": True,
             "axial_strain": float(axial_strain),
+            "mode": str(piezo_mode),
+            "poisson_ratio": float(piezo_poisson_ratio),
         }
     spec = {"entities": entities}
     with open(output_file, "w") as f:
@@ -370,6 +374,21 @@ def main():
         default=0.10,
         help="Strain amplitude for tension (+eps) and compression (-eps) in piezo screening (default: 0.10)",
     )
+    parser.add_argument(
+        "--piezo_mode",
+        "--piezo-mode",
+        type=str,
+        default="rigid_centroid",
+        choices=["rigid_centroid", "affine"],
+        help="Piezo deformation mode: 'rigid_centroid' (preserves helices) or 'affine' (1D scaling; default: rigid_centroid)",
+    )
+    parser.add_argument(
+        "--piezo_poisson_ratio",
+        "--piezo-poisson-ratio",
+        type=float,
+        default=0.35,
+        help="Effective Poisson ratio for transverse strain in piezo screening (default: 0.35)",
+    )
     
     args = parser.parse_args()
     
@@ -646,6 +665,8 @@ def main():
         charge_bias_strength=args.heteromer_charge_bias,
         piezo_screening=args.piezo_screen,
         axial_strain=args.axial_strain,
+        piezo_mode=args.piezo_mode,
+        piezo_poisson_ratio=args.piezo_poisson_ratio,
     )
     
     if args.run:
@@ -684,7 +705,15 @@ def main():
                 cmd.extend(["--target_min_plddt", str(args.target_min_plddt)])
 
         if getattr(args, "piezo_screen", False):
-            cmd.extend(["--piezo_counter_screen", "--axial_strain", str(args.axial_strain)])
+            cmd.extend([
+                "--piezo_counter_screen",
+                "--axial_strain",
+                str(args.axial_strain),
+                "--piezo_mode",
+                str(args.piezo_mode),
+                "--piezo_poisson_ratio",
+                str(args.piezo_poisson_ratio),
+            ])
 
         if args.ligand_counter_screen:
             cmd.append("--ligand_counter_screen")

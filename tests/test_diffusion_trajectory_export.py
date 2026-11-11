@@ -429,4 +429,20 @@ def test_axial_strain_helical_trajectory_comparison(tmp_path: Path) -> None:
     assert comparison_fig.exists()
     assert comparison_fig.stat().st_size > 0
 
+    # Test 3-row tri-state piezoelectric deformation comparison
+    tri_state_fig = tmp_path / "tri_state_piezo_comparison.png"
+    plot_point_cloud_comparison(
+        binder_traj=None,
+        helical_traj=traj_data,
+        output_path=tri_state_fig,
+        axial_strain=0.15,
+        tri_state_deformation=True,
+        lock_deformation_bounds=True,
+        num_timepoints=4,
+        dpi=100,
+    )
+    assert tri_state_fig.exists()
+    assert tri_state_fig.stat().st_size > 0
+
+
 

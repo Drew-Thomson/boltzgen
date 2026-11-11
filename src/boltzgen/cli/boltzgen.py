@@ -232,7 +232,31 @@ def add_configure_arguments(
         "--axial-strain",
         type=float,
         default=0.10,
-        help="Strain amplitude for tension (+eps) and compression (-eps) in piezo screening (default: 0.10)",
+        help=(
+            "Strain amplitude for tension (+eps) and compression (-eps) "
+            "in piezo screening (default: 0.10)"
+        ),
+    )
+    p.add_argument(
+        "--piezo_mode",
+        "--piezo-mode",
+        type=str,
+        default="rigid_centroid",
+        choices=["rigid_centroid", "affine"],
+        help=(
+            "Piezo deformation mode: 'rigid_centroid' (preserves helices) "
+            "or 'affine' (1D scaling; default: rigid_centroid)"
+        ),
+    )
+    p.add_argument(
+        "--piezo_poisson_ratio",
+        "--piezo-poisson-ratio",
+        type=float,
+        default=0.35,
+        help=(
+            "Effective Poisson ratio for transverse strain in piezo screening "
+            "(default: 0.35)"
+        ),
     )
     p.add_argument(
         "--max_partner_identity",
@@ -1653,6 +1677,8 @@ class BinderDesignPipeline:
                         f"output_dir={counter_screen_dir}",
                         f"strain_amplitude={args.axial_strain}",
                         f"moldir={moldir}",
+                        f"mode={getattr(args, 'piezo_mode', 'rigid_centroid')}",
+                        f"poisson_ratio={getattr(args, 'piezo_poisson_ratio', 0.35)}",
                     ],
                 )
             )

@@ -561,7 +561,10 @@ def prepare_helical_trajectory(
     ca_only: bool = False,
     align_to_axis: bool = True,
     axial_strain: float = 0.0,
-) -> Tuple[List[np.ndarray], List[float], np.ndarray, np.ndarray]:
+    poisson_ratio: float = 0.35,
+    deformation_mode: str = "rigid_centroid",
+    return_atom_types: bool = False,
+) -> Tuple[Any, ...]:
     r"""Extract and align key timepoints for symmetry-driven helical design.
 
     Parameters
@@ -584,6 +587,13 @@ def prepare_helical_trajectory(
     align_to_axis : bool, default True
         Whether to align the principal helical axis along the vertical Z-axis
         and align all frames to the final structure.
+    axial_strain : float, default 0.0
+        Engineering strain applied along the principal z-axis.
+    poisson_ratio : float, default 0.35
+        Effective Poisson ratio governing transverse strain in rigid centroid mode.
+    deformation_mode : str, default "rigid_centroid"
+        Deformation method: "rigid_centroid" (preserves intra-chain helices)
+        or "affine" (1D coordinate scaling).
 
     Returns
     -------
@@ -603,7 +613,7 @@ def prepare_helical_trajectory(
     total_frames = coords.shape[0]
     all_t_vals = compute_diffusion_times(step_indices, total_frames)
 
-    valid_mask = traj_data["atom_pad_mask"].copy()
+    valid_mask = traj_data["atom_pad_mask"].copy() > 0.5
     if mainchain_only or ca_only:
         atom_indices = np.arange(len(valid_mask))
         mc_filter = (
@@ -651,12 +661,34 @@ def prepare_helical_trajectory(
         final_oriented = aligned_frames[-1]
 
     if axial_strain != 0.0:
-        z_ref = float(np.mean(final_oriented[:, 2]))
+        unique_chains_strain = np.unique(asym_id_valid)
         strained_frames: List[np.ndarray] = []
-        for frame in aligned_frames:
-            f = frame.copy()
-            f[:, 2] = z_ref + (f[:, 2] - z_ref) * (1.0 + axial_strain)
-            strained_frames.append(f)
+        if deformation_mode == "rigid_centroid" and len(unique_chains_strain) > 1:
+            ref_centroids = np.array([
+                np.mean(final_oriented[asym_id_valid == cid], axis=0)
+                for cid in unique_chains_strain
+            ], dtype=np.float64)
+            assembly_center = np.mean(ref_centroids, axis=0)
+
+            chain_deltas = {}
+            for cid, c_k in zip(unique_chains_strain, ref_centroids):
+                delta = np.zeros(3, dtype=np.float64)
+                delta[0] = -(c_k[0] - assembly_center[0]) * poisson_ratio * axial_strain
+                delta[1] = -(c_k[1] - assembly_center[1]) * poisson_ratio * axial_strain
+                delta[2] = (c_k[2] - assembly_center[2]) * axial_strain
+                chain_deltas[cid] = delta
+
+            for frame in aligned_frames:
+                f = frame.copy()
+                for cid, delta in chain_deltas.items():
+                    f[asym_id_valid == cid] += delta
+                strained_frames.append(f)
+        else:
+            z_ref = float(np.mean(final_oriented[:, 2]))
+            for frame in aligned_frames:
+                f = frame.copy()
+                f[:, 2] = z_ref + (f[:, 2] - z_ref) * (1.0 + axial_strain)
+                strained_frames.append(f)
         aligned_frames = strained_frames
         final_oriented = aligned_frames[-1]
 
@@ -670,6 +702,16 @@ def prepare_helical_trajectory(
     chain_indices = np.array(
         [chain_to_order[cid] for cid in asym_id_valid], dtype=int
     )
+
+    if return_atom_types:
+        raw_atom_indices = np.arange(len(traj_data["atom_pad_mask"]))[valid_mask]
+        mod14 = raw_atom_indices % ATOM14_NUM_ATOMS
+        atom_types = {
+            "is_ca": (mod14 == CA_ATOM_OFFSET),
+            "is_backbone": (mod14 < BACKBONE_ATOMS_PER_RES),
+            "is_sidechain": (mod14 >= BACKBONE_ATOMS_PER_RES),
+        }
+        return aligned_frames, t_vals, chain_indices, asym_id_valid, atom_types
 
     return aligned_frames, t_vals, chain_indices, asym_id_valid
 
@@ -883,11 +925,16 @@ def _plot_helical_row(
     show_row_label: bool = True,
     show_colorbar: bool = True,
     axial_strain: float = 0.0,
+    poisson_ratio: float = 0.35,
+    deformation_mode: str = "rigid_centroid",
+    sidechain_alpha: float = 0.50,
     row_title: Optional[str] = None,
     final_frame_subtitle: Optional[str] = None,
+    fixed_center: Optional[np.ndarray] = None,
+    fixed_span: Optional[float] = None,
 ) -> None:
     """Plot symmetry-driven helical design point-cloud trajectory row."""
-    h_frames, h_t_vals, h_chains, _ = prepare_helical_trajectory(
+    h_frames, h_t_vals, h_chains, _, atom_types = prepare_helical_trajectory(
         helical_traj,
         num_timepoints=num_timepoints,
         frame_indices=frame_indices,
@@ -897,13 +944,20 @@ def _plot_helical_row(
         ca_only=ca_only,
         align_to_axis=True,
         axial_strain=axial_strain,
+        poisson_ratio=poisson_ratio,
+        deformation_mode=deformation_mode,
+        return_atom_types=True,
     )
 
-    ref_frame = h_frames[-1]
-    h_min = np.min(ref_frame, axis=0)
-    h_max = np.max(ref_frame, axis=0)
-    h_center = (h_min + h_max) / 2.0
-    h_span = max(float(np.max(h_max - h_min) * 0.55 * box_scale), 1.0)
+    if fixed_center is not None and fixed_span is not None:
+        h_center = fixed_center
+        h_span = fixed_span
+    else:
+        ref_frame = h_frames[-1]
+        h_min = np.min(ref_frame, axis=0)
+        h_max = np.max(ref_frame, axis=0)
+        h_center = (h_min + h_max) / 2.0
+        h_span = max(float(np.max(h_max - h_min) * 0.55 * box_scale), 1.0)
 
     num_chains = len(np.unique(h_chains))
     cmap, norm = get_discrete_colormap(cmap_name, num_chains)
@@ -919,35 +973,72 @@ def _plot_helical_row(
         ax.set_facecolor("white")
 
         frame_pts = h_frames[col_idx]
-        edge_c = "black" if (mainchain_only or ca_only) else "none"
-        lw = 0.25 if (mainchain_only or ca_only) else 0.0
-        ax.scatter(
-            frame_pts[:, 0],
-            frame_pts[:, 1],
-            frame_pts[:, 2],
-            c=chain_colors,
-            s=point_size,
-            alpha=0.85,
-            edgecolors=edge_c,
-            linewidths=lw,
-            rasterized=True,
-        )
+        if (mainchain_only or ca_only) or sidechain_alpha >= 1.0 or atom_types is None:
+            edge_c = "black" if (mainchain_only or ca_only) else "none"
+            lw = 0.25 if (mainchain_only or ca_only) else 0.0
+            ax.scatter(
+                frame_pts[:, 0],
+                frame_pts[:, 1],
+                frame_pts[:, 2],
+                c=chain_colors,
+                s=point_size,
+                alpha=0.85,
+                edgecolors=edge_c,
+                linewidths=lw,
+                rasterized=True,
+            )
+        else:
+            is_sc = atom_types["is_sidechain"]
+            is_ca = atom_types["is_ca"]
+            is_other_bb = atom_types["is_backbone"] & (~is_ca)
+
+            # 1. Side chains with ~50% transparency
+            if np.any(is_sc):
+                ax.scatter(
+                    frame_pts[is_sc, 0],
+                    frame_pts[is_sc, 1],
+                    frame_pts[is_sc, 2],
+                    c=chain_colors[is_sc],
+                    s=point_size * 0.75,
+                    alpha=sidechain_alpha,
+                    edgecolors="none",
+                    rasterized=True,
+                )
+
+            # 2. Non-CA backbone atoms (N, C, O) with high opacity
+            if np.any(is_other_bb):
+                ax.scatter(
+                    frame_pts[is_other_bb, 0],
+                    frame_pts[is_other_bb, 1],
+                    frame_pts[is_other_bb, 2],
+                    c=chain_colors[is_other_bb],
+                    s=point_size * 0.9,
+                    alpha=0.90,
+                    edgecolors="none",
+                    rasterized=True,
+                )
+
+            # 3. CA backbone atoms with solid opacity and crisp outline
+            if np.any(is_ca):
+                ax.scatter(
+                    frame_pts[is_ca, 0],
+                    frame_pts[is_ca, 1],
+                    frame_pts[is_ca, 2],
+                    c=chain_colors[is_ca],
+                    s=point_size * 1.35,
+                    alpha=1.0,
+                    edgecolors="black",
+                    linewidths=0.35,
+                    rasterized=True,
+                )
 
         if show_titles:
             t_val = h_t_vals[col_idx]
-            if col_idx == 0:
-                col_title = f"$t = {t_val:.2f}$" + "\n(Dispersed Cloud)"
-            elif col_idx == len(h_frames) - 1:
-                if final_frame_subtitle:
-                    col_title = f"$t = {t_val:.2f}$" + f"\n({final_frame_subtitle})"
-                elif axial_strain != 0.0:
-                    sign = "+" if axial_strain > 0 else ""
-                    col_title = f"$t = {t_val:.2f}$" + f"\n(Strained, ε = {sign}{axial_strain:.2f})"
-                else:
-                    col_title = f"$t = {t_val:.2f}$" + "\n(Self-Assembled Helix)"
+            if final_frame_subtitle and col_idx == len(h_frames) - 1:
+                col_title = f"$t = {t_val:.2f}$\n({final_frame_subtitle})"
             else:
                 col_title = f"$t = {t_val:.2f}$"
-            ax.set_title(col_title, fontsize=11, pad=4, weight="bold")
+            ax.set_title(col_title, fontsize=11, pad=6, weight="bold")
 
         _style_3d_axes(ax, h_center, h_span, elev, azim, dist=dist)
 
@@ -955,14 +1046,13 @@ def _plot_helical_row(
             if row_title:
                 effective_title = row_title
             elif axial_strain != 0.0:
-                sign = "+" if axial_strain > 0 else ""
-                effective_title = (
-                    f"Symmetry-Driven Helical Design\n(Axially Strained, ε = {sign}{axial_strain:.2f})"
-                )
+                pct = abs(int(round(axial_strain * 100)))
+                mode = "Tension" if axial_strain > 0 else "Compression"
+                effective_title = f"{pct}% {mode}"
             else:
-                effective_title = "Symmetry-Driven Helical Design\n(Self-Context Assembly)"
+                effective_title = "Unstrained"
             ax.text2D(
-                -0.18,
+                -0.24,
                 0.5,
                 effective_title,
                 transform=ax.transAxes,
@@ -997,14 +1087,23 @@ def plot_point_cloud_comparison(
     strained_helical_traj: Optional[Dict[str, np.ndarray]] = None,
     axial_strain: float = 0.0,
     show_strain_comparison: bool = False,
+    tri_state_deformation: bool = False,
+    compression_strain: Optional[float] = None,
+    tension_strain: Optional[float] = None,
+    lock_deformation_bounds: bool = True,
     helical_row_title: Optional[str] = None,
     strained_row_title: Optional[str] = None,
+    compression_row_title: Optional[str] = None,
+    tension_row_title: Optional[str] = None,
     num_timepoints: int = 5,
     frame_indices: Optional[List[int]] = None,
     t_start: float = 0.9,
     spacing_mode: str = "rmsd",
     mainchain_only: bool = False,
     ca_only: bool = False,
+    poisson_ratio: float = 0.35,
+    deformation_mode: str = "rigid_centroid",
+    sidechain_alpha: float = 0.50,
     elev: float = 20.0,
     azim: float = 35.0,
     camera_dist: float = 7.0,
@@ -1031,15 +1130,19 @@ def plot_point_cloud_comparison(
     """Render comparison figure of diffusion point-cloud trajectories."""
     has_binder = binder_traj is not None
     has_helical = helical_traj is not None
-    has_strained = (strained_helical_traj is not None) or (
-        show_strain_comparison and has_helical
+    has_tri_state = (
+        (tri_state_deformation or (compression_strain is not None and tension_strain is not None))
+        and has_helical
+    )
+    has_strained = (
+        ((strained_helical_traj is not None) or (show_strain_comparison and has_helical))
+        and not has_tri_state
     )
 
-    n_rows = (
-        (1 if has_binder else 0)
-        + (1 if has_helical else 0)
-        + (1 if has_strained else 0)
+    n_helical_rows = (
+        3 if has_tri_state else ((1 if has_helical else 0) + (1 if has_strained else 0))
     )
+    n_rows = (1 if has_binder else 0) + n_helical_rows
 
     if n_rows == 0:
         msg = "At least one trajectory (binder, helical, or strained_helical) must be provided."
@@ -1053,14 +1156,48 @@ def plot_point_cloud_comparison(
             height = 3.6
         elif n_rows == 2:
             height = 6.8
+        elif n_rows == 3:
+            height = 9.8
         else:
-            height = 10.0
+            height = 3.2 * n_rows
         eff_figsize = (width, height)
     else:
         eff_figsize = figsize
 
     fig = plt.figure(figsize=eff_figsize, dpi=dpi, facecolor="white")
     current_row = 0
+
+    shared_center: Optional[np.ndarray] = None
+    shared_span: Optional[float] = None
+    if lock_deformation_bounds and has_helical and (has_tri_state or has_strained or axial_strain != 0.0):
+        h_frames_ref, _, _, _ = prepare_helical_trajectory(
+            helical_traj,
+            num_timepoints=num_timepoints,
+            frame_indices=frame_indices,
+            t_start=t_start,
+            spacing_mode=spacing_mode,
+            mainchain_only=mainchain_only,
+            ca_only=ca_only,
+            align_to_axis=True,
+            axial_strain=0.0,
+            poisson_ratio=poisson_ratio,
+            deformation_mode=deformation_mode,
+        )
+        final_ref = h_frames_ref[-1]
+        h_min = np.min(final_ref, axis=0)
+        h_max = np.max(final_ref, axis=0)
+        shared_center = (h_min + h_max) / 2.0
+
+        if has_tri_state:
+            eff_ten_m = tension_strain if tension_strain is not None else (axial_strain or 0.15)
+            eff_comp_m = abs(compression_strain) if compression_strain is not None else (axial_strain or 0.15)
+            max_strain_m = max(eff_ten_m, eff_comp_m, 0.0)
+        elif has_strained:
+            max_strain_m = abs(axial_strain) if axial_strain != 0.0 else 0.20
+        else:
+            max_strain_m = abs(axial_strain)
+        dilation = 1.0 + max_strain_m
+        shared_span = max(float(np.max(h_max - h_min) * 0.55 * dilation * box_scale), 1.0)
 
     if has_binder and binder_traj is not None:
         if orient_vertical_right:
@@ -1096,7 +1233,116 @@ def plot_point_cloud_comparison(
         )
         current_row += 1
 
-    if has_helical and helical_traj is not None:
+    if has_tri_state and helical_traj is not None:
+        h_elev = helical_elev if helical_elev is not None else elev
+        h_azim = helical_azim if helical_azim is not None else azim
+
+        eff_ten = tension_strain if tension_strain is not None else (axial_strain or 0.15)
+        raw_comp = compression_strain if compression_strain is not None else (axial_strain or 0.15)
+        eff_comp = -abs(raw_comp)
+        comp_pct = abs(int(round(eff_comp * 100)))
+        ten_pct = abs(int(round(eff_ten * 100)))
+
+        # Row 1: Equilibrium / Relaxed
+        rel_title = helical_row_title or "Unstrained"
+        _plot_helical_row(
+            fig,
+            helical_traj,
+            row_idx=current_row,
+            total_rows=n_rows,
+            num_timepoints=num_timepoints,
+            frame_indices=frame_indices,
+            t_start=t_start,
+            spacing_mode=spacing_mode,
+            mainchain_only=mainchain_only,
+            ca_only=ca_only,
+            elev=h_elev,
+            azim=h_azim,
+            dist=camera_dist,
+            cmap_name=helical_cmap_name,
+            point_size=point_size_helical,
+            show_titles=(current_row == 0),
+            box_scale=box_scale,
+            show_row_label=show_row_labels,
+            show_colorbar=show_colorbar,
+            axial_strain=0.0,
+            poisson_ratio=poisson_ratio,
+            deformation_mode=deformation_mode,
+            sidechain_alpha=sidechain_alpha,
+            row_title=rel_title,
+            final_frame_subtitle=None,
+            fixed_center=shared_center,
+            fixed_span=shared_span,
+        )
+        current_row += 1
+
+        # Row 2: Compressive Strain
+        comp_title = compression_row_title or f"{comp_pct}% Compression"
+        _plot_helical_row(
+            fig,
+            helical_traj,
+            row_idx=current_row,
+            total_rows=n_rows,
+            num_timepoints=num_timepoints,
+            frame_indices=frame_indices,
+            t_start=t_start,
+            spacing_mode=spacing_mode,
+            mainchain_only=mainchain_only,
+            ca_only=ca_only,
+            elev=h_elev,
+            azim=h_azim,
+            dist=camera_dist,
+            cmap_name=helical_cmap_name,
+            point_size=point_size_helical,
+            show_titles=(current_row == 0),
+            box_scale=box_scale,
+            show_row_label=show_row_labels,
+            show_colorbar=False,
+            axial_strain=eff_comp,
+            poisson_ratio=poisson_ratio,
+            deformation_mode=deformation_mode,
+            sidechain_alpha=sidechain_alpha,
+            row_title=comp_title,
+            final_frame_subtitle=None,
+            fixed_center=shared_center,
+            fixed_span=shared_span,
+        )
+        current_row += 1
+
+        # Row 3: Tensile Strain
+        ten_title = tension_row_title or f"{ten_pct}% Tension"
+        _plot_helical_row(
+            fig,
+            helical_traj,
+            row_idx=current_row,
+            total_rows=n_rows,
+            num_timepoints=num_timepoints,
+            frame_indices=frame_indices,
+            t_start=t_start,
+            spacing_mode=spacing_mode,
+            mainchain_only=mainchain_only,
+            ca_only=ca_only,
+            elev=h_elev,
+            azim=h_azim,
+            dist=camera_dist,
+            cmap_name=helical_cmap_name,
+            point_size=point_size_helical,
+            show_titles=(current_row == 0),
+            box_scale=box_scale,
+            show_row_label=show_row_labels,
+            show_colorbar=False,
+            axial_strain=eff_ten,
+            poisson_ratio=poisson_ratio,
+            deformation_mode=deformation_mode,
+            sidechain_alpha=sidechain_alpha,
+            row_title=ten_title,
+            final_frame_subtitle=None,
+            fixed_center=shared_center,
+            fixed_span=shared_span,
+        )
+        current_row += 1
+
+    elif has_helical and helical_traj is not None:
         h_elev = helical_elev if helical_elev is not None else elev
         h_azim = helical_azim if helical_azim is not None else azim
         # If comparison is requested, the primary helical row is relaxed (strain = 0.0)
@@ -1130,7 +1376,12 @@ def plot_point_cloud_comparison(
             show_row_label=show_row_labels,
             show_colorbar=show_colorbar,
             axial_strain=eff_helical_strain,
+            poisson_ratio=poisson_ratio,
+            deformation_mode=deformation_mode,
+            sidechain_alpha=sidechain_alpha,
             row_title=eff_row_title,
+            fixed_center=shared_center,
+            fixed_span=shared_span,
         )
         current_row += 1
 
@@ -1177,24 +1428,227 @@ def plot_point_cloud_comparison(
             show_row_label=show_row_labels,
             show_colorbar=False,  # Avoid duplicate colorbar
             axial_strain=strain_to_apply,
+            poisson_ratio=poisson_ratio,
+            deformation_mode=deformation_mode,
+            sidechain_alpha=sidechain_alpha,
             row_title=eff_strained_title,
             final_frame_subtitle=f"Strained Helix, {sign_str}",
+            fixed_center=shared_center,
+            fixed_span=shared_span,
         )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    left_margin = 0.06 if show_row_labels else 0.02
+    left_margin = 0.08 if show_row_labels else 0.02
     right_margin = 0.90 if show_colorbar else 0.98
     plt.subplots_adjust(
         left=left_margin,
         right=right_margin,
-        top=0.88,
+        top=0.90,
         bottom=0.06,
         wspace=0.02,
-        hspace=0.12,
+        hspace=0.14,
     )
     plt.savefig(out_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     print(f"Figure successfully written to {out_path}")
+
+
+def plot_multi_design_piezo_comparison(
+    helical_trajs: List[Dict[str, np.ndarray]],
+    output_path: Path,
+    *,
+    design_labels: Optional[List[str]] = None,
+    axial_strain: float = 0.15,
+    mainchain_only: bool = False,
+    ca_only: bool = False,
+    poisson_ratio: float = 0.35,
+    deformation_mode: str = "rigid_centroid",
+    sidechain_alpha: float = 0.50,
+    elev: float = 20.0,
+    azim: float = 35.0,
+    camera_dist: float = 7.0,
+    point_size: float = 20.0,
+    helical_cmap_name: str = "tab10",
+    box_scale: float = 1.0,
+    dpi: int = 300,
+    figsize: Optional[Tuple[float, float]] = None,
+) -> None:
+    """Render multi-panel comparative figure comparing multiple helical design options under piezo deformation.
+
+    Each row corresponds to an independent design candidate.
+    Columns correspond to the tri-state piezoelectric deformation counter-screen:
+    - Column 1: Equilibrium / Relaxed State (eps = 0.00)
+    - Column 2: Compressive Strain Screen (eps = -axial_strain)
+    - Column 3: Tensile Strain Screen (eps = +axial_strain)
+    """
+    num_designs = len(helical_trajs)
+    if num_designs == 0:
+        msg = "At least one helical trajectory must be provided."
+        raise ValueError(msg)
+
+    strains = [0.0, -abs(axial_strain), abs(axial_strain)]
+    strain_pct = abs(int(round(axial_strain * 100)))
+    col_subtitles = [
+        "Unstrained",
+        f"{strain_pct}% Compression",
+        f"{strain_pct}% Tension",
+    ]
+
+    out_path = Path(output_path)
+    eff_figsize = figsize if figsize is not None else (11.0, 3.4 * num_designs)
+    fig = plt.figure(figsize=eff_figsize, dpi=dpi, facecolor="white")
+
+    for row_idx, traj in enumerate(helical_trajs):
+        d_label = (
+            design_labels[row_idx]
+            if (design_labels and row_idx < len(design_labels))
+            else f"Design Option {row_idx + 1}"
+        )
+
+        # Prepare un-strained final frame to get fixed center and span
+        h_frames_ref, _, h_chains, _ = prepare_helical_trajectory(
+            traj,
+            num_timepoints=2,
+            frame_indices=[-1],
+            mainchain_only=mainchain_only,
+            ca_only=ca_only,
+            align_to_axis=True,
+            axial_strain=0.0,
+            poisson_ratio=poisson_ratio,
+            deformation_mode=deformation_mode,
+        )
+        final_ref = h_frames_ref[-1]
+        h_min = np.min(final_ref, axis=0)
+        h_max = np.max(final_ref, axis=0)
+        h_center = (h_min + h_max) / 2.0
+        dilation = 1.0 + abs(axial_strain)
+        h_span = max(float(np.max(h_max - h_min) * 0.55 * dilation * box_scale), 1.0)
+
+        num_chains = len(np.unique(h_chains))
+        cmap, norm = get_discrete_colormap(helical_cmap_name, num_chains)
+        chain_colors = cmap(norm(h_chains))
+
+        for col_idx, strain_val in enumerate(strains):
+            ax = fig.add_subplot(
+                num_designs,
+                len(strains),
+                row_idx * len(strains) + col_idx + 1,
+                projection="3d",
+            )
+            ax.set_facecolor("white")
+
+            h_frames, _, _, _, atom_types = prepare_helical_trajectory(
+                traj,
+                num_timepoints=2,
+                frame_indices=[-1],
+                mainchain_only=mainchain_only,
+                ca_only=ca_only,
+                align_to_axis=True,
+                axial_strain=strain_val,
+                poisson_ratio=poisson_ratio,
+                deformation_mode=deformation_mode,
+                return_atom_types=True,
+            )
+            frame_pts = h_frames[-1]
+
+            if (mainchain_only or ca_only) or sidechain_alpha >= 1.0 or atom_types is None:
+                edge_c = "black" if (mainchain_only or ca_only) else "none"
+                lw = 0.25 if (mainchain_only or ca_only) else 0.0
+                ax.scatter(
+                    frame_pts[:, 0],
+                    frame_pts[:, 1],
+                    frame_pts[:, 2],
+                    c=chain_colors,
+                    s=point_size,
+                    alpha=0.85,
+                    edgecolors=edge_c,
+                    linewidths=lw,
+                    rasterized=True,
+                )
+            else:
+                is_sc = atom_types["is_sidechain"]
+                is_ca = atom_types["is_ca"]
+                is_other_bb = atom_types["is_backbone"] & (~is_ca)
+
+                # 1. Side chains with ~50% transparency
+                if np.any(is_sc):
+                    ax.scatter(
+                        frame_pts[is_sc, 0],
+                        frame_pts[is_sc, 1],
+                        frame_pts[is_sc, 2],
+                        c=chain_colors[is_sc],
+                        s=point_size * 0.75,
+                        alpha=sidechain_alpha,
+                        edgecolors="none",
+                        rasterized=True,
+                    )
+
+                # 2. Non-CA backbone atoms (N, C, O) with high opacity
+                if np.any(is_other_bb):
+                    ax.scatter(
+                        frame_pts[is_other_bb, 0],
+                        frame_pts[is_other_bb, 1],
+                        frame_pts[is_other_bb, 2],
+                        c=chain_colors[is_other_bb],
+                        s=point_size * 0.9,
+                        alpha=0.90,
+                        edgecolors="none",
+                        rasterized=True,
+                    )
+
+                # 3. CA backbone atoms with solid opacity and crisp outline
+                if np.any(is_ca):
+                    ax.scatter(
+                        frame_pts[is_ca, 0],
+                        frame_pts[is_ca, 1],
+                        frame_pts[is_ca, 2],
+                        c=chain_colors[is_ca],
+                        s=point_size * 1.35,
+                        alpha=1.0,
+                        edgecolors="black",
+                        linewidths=0.35,
+                        rasterized=True,
+                    )
+
+            if row_idx == 0:
+                ax.set_title(col_subtitles[col_idx], fontsize=12, pad=6, weight="bold")
+
+            _style_3d_axes(ax, h_center, h_span, elev, azim, dist=camera_dist)
+
+            if col_idx == 0:
+                ax.text2D(
+                    -0.24,
+                    0.5,
+                    d_label,
+                    transform=ax.transAxes,
+                    fontsize=11,
+                    weight="bold",
+                    va="center",
+                    ha="center",
+                    rotation=90,
+                    color="#1E293B",
+                )
+
+    cbar_ax = fig.add_axes([0.92, 0.15, 0.015, 0.70])
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, cax=cbar_ax, orientation="vertical")
+    cbar.set_label("Subunit Index Along Screw Axis", fontsize=9, weight="bold")
+    cbar.set_ticks(np.arange(num_chains))
+    cbar.set_ticklabels([str(i + 1) for i in range(num_chains)])
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.subplots_adjust(
+        left=0.10,
+        right=0.90,
+        top=0.90,
+        bottom=0.06,
+        wspace=0.04,
+        hspace=0.15,
+    )
+    plt.savefig(out_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Multi-design comparison figure successfully written to {out_path}")
 
 
 def main() -> None:
@@ -1211,8 +1665,9 @@ def main() -> None:
     parser.add_argument(
         "--helical",
         type=str,
+        nargs="+",
         default=None,
-        help="Path or glob pattern to helical trajectory archive",
+        help="Path(s) or glob pattern to helical trajectory archive(s)",
     )
     parser.add_argument(
         "--strained_helical",
@@ -1231,6 +1686,69 @@ def main() -> None:
         action="store_true",
         default=False,
         help="Show a separate strained helical row in addition to the relaxed helical row",
+    )
+    parser.add_argument(
+        "--tri_state_deformation",
+        "--piezo_deformation",
+        action="store_true",
+        default=False,
+        help="Show tri-state piezoelectric screening deformation (Equilibrium, Compressive Strain, Tensile Strain)",
+    )
+    parser.add_argument(
+        "--multi_design_comparison",
+        action="store_true",
+        default=False,
+        help="Compare multiple helical design candidates under tri-state deformation",
+    )
+    parser.add_argument(
+        "--design_labels",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Custom labels for each design candidate when comparing multiple designs",
+    )
+    parser.add_argument(
+        "--compression_strain",
+        type=float,
+        default=None,
+        help="Compressive strain magnitude (e.g. -0.15 or 0.15; default: negative of axial_strain or -0.15)",
+    )
+    parser.add_argument(
+        "--tension_strain",
+        type=float,
+        default=None,
+        help="Tensile strain magnitude (e.g. 0.15; default: positive axial_strain or +0.15)",
+    )
+    parser.add_argument(
+        "--lock_deformation_bounds",
+        action="store_true",
+        default=True,
+        help="Lock 3D coordinate bounding box across relaxed, compressed, and tensioned rows (default: True)",
+    )
+    parser.add_argument(
+        "--no_lock_deformation_bounds",
+        action="store_false",
+        dest="lock_deformation_bounds",
+        help="Disable shared bounding box across deformation rows",
+    )
+    parser.add_argument(
+        "--poisson_ratio",
+        type=float,
+        default=0.35,
+        help="Poisson's ratio for transverse strain under axial deformation (default: 0.35)",
+    )
+    parser.add_argument(
+        "--deformation_mode",
+        type=str,
+        default="rigid_centroid",
+        choices=["rigid_centroid", "affine"],
+        help="Piezo deformation mode: 'rigid_centroid' (preserves helices) or 'affine' (1D scaling; default: rigid_centroid)",
+    )
+    parser.add_argument(
+        "--sidechain_alpha",
+        type=float,
+        default=0.50,
+        help="Alpha transparency for sidechain atoms in all-atom views (default: 0.50)",
     )
     parser.add_argument(
         "--output",
@@ -1442,6 +1960,8 @@ def main() -> None:
 
     use_x0 = args.use_x0
 
+    custom_figsize = tuple(args.figsize) if args.figsize is not None else None
+
     binder_traj = None
     if args.binder is not None:
         binder_file = resolve_filepath(args.binder)
@@ -1450,7 +1970,42 @@ def main() -> None:
 
     helical_traj = None
     if args.helical is not None:
-        helical_file = resolve_filepath(args.helical)
+        helical_files = []
+        for h_spec in args.helical:
+            try:
+                helical_files.append(resolve_filepath(h_spec))
+            except Exception:
+                helical_files.append(Path(h_spec))
+
+        if args.multi_design_comparison or len(helical_files) > 1:
+            print(
+                f"Loading {len(helical_files)} helical trajectories for multi-design comparison..."
+            )
+            loaded_trajs = [
+                load_trajectory_data(f, use_x0=use_x0) for f in helical_files
+            ]
+            plot_multi_design_piezo_comparison(
+                helical_trajs=loaded_trajs,
+                output_path=args.output,
+                design_labels=args.design_labels,
+                axial_strain=args.axial_strain or 0.15,
+                mainchain_only=args.mainchain_only,
+                ca_only=args.ca_only,
+                poisson_ratio=args.poisson_ratio,
+                deformation_mode=args.deformation_mode,
+                sidechain_alpha=args.sidechain_alpha,
+                elev=args.elev,
+                azim=args.azim,
+                camera_dist=args.camera_dist,
+                point_size=args.point_size_helical,
+                helical_cmap_name=args.helical_cmap_name,
+                box_scale=args.box_scale,
+                dpi=args.dpi,
+                figsize=custom_figsize,
+            )
+            return
+
+        helical_file = helical_files[0]
         print(f"Loading helical trajectory: {helical_file}")
         helical_traj = load_trajectory_data(helical_file, use_x0=use_x0)
 
@@ -1460,14 +2015,19 @@ def main() -> None:
         print(f"Loading strained helical trajectory: {strained_file}")
         strained_helical_traj = load_trajectory_data(strained_file, use_x0=use_x0)
 
-    custom_figsize = tuple(args.figsize) if args.figsize is not None else None
-
     plot_point_cloud_comparison(
         binder_traj=binder_traj,
         helical_traj=helical_traj,
         strained_helical_traj=strained_helical_traj,
         axial_strain=args.axial_strain,
         show_strain_comparison=args.show_strain_comparison,
+        tri_state_deformation=args.tri_state_deformation,
+        compression_strain=args.compression_strain,
+        tension_strain=args.tension_strain,
+        lock_deformation_bounds=args.lock_deformation_bounds,
+        poisson_ratio=args.poisson_ratio,
+        deformation_mode=args.deformation_mode,
+        sidechain_alpha=args.sidechain_alpha,
         output_path=args.output,
         num_timepoints=args.num_timepoints,
         frame_indices=args.frame_indices,
