@@ -139,6 +139,16 @@ def main():
     parser.add_argument("--asym_unit_size", type=int, default=1, help="Number of chains in the asymmetric unit")
     parser.add_argument("--topology", type=str, choices=["floating", "cyclic", "cylindrical", "linear_tape", "double_tape", "helical", "open_arc", "cage_tetrahedral", "cage_octahedral", "bilayer_sheet", "hexagonal_mesh", "nanotube", "multi_helical"], default="floating", help="Topology constraint during diffusion")
     parser.add_argument("--guidance_scale", type=float, default=1.0, help="Strength of the shape guidance")
+    parser.add_argument("--guidance_mode", type=str, choices=["decoupled", "unified"], default="decoupled", help="Guidance architecture: decoupled (separate centroid positioning from shape consensus) or unified (default: decoupled)")
+    parser.add_argument("--guidance_start", type=float, default=0.50, help="Diffusion time parameter t in [0.0, 1.0] to start ramping symmetry guidance (default: 0.50)")
+    parser.add_argument("--guidance_end", type=float, default=0.30, help="Diffusion time parameter t in [0.0, 1.0] where guidance reaches full scale (default: 0.30)")
+    parser.add_argument("--guidance_pos_start", type=float, default=0.85, help="Diffusion time t to start centroid positioning guidance in decoupled mode (default: 0.85)")
+    parser.add_argument("--guidance_pos_end", type=float, default=0.50, help="Diffusion time t where centroid guidance reaches full scale in decoupled mode (default: 0.50)")
+    parser.add_argument("--guidance_shape_start", type=float, default=0.50, help="Diffusion time t to start internal shape consensus guidance in decoupled mode (default: 0.50)")
+    parser.add_argument("--guidance_shape_end", type=float, default=0.30, help="Diffusion time t where shape consensus reaches full scale in decoupled mode (default: 0.30)")
+    parser.add_argument("--guidance_mid", type=float, default=None, help="Intermediate transition point for multi-stage unified schedules")
+    parser.add_argument("--guidance_early_scale", type=float, default=0.10, help="Guidance scale plateau for early gentle sampling phases (default: 0.10)")
+    parser.add_argument("--guidance_schedule", type=str, choices=["linear", "sigmoid", "constant", "two_stage", "gentle_early", "quadratic", "power"], default="linear", help="Symmetry guidance ramp schedule (default: linear)")
     parser.add_argument(
         "--strand_spacing",
         "--target_pitch",
@@ -589,7 +599,18 @@ def main():
     # Set environment variables for the modified diffusion loop
     os.environ["MAT_TOPOLOGY"] = args.topology
     os.environ["MAT_COPIES"] = str(args.copies)
+    os.environ["MAT_GUIDANCE_MODE"] = str(args.guidance_mode)
     os.environ["MAT_GUIDANCE_SCALE"] = str(args.guidance_scale)
+    os.environ["MAT_GUIDANCE_START"] = str(args.guidance_start)
+    os.environ["MAT_GUIDANCE_END"] = str(args.guidance_end)
+    os.environ["MAT_GUIDANCE_SCHEDULE"] = str(args.guidance_schedule)
+    os.environ["MAT_GUIDANCE_POS_START"] = str(args.guidance_pos_start)
+    os.environ["MAT_GUIDANCE_POS_END"] = str(args.guidance_pos_end)
+    os.environ["MAT_GUIDANCE_SHAPE_START"] = str(args.guidance_shape_start)
+    os.environ["MAT_GUIDANCE_SHAPE_END"] = str(args.guidance_shape_end)
+    if args.guidance_mid is not None:
+        os.environ["MAT_GUIDANCE_MID"] = str(args.guidance_mid)
+    os.environ["MAT_GUIDANCE_EARLY_SCALE"] = str(args.guidance_early_scale)
     os.environ["MAT_LIGAND_INCLUSION_BIAS"] = str(args.ligand_inclusion_bias)
     if args.ligand_anchor_residue is not None:
         os.environ["MAT_LIGAND_ANCHOR_RESIDUE"] = str(args.ligand_anchor_residue)

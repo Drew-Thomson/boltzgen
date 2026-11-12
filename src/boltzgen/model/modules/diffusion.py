@@ -740,7 +740,70 @@ class AtomDiffusion(Module):
                 "multi_helical",
             ]
             if topology in guided_topologies:
-                guidance_scale = float(os.environ.get("MAT_GUIDANCE_SCALE", "1.0"))
+                base_guidance_scale = float(
+                    os.environ.get("MAT_GUIDANCE_SCALE", "1.0")
+                )
+                total_steps = len(sigmas_gammas_ss_ns)
+                current_t = 1.0 - (step_idx / max(1, total_steps - 1))
+                guidance_mode = os.environ.get("MAT_GUIDANCE_MODE", "decoupled").lower()
+                g_start = float(os.environ.get("MAT_GUIDANCE_START", "0.50"))
+                g_end = float(os.environ.get("MAT_GUIDANCE_END", "0.30"))
+                g_mid = (
+                    float(os.environ["MAT_GUIDANCE_MID"])
+                    if "MAT_GUIDANCE_MID" in os.environ
+                    else None
+                )
+                g_early_scale = float(
+                    os.environ.get("MAT_GUIDANCE_EARLY_SCALE", "0.10")
+                )
+                g_schedule = os.environ.get("MAT_GUIDANCE_SCHEDULE", "linear")
+
+                if guidance_mode == "decoupled":
+                    pos_start = float(
+                        os.environ.get("MAT_GUIDANCE_POS_START", "0.85")
+                    )
+                    pos_end = float(os.environ.get("MAT_GUIDANCE_POS_END", "0.50"))
+                    pos_schedule = os.environ.get(
+                        "MAT_GUIDANCE_POS_SCHEDULE", "linear"
+                    )
+                    shape_start = float(
+                        os.environ.get("MAT_GUIDANCE_SHAPE_START", str(g_start))
+                    )
+                    shape_end = float(
+                        os.environ.get("MAT_GUIDANCE_SHAPE_END", str(g_end))
+                    )
+                    shape_schedule = os.environ.get(
+                        "MAT_GUIDANCE_SHAPE_SCHEDULE", g_schedule
+                    )
+                    guidance_scale_pos = materials.compute_scheduled_guidance_scale(
+                        current_t,
+                        base_guidance_scale,
+                        t_start=pos_start,
+                        t_end=pos_end,
+                        schedule=pos_schedule,
+                    )
+                    guidance_scale_shape = (
+                        materials.compute_scheduled_guidance_scale(
+                            current_t,
+                            base_guidance_scale,
+                            t_start=shape_start,
+                            t_end=shape_end,
+                            schedule=shape_schedule,
+                        )
+                    )
+                    guidance_scale = max(guidance_scale_pos, guidance_scale_shape)
+                else:
+                    guidance_scale = materials.compute_scheduled_guidance_scale(
+                        current_t,
+                        base_guidance_scale,
+                        t_start=g_start,
+                        t_end=g_end,
+                        t_mid=g_mid,
+                        early_scale=g_early_scale,
+                        schedule=g_schedule,
+                    )
+                    guidance_scale_pos = guidance_scale
+                    guidance_scale_shape = guidance_scale
                 default_pitch = (
                     "4.8" if topology in ("double_tape", "linear_tape") else "10.0"
                 )
@@ -1621,11 +1684,37 @@ class AtomDiffusion(Module):
                                 )
 
                                 # Assign to updated coordinates
-                                atom_coords_denoised[batch_idx, mask_indices] = (
-                                    1 - guidance_scale
-                                ) * atom_coords_denoised[
-                                    batch_idx, mask_indices
-                                ] + guidance_scale * coords_global
+                                if (
+                                    guidance_mode == "decoupled"
+                                    and guidance_scale_pos != guidance_scale_shape
+                                ):
+                                    coords_orig = atom_coords_denoised[
+                                        batch_idx, mask_indices
+                                    ]
+                                    orig_com = coms[i]
+                                    rel_orig = coords_orig - orig_com
+
+                                    guided_com = coords_global.mean(dim=0)
+                                    rel_guided = coords_global - guided_com
+
+                                    eff_com = (
+                                        1.0 - guidance_scale_pos
+                                    ) * orig_com + guidance_scale_pos * guided_com
+                                    eff_rel = (
+                                        1.0 - guidance_scale_shape
+                                    ) * rel_orig + guidance_scale_shape * rel_guided
+
+                                    atom_coords_denoised[
+                                        batch_idx, mask_indices
+                                    ] = eff_com + eff_rel
+                                else:
+                                    atom_coords_denoised[
+                                        batch_idx, mask_indices
+                                    ] = (
+                                        1 - guidance_scale
+                                    ) * atom_coords_denoised[
+                                        batch_idx, mask_indices
+                                    ] + guidance_scale * coords_global
 
                             # Carry each ligand by the rigid transform of its parent
                             # protein, or of all proteins in its placement for a

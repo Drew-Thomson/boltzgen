@@ -1737,3 +1737,99 @@ def constrain_trace_to_cylinder(
         out += unit_radial * delta_rho.unsqueeze(1)
 
     return out
+
+
+def compute_scheduled_guidance_scale(
+    current_t: float,
+    base_scale: float = 1.0,
+    *,
+    t_start: float = 0.50,
+    t_end: float = 0.30,
+    t_mid: float | None = None,
+    early_scale: float = 0.10,
+    schedule: str = "linear",
+) -> float:
+    r"""Compute time-dependent guidance scale $\lambda(t)$ for symmetry guidance.
+
+    In reverse diffusion sampling, holding guidance at $\lambda = 0$ during the initial
+    stochastic exploration phase ($t > t_{\text{start}}$) avoids premature mode
+    collapse and destructive phase cancellation across symmetric subunits. Guidance
+    ramps up smoothly over $t \in [t_{\text{end}}, t_{\text{start}}]$ to reach full
+    strength $\lambda_{\max}$ for late structural refinement ($t < t_{\text{end}}$):
+
+    .. math::
+        \lambda(t) = \begin{cases}
+            0 & t > t_{\text{start}} \\
+            \lambda_{\max} \cdot f(u) & t_{\text{end}} \le t \le t_{\text{start}} \\
+            \lambda_{\max} & t < t_{\text{end}}
+        \end{cases}
+
+    with $u = \frac{t_{\text{start}} - t}{t_{\text{start}} - t_{\text{end}}}$, where
+    $f(u) = u$ for linear schedules, and $f(u) = \frac{1 - \cos(\pi u)}{2}$ for
+    cosine/sigmoid schedules.
+
+    Parameters
+    ----------
+    current_t : float
+        Normalized diffusion time parameter $t \in [0.0, 1.0]$ where $t=1.0$ represents
+        pure noise and $t=0.0$ represents the final structure.
+    base_scale : float, default 1.0
+        Maximum guidance scale $\lambda_{\max} \ge 0$.
+    t_start : float, default 0.50
+        Diffusion time parameter at which guidance initiates ramp-up
+        ($t_{\text{start}} \in [0.0, 1.0]$).
+    t_end : float, default 0.30
+        Diffusion time parameter at which guidance reaches full `base_scale`
+        ($t_{\text{end}} \le t_{\text{start}}$).
+    t_mid : float | None, default None
+        Intermediate transition point for multi-stage schedules. Defaults to
+        $(t_{\text{start}} + t_{\text{end}}) / 2.0$.
+    early_scale : float, default 0.10
+        Guidance scale plateau or target for early gentle sampling phases.
+    schedule : str, default "linear"
+        Interpolation profile: "linear", "sigmoid" (cosine s-curve), "constant",
+        "quadratic", "power", "two_stage", or "gentle_early".
+
+    Returns
+    -------
+    float
+        Scheduled guidance scale $\lambda(t) \in [0.0, \text{base\_scale}]$.
+    """
+    if schedule == "constant" or t_start <= t_end or base_scale <= 0.0:
+        return max(0.0, float(base_scale))
+
+    if current_t >= t_start:
+        return 0.0
+    if current_t <= t_end:
+        return max(0.0, float(base_scale))
+
+    eff_mid = (
+        float(t_mid)
+        if (t_mid is not None and t_end < t_mid < t_start)
+        else 0.5 * (t_start + t_end)
+    )
+    eff_early = max(0.0, min(float(base_scale), float(early_scale)))
+
+    if schedule in ("two_stage", "gentle_early"):
+        if current_t > eff_mid:
+            weight = (
+                eff_early
+                if schedule == "gentle_early"
+                else eff_early * (t_start - current_t) / (t_start - eff_mid)
+            )
+            return float(weight)
+        p2 = (eff_mid - current_t) / (eff_mid - t_end)
+        return float(eff_early + (base_scale - eff_early) * p2)
+
+    progress = (t_start - current_t) / (t_start - t_end)
+    progress = max(0.0, min(1.0, progress))
+
+    if schedule in ("sigmoid", "cosine"):
+        weight = 0.5 * (1.0 - math.cos(math.pi * progress))
+    elif schedule in ("quadratic", "power"):
+        weight = progress * progress
+    else:  # default to linear
+        weight = progress
+
+    return float(base_scale * weight)
+
