@@ -433,6 +433,9 @@ def main():
                             parser.error(f"Invalid value for config option '{k}': {e}")
                     setattr(args, norm_k, v)
 
+    if args.secondary_structure:
+        args.secondary_structure = args.secondary_structure.replace("E", "S").replace("e", "s")
+
     if "asym_unit" in config:
         asym_unit_def = config["asym_unit"]
     else:

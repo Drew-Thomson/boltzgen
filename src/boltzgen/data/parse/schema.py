@@ -1135,7 +1135,7 @@ def parse_entity(item, mols, mol_dir, ligand_id, is_msa_custom, is_msa_auto):
                         ss_type.append(const.ss_type_ids["LOOP"])
                     elif char.lower() == "h":
                         ss_type.append(const.ss_type_ids["HELIX"])
-                    elif char.lower() == "s":
+                    elif char.lower() in ("s", "e"):
                         ss_type.append(const.ss_type_ids["SHEET"])
                     else:
                         msg = f"Invalid secondary_structure '{char}' in: {ss_spec}"
