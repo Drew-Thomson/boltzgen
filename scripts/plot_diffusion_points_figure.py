@@ -716,21 +716,70 @@ def prepare_helical_trajectory(
     return aligned_frames, t_vals, chain_indices, asym_id_valid
 
 
+def compute_helical_box_bounds(
+    ref_coords: np.ndarray,
+    *,
+    max_strain: float = 0.0,
+    poisson_ratio: float = 0.35,
+    box_scale: float = 1.0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute centered 3D bounding box half-spans tailored to helical aspect ratio.
+
+    Parameters
+    ----------
+    ref_coords : np.ndarray
+        Reference 3D atomic coordinates, shape `(N, 3)`.
+    max_strain : float, default 0.0
+        Maximum absolute axial strain magnitude across states.
+    poisson_ratio : float, default 0.35
+        Effective lateral Poisson ratio for transverse dilation margin.
+    box_scale : float, default 1.0
+        Viewport scaling multiplier.
+
+    Returns
+    -------
+    center : np.ndarray
+        Bounding box center, shape `(3,)`.
+    spans : np.ndarray
+        Half-widths `[span_x, span_y, span_z]` preserving 1:1:1 physical scale,
+        shape `(3,)`.
+    """
+    h_min = np.min(ref_coords, axis=0)
+    h_max = np.max(ref_coords, axis=0)
+    center = (h_min + h_max) / 2.0
+    ext = h_max - h_min
+
+    dilation_xy = 1.0 + poisson_ratio * abs(max_strain)
+    dilation_z = 1.0 + abs(max_strain)
+    span_xy = max(float(max(ext[0], ext[1]) * 0.58 * dilation_xy * box_scale), 1.0)
+    span_z = max(float(ext[2] * 0.58 * dilation_z * box_scale), 1.0)
+
+    min_ratio = 0.48
+    span_xy = max(span_xy, span_z * min_ratio)
+    span_z = max(span_z, span_xy * min_ratio)
+    return center, np.array([span_xy, span_xy, span_z], dtype=np.float64)
+
+
 def _style_3d_axes(
     ax: Axes3D,
     center: np.ndarray,
-    span: float,
+    span: float | Tuple[float, float, float] | np.ndarray,
     elev: float,
     azim: float,
     dist: float = 7.0,
+    zoom: float = 1.24,
 ) -> None:
     """Apply uniform bounding box, camera zoom, and clean styling to 3D axes."""
-    ax.set_xlim(center[0] - span, center[0] + span)
-    ax.set_ylim(center[1] - span, center[1] + span)
-    ax.set_zlim(center[2] - span, center[2] + span)
-    ax.set_box_aspect([1, 1, 1])
+    spans = np.broadcast_to(np.asarray(span, dtype=float), (3,))
+    ax.set_xlim(center[0] - spans[0], center[0] + spans[0])
+    ax.set_ylim(center[1] - spans[1], center[1] + spans[1])
+    ax.set_zlim(center[2] - spans[2], center[2] + spans[2])
+    try:
+        ax.set_box_aspect(spans.tolist(), zoom=zoom)
+    except TypeError:
+        ax.set_box_aspect(spans.tolist())
+        ax.dist = dist
     ax.view_init(elev=elev, azim=azim)
-    ax.dist = dist
 
     ax.xaxis.pane.fill = False
     ax.yaxis.pane.fill = False
@@ -843,7 +892,7 @@ def _plot_binder_row(
             col_title = f"$t = {t_val:.2f}$"
         ax.set_title(col_title, fontsize=11, pad=4, weight="bold")
 
-        _style_3d_axes(ax, b_center, b_span, elev, azim, dist=dist)
+        _style_3d_axes(ax, b_center, b_span, elev, azim, dist=dist, zoom=1.15)
 
         if col_idx == 0:
             if show_row_label:
@@ -918,6 +967,7 @@ def _plot_helical_row(
     elev: float,
     azim: float,
     dist: float = 7.0,
+    zoom: float = 1.24,
     cmap_name: str,
     point_size: float,
     show_titles: bool,
@@ -927,11 +977,11 @@ def _plot_helical_row(
     axial_strain: float = 0.0,
     poisson_ratio: float = 0.35,
     deformation_mode: str = "rigid_centroid",
-    sidechain_alpha: float = 0.50,
+    sidechain_alpha: float = 0.25,
     row_title: Optional[str] = None,
     final_frame_subtitle: Optional[str] = None,
     fixed_center: Optional[np.ndarray] = None,
-    fixed_span: Optional[float] = None,
+    fixed_span: Optional[float | np.ndarray] = None,
 ) -> None:
     """Plot symmetry-driven helical design point-cloud trajectory row."""
     h_frames, h_t_vals, h_chains, _, atom_types = prepare_helical_trajectory(
@@ -953,11 +1003,12 @@ def _plot_helical_row(
         h_center = fixed_center
         h_span = fixed_span
     else:
-        ref_frame = h_frames[-1]
-        h_min = np.min(ref_frame, axis=0)
-        h_max = np.max(ref_frame, axis=0)
-        h_center = (h_min + h_max) / 2.0
-        h_span = max(float(np.max(h_max - h_min) * 0.55 * box_scale), 1.0)
+        h_center, h_span = compute_helical_box_bounds(
+            h_frames[-1],
+            max_strain=abs(axial_strain),
+            poisson_ratio=poisson_ratio,
+            box_scale=box_scale,
+        )
 
     num_chains = len(np.unique(h_chains))
     cmap, norm = get_discrete_colormap(cmap_name, num_chains)
@@ -970,7 +1021,7 @@ def _plot_helical_row(
             row_idx * len(h_frames) + col_idx + 1,
             projection="3d",
         )
-        ax.set_facecolor("white")
+        ax.set_facecolor("none")
 
         frame_pts = h_frames[col_idx]
         if (mainchain_only or ca_only) or sidechain_alpha >= 1.0 or atom_types is None:
@@ -1038,9 +1089,9 @@ def _plot_helical_row(
                 col_title = f"$t = {t_val:.2f}$\n({final_frame_subtitle})"
             else:
                 col_title = f"$t = {t_val:.2f}$"
-            ax.set_title(col_title, fontsize=11, pad=6, weight="bold")
+            ax.set_title(col_title, fontsize=12, pad=8, weight="bold")
 
-        _style_3d_axes(ax, h_center, h_span, elev, azim, dist=dist)
+        _style_3d_axes(ax, h_center, h_span, elev, azim, dist=dist, zoom=zoom)
 
         if col_idx == 0 and show_row_label:
             if row_title:
@@ -1052,11 +1103,11 @@ def _plot_helical_row(
             else:
                 effective_title = "Unstrained"
             ax.text2D(
-                -0.24,
+                -0.08,
                 0.5,
                 effective_title,
                 transform=ax.transAxes,
-                fontsize=11,
+                fontsize=12,
                 weight="bold",
                 va="center",
                 ha="center",
@@ -1103,17 +1154,18 @@ def plot_point_cloud_comparison(
     ca_only: bool = False,
     poisson_ratio: float = 0.35,
     deformation_mode: str = "rigid_centroid",
-    sidechain_alpha: float = 0.50,
+    sidechain_alpha: float = 0.25,
     elev: float = 20.0,
     azim: float = 35.0,
     camera_dist: float = 7.0,
+    camera_zoom: float = 1.24,
     binder_elev: Optional[float] = None,
     binder_azim: Optional[float] = None,
     helical_elev: Optional[float] = None,
     helical_azim: Optional[float] = None,
     point_size_target: float = 8.0,
     point_size_binder: float = 22.0,
-    point_size_helical: float = 16.0,
+    point_size_helical: float = 20.0,
     target_color: str = "#94A3B8",
     target_alpha: float = 0.35,
     static_target: bool = True,
@@ -1151,15 +1203,16 @@ def plot_point_cloud_comparison(
     out_path = Path(output_path)
 
     if figsize is None:
-        width = 3.0 * num_timepoints + (0.8 if show_colorbar else 0.2)
+        col_w = 3.0 if has_binder else 2.65
+        width = col_w * num_timepoints + (0.9 if show_colorbar else 0.2)
         if n_rows == 1:
             height = 3.6
         elif n_rows == 2:
-            height = 6.8
+            height = 6.9
         elif n_rows == 3:
-            height = 9.8
+            height = 10.05
         else:
-            height = 3.2 * n_rows
+            height = 3.35 * n_rows
         eff_figsize = (width, height)
     else:
         eff_figsize = figsize
@@ -1168,7 +1221,7 @@ def plot_point_cloud_comparison(
     current_row = 0
 
     shared_center: Optional[np.ndarray] = None
-    shared_span: Optional[float] = None
+    shared_span: Optional[np.ndarray] = None
     if lock_deformation_bounds and has_helical and (has_tri_state or has_strained or axial_strain != 0.0):
         h_frames_ref, _, _, _ = prepare_helical_trajectory(
             helical_traj,
@@ -1183,11 +1236,6 @@ def plot_point_cloud_comparison(
             poisson_ratio=poisson_ratio,
             deformation_mode=deformation_mode,
         )
-        final_ref = h_frames_ref[-1]
-        h_min = np.min(final_ref, axis=0)
-        h_max = np.max(final_ref, axis=0)
-        shared_center = (h_min + h_max) / 2.0
-
         if has_tri_state:
             eff_ten_m = tension_strain if tension_strain is not None else (axial_strain or 0.15)
             eff_comp_m = abs(compression_strain) if compression_strain is not None else (axial_strain or 0.15)
@@ -1196,8 +1244,12 @@ def plot_point_cloud_comparison(
             max_strain_m = abs(axial_strain) if axial_strain != 0.0 else 0.20
         else:
             max_strain_m = abs(axial_strain)
-        dilation = 1.0 + max_strain_m
-        shared_span = max(float(np.max(h_max - h_min) * 0.55 * dilation * box_scale), 1.0)
+        shared_center, shared_span = compute_helical_box_bounds(
+            h_frames_ref[-1],
+            max_strain=max_strain_m,
+            poisson_ratio=poisson_ratio,
+            box_scale=box_scale,
+        )
 
     if has_binder and binder_traj is not None:
         if orient_vertical_right:
@@ -1259,6 +1311,7 @@ def plot_point_cloud_comparison(
             elev=h_elev,
             azim=h_azim,
             dist=camera_dist,
+            zoom=camera_zoom,
             cmap_name=helical_cmap_name,
             point_size=point_size_helical,
             show_titles=(current_row == 0),
@@ -1292,6 +1345,7 @@ def plot_point_cloud_comparison(
             elev=h_elev,
             azim=h_azim,
             dist=camera_dist,
+            zoom=camera_zoom,
             cmap_name=helical_cmap_name,
             point_size=point_size_helical,
             show_titles=(current_row == 0),
@@ -1325,6 +1379,7 @@ def plot_point_cloud_comparison(
             elev=h_elev,
             azim=h_azim,
             dist=camera_dist,
+            zoom=camera_zoom,
             cmap_name=helical_cmap_name,
             point_size=point_size_helical,
             show_titles=(current_row == 0),
@@ -1369,6 +1424,7 @@ def plot_point_cloud_comparison(
             elev=h_elev,
             azim=h_azim,
             dist=camera_dist,
+            zoom=camera_zoom,
             cmap_name=helical_cmap_name,
             point_size=point_size_helical,
             show_titles=(current_row == 0),
@@ -1421,6 +1477,7 @@ def plot_point_cloud_comparison(
             elev=h_elev,
             azim=h_azim,
             dist=camera_dist,
+            zoom=camera_zoom,
             cmap_name=helical_cmap_name,
             point_size=point_size_helical,
             show_titles=(current_row == 0),
@@ -1438,15 +1495,20 @@ def plot_point_cloud_comparison(
         )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    left_margin = 0.08 if show_row_labels else 0.02
+    if has_binder:
+        left_margin = 0.08 if show_row_labels else 0.02
+        top_margin, bottom_margin, wspace, hspace = 0.90, 0.06, 0.02, 0.14
+    else:
+        left_margin = 0.05 if show_row_labels else 0.02
+        top_margin, bottom_margin, wspace, hspace = 0.92, 0.03, -0.02, 0.09
     right_margin = 0.90 if show_colorbar else 0.98
     plt.subplots_adjust(
         left=left_margin,
         right=right_margin,
-        top=0.90,
-        bottom=0.06,
-        wspace=0.02,
-        hspace=0.14,
+        top=top_margin,
+        bottom=bottom_margin,
+        wspace=wspace,
+        hspace=hspace,
     )
     plt.savefig(out_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
@@ -1463,11 +1525,12 @@ def plot_multi_design_piezo_comparison(
     ca_only: bool = False,
     poisson_ratio: float = 0.35,
     deformation_mode: str = "rigid_centroid",
-    sidechain_alpha: float = 0.50,
+    sidechain_alpha: float = 0.25,
     elev: float = 20.0,
     azim: float = 35.0,
     camera_dist: float = 7.0,
-    point_size: float = 20.0,
+    camera_zoom: float = 1.24,
+    point_size: float = 22.0,
     helical_cmap_name: str = "tab10",
     box_scale: float = 1.0,
     dpi: int = 300,
@@ -1495,7 +1558,8 @@ def plot_multi_design_piezo_comparison(
     ]
 
     out_path = Path(output_path)
-    eff_figsize = figsize if figsize is not None else (11.0, 3.4 * num_designs)
+    default_h = 4.15 if num_designs == 1 else 3.9 * num_designs
+    eff_figsize = figsize if figsize is not None else (10.4, default_h)
     fig = plt.figure(figsize=eff_figsize, dpi=dpi, facecolor="white")
 
     for row_idx, traj in enumerate(helical_trajs):
@@ -1517,12 +1581,12 @@ def plot_multi_design_piezo_comparison(
             poisson_ratio=poisson_ratio,
             deformation_mode=deformation_mode,
         )
-        final_ref = h_frames_ref[-1]
-        h_min = np.min(final_ref, axis=0)
-        h_max = np.max(final_ref, axis=0)
-        h_center = (h_min + h_max) / 2.0
-        dilation = 1.0 + abs(axial_strain)
-        h_span = max(float(np.max(h_max - h_min) * 0.55 * dilation * box_scale), 1.0)
+        h_center, h_span = compute_helical_box_bounds(
+            h_frames_ref[-1],
+            max_strain=abs(axial_strain),
+            poisson_ratio=poisson_ratio,
+            box_scale=box_scale,
+        )
 
         num_chains = len(np.unique(h_chains))
         cmap, norm = get_discrete_colormap(helical_cmap_name, num_chains)
@@ -1535,7 +1599,7 @@ def plot_multi_design_piezo_comparison(
                 row_idx * len(strains) + col_idx + 1,
                 projection="3d",
             )
-            ax.set_facecolor("white")
+            ax.set_facecolor("none")
 
             h_frames, _, _, _, atom_types = prepare_helical_trajectory(
                 traj,
@@ -1611,17 +1675,19 @@ def plot_multi_design_piezo_comparison(
                     )
 
             if row_idx == 0:
-                ax.set_title(col_subtitles[col_idx], fontsize=12, pad=6, weight="bold")
+                ax.set_title(col_subtitles[col_idx], fontsize=12, pad=8, weight="bold")
 
-            _style_3d_axes(ax, h_center, h_span, elev, azim, dist=camera_dist)
+            _style_3d_axes(
+                ax, h_center, h_span, elev, azim, dist=camera_dist, zoom=camera_zoom
+            )
 
             if col_idx == 0:
                 ax.text2D(
-                    -0.24,
+                    -0.08,
                     0.5,
                     d_label,
                     transform=ax.transAxes,
-                    fontsize=11,
+                    fontsize=12,
                     weight="bold",
                     va="center",
                     ha="center",
@@ -1629,22 +1695,25 @@ def plot_multi_design_piezo_comparison(
                     color="#1E293B",
                 )
 
-    cbar_ax = fig.add_axes([0.92, 0.15, 0.015, 0.70])
+    cbar_rect = [0.915, 0.10, 0.015, 0.78] if num_designs == 1 else [0.915, 0.14, 0.015, 0.72]
+    cbar_ax = fig.add_axes(cbar_rect)
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cbar = fig.colorbar(sm, cax=cbar_ax, orientation="vertical")
     cbar.set_label("Subunit Index Along Screw Axis", fontsize=9, weight="bold")
     cbar.set_ticks(np.arange(num_chains))
     cbar.set_ticklabels([str(i + 1) for i in range(num_chains)])
+    tick_fs = 9 if num_chains <= 12 else (7.5 if num_chains <= 18 else 6.5)
+    cbar.ax.tick_params(labelsize=tick_fs)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     plt.subplots_adjust(
-        left=0.10,
+        left=0.07,
         right=0.90,
-        top=0.90,
-        bottom=0.06,
-        wspace=0.04,
-        hspace=0.15,
+        top=0.88 if num_designs == 1 else 0.90,
+        bottom=0.03,
+        wspace=-0.02,
+        hspace=0.11,
     )
     plt.savefig(out_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
@@ -1747,8 +1816,8 @@ def main() -> None:
     parser.add_argument(
         "--sidechain_alpha",
         type=float,
-        default=0.50,
-        help="Alpha transparency for sidechain atoms in all-atom views (default: 0.50)",
+        default=0.25,
+        help="Alpha transparency for sidechain atoms in all-atom views (default: 0.25)",
     )
     parser.add_argument(
         "--output",
@@ -1780,7 +1849,13 @@ def main() -> None:
         "--camera_dist",
         type=float,
         default=7.0,
-        help="3D camera distance zoom factor (smaller = zoomed in, default: 7.0)",
+        help="3D camera distance zoom factor (legacy Matplotlib <3.6; default: 7.0)",
+    )
+    parser.add_argument(
+        "--camera_zoom",
+        type=float,
+        default=1.24,
+        help="3D projection zoom multiplier passed to set_box_aspect (default: 1.24)",
     )
     parser.add_argument(
         "--figsize",
@@ -1937,7 +2012,7 @@ def main() -> None:
     parser.add_argument(
         "--point_size_helical",
         type=float,
-        default=16.0,
+        default=20.0,
         help="Point size for helical subunit atoms",
     )
     parser.add_argument(
@@ -1997,6 +2072,7 @@ def main() -> None:
                 elev=args.elev,
                 azim=args.azim,
                 camera_dist=args.camera_dist,
+                camera_zoom=args.camera_zoom,
                 point_size=args.point_size_helical,
                 helical_cmap_name=args.helical_cmap_name,
                 box_scale=args.box_scale,
@@ -2038,6 +2114,7 @@ def main() -> None:
         elev=args.elev,
         azim=args.azim,
         camera_dist=args.camera_dist,
+        camera_zoom=args.camera_zoom,
         binder_elev=args.binder_elev,
         binder_azim=args.binder_azim,
         helical_elev=args.helical_elev,
