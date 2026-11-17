@@ -64,21 +64,19 @@ def ligand_counter_screen_filtering_overrides() -> dict[str, Any]:
     """Return ranking weights for opt-in ligand (apo) counter-screen metrics.
 
     Weights in Filter correspond to inverse importance (1 = primary priority,
-    higher values de-emphasize the metric).
+    higher values de-emphasize the metric). Prioritizes direct holo-vs-apo
+    conformational change (``holo_apo_rmsd``) and holo ligand/complex quality
+    without penalizing well-folded alternative apo states or anchoring on the
+    initial diffusion backbone.
     """
     return {
-        "delta_rmsd_vs_apo": 1,
         "holo_apo_rmsd": 1,
-        "delta_protein_iptm_vs_apo": 1,
         "neg_num_ligand_clashes": 1,
-        "apo_rmsd": 2,
-        "delta_complex_plddt_vs_apo": 2,
         "min_ligand_distance": 2,
         "ligand_iptm": 2,
         "mean_ligand_coordination": 2,
         "mean_ligand_plddt": 2,
-        "neg_lattice_rmsd_refolded": 3,
-        "complex_plddt": 3,
+        "complex_plddt": 2,
         "neg_local_rmsd": None,
         "neg_global_rmsd": None,
         "design_ptm": None,

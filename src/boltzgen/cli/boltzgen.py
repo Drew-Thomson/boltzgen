@@ -1195,7 +1195,7 @@ class BinderDesignPipeline:
         # after the CLI filtering args, so its last configured value wins here.
         target_max_rmsd = args.target_max_rmsd
         if target_max_rmsd is None:
-            topology = getattr(args, "topology", None) or os.environ.get("MAT_TOPOLOGY")
+            topology = _resolve_material_topology(args)
             target_max_rmsd = _effective_refolding_rmsd_threshold(
                 config_args_by_step.get("filtering", []),
                 args.refolding_rmsd_threshold,
@@ -1598,16 +1598,24 @@ class BinderDesignPipeline:
         if getattr(args, "ligand_counter_screen", False) and not args.skip_inverse_folding:
             source_dir = output_dir
             counter_screen_dir = args.output / "ligand_counter_screens"
-            topology = os.environ.get("MAT_TOPOLOGY", "cyclic")
-            if args.target_max_rmsd is None:
-                target_max_rmsd = _effective_refolding_rmsd_threshold(
+            topology = _resolve_material_topology(args) or "cyclic"
+            if args.target_max_rmsd is not None:
+                ligand_target_max_rmsd: float | None = args.target_max_rmsd
+            elif args.refolding_rmsd_threshold is not None:
+                ligand_target_max_rmsd = args.refolding_rmsd_threshold
+            elif topology == "cyclic":
+                # Allow FilterTargetCandidates to auto-relax to 15.0 A when
+                # cyclic metal-ligand symmetry columns are present.
+                ligand_target_max_rmsd = None
+            else:
+                ligand_target_max_rmsd = _effective_refolding_rmsd_threshold(
                     config_args_by_step.get("filtering", []),
                     args.refolding_rmsd_threshold,
                     topology=topology,
                 )
             filter_candidate_args = [
                 f"design_dir={input_dir}",
-                f"max_rmsd={target_max_rmsd}",
+                f"max_rmsd={'null' if ligand_target_max_rmsd is None else ligand_target_max_rmsd}",
                 f"min_complex_plddt={args.target_min_plddt}",
                 f"topology={topology}",
             ]
@@ -1749,10 +1757,7 @@ class BinderDesignPipeline:
                     "h_bonds_per_interface_refolded: null, packing_density_refolded: null}"
                 )
         elif getattr(args, "ligand_counter_screen", False):
-            from boltzgen.task.filter.material_presets import (
-                format_ligand_counter_screen_metrics_override,
-            )
-            filter_args.append(format_ligand_counter_screen_metrics_override())
+            filter_args.append("ligand_counter_screen=True")
         elif getattr(args, "piezo_counter_screen", False):
             filter_args.append(
                 "metrics_override={piezo_e33_mean: 1, polar_order_parameter: 1, "
@@ -2021,6 +2026,24 @@ def parse_config_args(base_config, config_args, valid_step_names):
             key_value_pairs = config[1:]
             config_args_by_step[step_name].extend(key_value_pairs)
     return config_args_by_step
+
+
+def _resolve_material_topology(args: argparse.Namespace) -> str | None:
+    """Resolve material topology from CLI args, environment, or material_layout.json."""
+    topology = getattr(args, "topology", None) or os.environ.get("MAT_TOPOLOGY")
+    if topology:
+        return str(topology)
+    if getattr(args, "design_spec", None):
+        try:
+            candidate_layout = args.design_spec[0].resolve().parent / "material_layout.json"
+            if candidate_layout.exists():
+                layout_data = json.loads(candidate_layout.read_text())
+                layout_top = layout_data.get("topology")
+                if layout_top:
+                    return str(layout_top)
+        except Exception:
+            pass
+    return None
 
 
 def _effective_refolding_rmsd_threshold(

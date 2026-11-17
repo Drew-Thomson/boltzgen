@@ -83,7 +83,7 @@ class FilterTargetCandidates(Task):
         self,
         design_dir: str,
         topology: Optional[str] = None,
-        max_rmsd: float = 5.0,
+        max_rmsd: Optional[float] = None,
         min_complex_plddt: Optional[float] = None,
         min_ligand_distance: Optional[float] = None,
     ) -> None:
@@ -92,6 +92,21 @@ class FilterTargetCandidates(Task):
         self.max_rmsd = max_rmsd
         self.min_complex_plddt = min_complex_plddt
         self.min_ligand_distance = min_ligand_distance
+
+    def _effective_max_rmsd(self, frame: pd.DataFrame) -> float:
+        """Resolve the RMSD culling cutoff, relaxing for cyclic metal-ligand assemblies."""
+        if self.max_rmsd is not None:
+            return float(self.max_rmsd)
+        from boltzgen.task.filter.material_presets import (
+            CYCLIC_LIGAND_SYMMETRY_COLUMNS,
+            CYCLIC_LIGAND_SYMMETRY_RMSD_THRESHOLD,
+        )
+
+        has_cyclic_ligand = self.topology == "cyclic" and all(
+            c in frame.columns and frame[c].notna().any()
+            for c in CYCLIC_LIGAND_SYMMETRY_COLUMNS
+        )
+        return CYCLIC_LIGAND_SYMMETRY_RMSD_THRESHOLD if has_cyclic_ligand else 5.0
 
     def run(self, config=None) -> None:  # noqa: ANN001, ARG002
         csv_paths = sorted(self.design_dir.glob("aggregate_metrics_*.csv"))
@@ -104,8 +119,9 @@ class FilterTargetCandidates(Task):
         if "id" not in frame:
             raise ValueError("Aggregate metrics CSV lacks an id column")
 
+        effective_max_rmsd = self._effective_max_rmsd(frame)
         rmsd = target_rmsd(frame, self.topology)
-        passed = rmsd <= self.max_rmsd
+        passed = rmsd <= effective_max_rmsd
         if self.min_complex_plddt is not None:
             col = next(
                 (c for c in ("heteromer_complex_plddt", "complex_plddt") if c in frame),
@@ -126,35 +142,22 @@ class FilterTargetCandidates(Task):
         ids = frame.loc[passed, "id"].astype(str).tolist()
         logger.info(
             f"{len(ids)}/{len(frame)} target designs passed "
-            f"(rmsd <= {self.max_rmsd}, min_complex_plddt={self.min_complex_plddt}, "
+            f"(rmsd <= {effective_max_rmsd}, min_complex_plddt={self.min_complex_plddt}, "
             f"min_ligand_distance={self.min_ligand_distance})"
         )
         print(
             f"Target candidate culling: {len(ids)}/{len(frame)} designs pass "
-            f"(rmsd <= {self.max_rmsd}, min_complex_plddt={self.min_complex_plddt}, "
+            f"(rmsd <= {effective_max_rmsd}, min_complex_plddt={self.min_complex_plddt}, "
             f"min_ligand_distance={self.min_ligand_distance})"
         )
         if not ids:
             logger.warning(
                 "No target designs passed the structural thresholds; skipping counter-screens."
             )
-            # Write empty candidate list to allow downstream steps to continue gracefully
-            (self.design_dir / CANDIDATES_FILENAME).write_text(
-                json.dumps(
-                    {
-                        "max_rmsd": self.max_rmsd,
-                        "min_complex_plddt": self.min_complex_plddt,
-                        "min_ligand_distance": self.min_ligand_distance,
-                        "candidate_ids": [],
-                    },
-                    indent=2,
-                )
-                + "\n"
-            )
         (self.design_dir / CANDIDATES_FILENAME).write_text(
             json.dumps(
                 {
-                    "max_rmsd": self.max_rmsd,
+                    "max_rmsd": effective_max_rmsd,
                     "min_complex_plddt": self.min_complex_plddt,
                     "min_ligand_distance": self.min_ligand_distance,
                     "candidate_ids": ids,

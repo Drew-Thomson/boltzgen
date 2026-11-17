@@ -58,3 +58,24 @@ def test_double_tape_culling_gates_counter_screens_by_local_rmsd(tmp_path) -> No
     output = json.loads((tmp_path / "counter_screen_candidates.json").read_text())
     assert output["max_rmsd"] == 2.5
     assert output["candidate_ids"] == ["passes_local_rmsd"]
+
+
+def test_cyclic_ligand_culling_relaxes_rmsd_threshold(tmp_path) -> None:
+    pd.DataFrame(
+        {
+            "id": ["relaxed_ring", "broken_ring"],
+            "bb_rmsd": [8.0, 18.0],
+            "neg_lattice_rmsd_refolded": [-8.0, -18.0],
+            "neg_sym_chain_rmsd": [-0.6, -3.0],
+            "neg_sym_ligand_rmsd": [-0.3, -2.0],
+            "neg_ligand_coord_geom_dev": [-6.0, -25.0],
+            "neg_ligand_coord_bond_dev": [-0.1, -0.8],
+            "ligand_min_coord_number": [4.0, 1.0],
+        }
+    ).to_csv(tmp_path / "aggregate_metrics_analyze.csv", index=False)
+
+    FilterTargetCandidates(design_dir=str(tmp_path), topology="cyclic", max_rmsd=None).run()
+
+    output = json.loads((tmp_path / "counter_screen_candidates.json").read_text())
+    assert output["max_rmsd"] == 15.0
+    assert output["candidate_ids"] == ["relaxed_ring"]

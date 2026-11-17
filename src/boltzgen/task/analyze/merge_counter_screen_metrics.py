@@ -212,8 +212,6 @@ class MergeCounterScreenMetrics(Task):
                     refold_cif = (
                         self.counter_screen_dir / const.refold_cif_dirname / f"{screen_id}.cif"
                     )
-                    if (self.counter_screen_dir / f"{screen_id}.cif").exists():
-                        refold_cif = self.counter_screen_dir / f"{screen_id}.cif"
 
                     base_parent = parent_id.rsplit("_", 1)[0] if "_" in parent_id else parent_id
                     design_cif = self.design_dir / f"{parent_id}.cif"
@@ -230,20 +228,16 @@ class MergeCounterScreenMetrics(Task):
                     holo_refold_cif = (
                         self.design_dir / const.refold_cif_dirname / f"{parent_id}.cif"
                     )
-                    for cand in [
-                        self.design_dir / const.refold_cif_dirname / f"{parent_id}.cif",
-                        self.design_dir / f"{parent_id}.cif",
-                        self.design_dir / const.refold_cif_dirname / f"{base_parent}.cif",
-                    ]:
-                        if cand.exists():
-                            holo_refold_cif = cand
-                            break
+                    if not holo_refold_cif.exists():
+                        alt_holo = (
+                            self.design_dir / const.refold_cif_dirname / f"{base_parent}.cif"
+                        )
+                        if alt_holo.exists():
+                            holo_refold_cif = alt_holo
 
                     apo_rmsd = _compute_cif_backbone_rmsd(refold_cif, design_cif)
-                    holo_apo_rmsd = (
-                        _compute_cif_backbone_rmsd(holo_refold_cif, refold_cif)
-                        if holo_refold_cif.exists()
-                        else float("nan")
+                    holo_apo_rmsd = _compute_cif_backbone_rmsd(
+                        holo_refold_cif, refold_cif, topology="floating"
                     )
                     holo_rmsd_cif = (
                         _compute_cif_backbone_rmsd(holo_refold_cif, design_cif)
@@ -289,6 +283,7 @@ class MergeCounterScreenMetrics(Task):
 
                         if (
                             "min_interaction_pae" in apo_prediction
+                            and apo_prediction["min_interaction_pae"] < 1e4
                             and "min_interaction_pae" in frame
                             and pd.notna(frame.loc[row_idx, "min_interaction_pae"])
                         ):

@@ -153,6 +153,7 @@ class Filter(Task):
         top_budget: int = 10,
         outdir: str = None,
         use_affinity: bool = False,  # This changes the filtering metrics to metrics more amenable to small molecule binder design
+        ligand_counter_screen: bool = False,  # Apply simplified holo-vs-apo conformational change ranking preset
         filter_cysteine: bool = True,  # This filters out all designs that have designed cysteins in them (prespecified cysteins in the design are not counted)
         from_inverse_folded: bool = True,  # This makes it so that we use the backbone refolding rmsd instead of the all-atom RMSD
         filter_designfolding: bool = True,  # Additionally filter based on the RMSD from refolding the design in isolation. This makes sure the design has the same shape with and without the target being present.
@@ -179,6 +180,7 @@ class Filter(Task):
         self.design_dir = Path(design_dir)
         self.top_budget = top_budget
         self.use_affinity = use_affinity
+        self.ligand_counter_screen = ligand_counter_screen
         self.filter_cysteine = filter_cysteine
         self.from_inverse_folded = from_inverse_folded
         self.filter_bindingsite = filter_bindingsite
@@ -222,6 +224,17 @@ class Filter(Task):
                 "neg_local_rmsd": 1,
                 "neg_global_rmsd": 2,
             }
+
+        if self.ligand_counter_screen:
+            from boltzgen.task.filter.material_presets import (
+                ligand_counter_screen_filtering_overrides,
+            )
+
+            for k, val in ligand_counter_screen_filtering_overrides().items():
+                if val is None:
+                    self.metrics.pop(k, None)
+                else:
+                    self.metrics[k] = val
 
         # override metrics
         self._metrics_override_given = metrics_override is not None
@@ -425,6 +438,11 @@ class Filter(Task):
 
         df = self._apply_cyclic_ligand_symmetry_preset(df)
 
+        if "holo_apo_rmsd" in df.columns and "holo_apo_rmsd" in self.metrics:
+            df["holo_apo_rmsd"] = (
+                df["holo_apo_rmsd"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            )
+
         if "designfolding-rmsd" in df:
             df["designfolding_rmsd"] = df["designfolding-rmsd"]
         if "designfolding-bb_rmsd" in df and self.from_inverse_folded:
@@ -601,6 +619,7 @@ class Filter(Task):
         priority_col_candidates = [
             "id",
             "final_rank",
+            "holo_apo_rmsd",
             "designed_sequence",
             "designed_chain_sequence",
             "num_design",
