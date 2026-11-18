@@ -61,24 +61,22 @@ def heteromer_filtering_overrides() -> dict[str, Any]:
 
 
 def ligand_counter_screen_filtering_overrides() -> dict[str, Any]:
-    """Return ranking weights for opt-in ligand (apo) counter-screen metrics.
+    """Return simplified ranking weights for opt-in ligand (apo) counter-screen metrics.
 
     Weights in Filter correspond to inverse importance (1 = primary priority,
     higher values de-emphasize the metric). Prioritizes direct holo-vs-apo
-    conformational change (``holo_apo_rmsd``) and holo ligand/complex quality
-    without penalizing well-folded alternative apo states or anchoring on the
-    initial diffusion backbone.
+    conformational change (``holo_apo_rmsd``) and holo model quality
+    (``complex_plddt``, ``ligand_iptm``, ``mean_ligand_plddt``) without
+    penalizing unfolded/weakly folded apo states or template RMSD.
     """
     return {
         "holo_apo_rmsd": 1,
-        "neg_num_ligand_clashes": 1,
-        "min_ligand_distance": 2,
-        "ligand_iptm": 2,
-        "mean_ligand_coordination": 2,
-        "mean_ligand_plddt": 2,
         "complex_plddt": 2,
+        "ligand_iptm": 2,
+        "mean_ligand_plddt": 2,
         "neg_local_rmsd": None,
         "neg_global_rmsd": None,
+        "neg_lattice_rmsd_refolded": None,
         "design_ptm": None,
         "neg_min_interaction_pae": None,
         "design_to_target_iptm": None,
@@ -98,41 +96,43 @@ CYCLIC_LIGAND_SYMMETRY_COLUMNS: tuple[str, ...] = (
 """Analysis columns whose presence triggers the cyclic ligand-symmetry preset."""
 
 CYCLIC_LIGAND_SYMMETRY_RMSD_THRESHOLD: float = 15.0
-"""Relaxed template-RMSD hard-filter threshold (Å); symmetry/coordination dominate."""
+"""Legacy relaxed template-RMSD threshold (Å) when template RMSD is explicitly enabled."""
 
 
 def cyclic_ligand_symmetry_filtering_overrides() -> dict[str, Any]:
-    """Return ranking weights for cyclic assemblies with metal ligands.
+    """Return ranking weights for standalone cyclic assemblies with metal ligands.
 
-    Weights are inverse importances (1 = primary). Fitted-axis symmetry and the
-    metal coordination sphere dominate; template RMSD metrics are disabled.
+    Weights are inverse importances (1 = primary). Refolded secondary structure,
+    fitted-axis symmetry, metal coordination sphere, and holo model quality
+    dominate; template RMSD metrics are disabled.
     """
     return {
+        "ss_accuracy_refolded": 1,
         "neg_sym_chain_rmsd": 1,
         "neg_sym_ligand_rmsd": 1,
-        "neg_ligand_coord_geom_dev": 1,
-        "neg_ligand_coord_bond_dev": 1,
         "ligand_min_coord_number": 1,
-        "neg_ligand_coord_geom_dev_std": 2,
-        "neg_ligand_coord_cn_std": 2,
-        "neg_num_ligand_clashes": 2,
-        "mean_ligand_plddt": 2,
+        "neg_ligand_coord_geom_dev": 1,
+        "neg_ligand_coord_bond_dev": 2,
         "complex_plddt": 2,
-        "design_ptm": 3,
-        "neg_min_interaction_pae": 3,
+        "ligand_iptm": 2,
         "neg_local_rmsd": None,
         "neg_global_rmsd": None,
         "neg_lattice_rmsd_refolded": None,
+        "design_ptm": None,
+        "neg_min_interaction_pae": None,
         "neg_min_design_to_target_pae": None,
         "design_to_target_iptm": None,
     }
 
 
 def cyclic_ligand_symmetry_filters() -> list[dict[str, Any]]:
-    """Hard filters (metal coordination and ring symmetry) for the cyclic ligand preset."""
+    """Hard filters (SS, metal coordination, and ring symmetry) for the cyclic ligand preset."""
     return [
+        {"feature": "ss_accuracy_refolded", "threshold": 0.70, "lower_is_better": False},
+        {"feature": "sym_orientation_match", "threshold": 1.0, "lower_is_better": False},
         {"feature": "ligand_min_coord_number", "threshold": 3.0, "lower_is_better": False},
         {"feature": "ligand_coord_bond_dev", "threshold": 0.5, "lower_is_better": True},
+        {"feature": "ligand_coord_geom_dev", "threshold": 25.0, "lower_is_better": True},
         {"feature": "sym_ligand_rmsd", "threshold": 1.0, "lower_is_better": True},
         {"feature": "sym_chain_rmsd", "threshold": 2.0, "lower_is_better": True},
         {"feature": "sym_ligand_orbit_ok", "threshold": 1.0, "lower_is_better": False},

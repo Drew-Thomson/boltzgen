@@ -4,6 +4,7 @@ budget:  30
 top_budget:  10
 use_affinity:  false  # This changes the filtering metrics to metrics more amenable to small molecule binder design
 ligand_counter_screen:  false  # Apply simplified holo-vs-apo conformational change ranking preset
+drop_template_rmsd_filters:  null  # Drop template-RMSD filters (defaults to true for ligand_counter_screen / cyclic ligand preset)
 from_inverse_folded:  false  # This makes it so that we use the backbone refolding rmsd instead of the all-atom RMSD
 filter_bindingsite:  false  # This filters out everything that does not have a residue within 4A of a binding site residue
 modality: "peptide"  # peptide or antibody

@@ -284,30 +284,31 @@ def test_merge_reads_refold_cif_and_uses_permutation_invariance(tmp_path):
 
 
 def test_ligand_counter_screen_composes_with_cyclic_symmetry_and_soft_ranks(tmp_path):
-    """Filter(ligand_counter_screen=True) soft-ranks folded apo switches and composes cyclic preset."""
+    """Filter(ligand_counter_screen=True) drops template RMSD and ranks by holo quality + holo_apo_rmsd."""
     from boltzgen.task.filter.filter import Filter
 
     df = pd.DataFrame(
         [
             {
-                "id": "folded_switch",
+                "id": "apo_switch",
                 "designed_sequence": "AAAA",
-                "file_name": "folded_switch.cif",
-                "bb_rmsd": 8.0,  # > 5A template drift, but < 15A cyclic ligand threshold
-                "neg_lattice_rmsd_refolded": -8.0,
-                "holo_apo_rmsd": 7.5,
-                "apo_complex_plddt": 0.85,  # well-folded alternative apo state
-                "complex_plddt": 0.82,
-                "ligand_iptm": 0.75,
-                "mean_ligand_coordination": 4.0,
-                "mean_ligand_plddt": 0.80,
-                "min_ligand_distance": 12.0,
-                "neg_num_ligand_clashes": 0,
+                "designed_chain_sequence": "AAAA",
+                "file_name": "apo_switch.cif",
+                "bb_rmsd": 24.0,  # High template drift; logged only, never penalized
+                "neg_lattice_rmsd_refolded": -24.0,
+                "holo_apo_rmsd": 8.5,
+                "apo_complex_plddt": 0.35,  # Unfolded/weakly folded apo state is valid
+                "complex_plddt": 0.88,
+                "ligand_iptm": 0.82,
+                "mean_ligand_plddt": 0.84,
+                "ss_accuracy_refolded": 0.90,
+                "sym_orientation_match": 1.0,
                 "neg_sym_chain_rmsd": -0.5,
                 "sym_chain_rmsd": 0.5,
                 "neg_sym_ligand_rmsd": -0.2,
                 "sym_ligand_rmsd": 0.2,
                 "neg_ligand_coord_geom_dev": -5.0,
+                "ligand_coord_geom_dev": 5.0,
                 "neg_ligand_coord_bond_dev": -0.1,
                 "ligand_coord_bond_dev": 0.1,
                 "ligand_min_coord_number": 4.0,
@@ -316,22 +317,23 @@ def test_ligand_counter_screen_composes_with_cyclic_symmetry_and_soft_ranks(tmp_
             {
                 "id": "static_complex",
                 "designed_sequence": "BBBB",
+                "designed_chain_sequence": "BBBB",
                 "file_name": "static_complex.cif",
                 "bb_rmsd": 1.0,
                 "neg_lattice_rmsd_refolded": -1.0,
                 "holo_apo_rmsd": 0.4,
-                "apo_complex_plddt": 0.85,
+                "apo_complex_plddt": 0.88,
                 "complex_plddt": 0.85,
                 "ligand_iptm": 0.78,
-                "mean_ligand_coordination": 4.0,
                 "mean_ligand_plddt": 0.82,
-                "min_ligand_distance": 12.0,
-                "neg_num_ligand_clashes": 0,
+                "ss_accuracy_refolded": 0.90,
+                "sym_orientation_match": 1.0,
                 "neg_sym_chain_rmsd": -0.5,
                 "sym_chain_rmsd": 0.5,
                 "neg_sym_ligand_rmsd": -0.2,
                 "sym_ligand_rmsd": 0.2,
                 "neg_ligand_coord_geom_dev": -5.0,
+                "ligand_coord_geom_dev": 5.0,
                 "neg_ligand_coord_bond_dev": -0.1,
                 "ligand_coord_bond_dev": 0.1,
                 "ligand_min_coord_number": 4.0,
@@ -356,9 +358,27 @@ def test_ligand_counter_screen_composes_with_cyclic_symmetry_and_soft_ranks(tmp_
     filter_task.sort_df()
 
     assert filter_task.cyclic_ligand_preset is True
-    assert "holo_apo_rmsd" in filter_task.metrics
-    assert "neg_sym_chain_rmsd" in filter_task.metrics
-    # Both pass relaxed 15A RMSD + cyclic filters (soft-rank only on holo_apo_rmsd)
+    assert set(filter_task.metrics) == {
+        "holo_apo_rmsd",
+        "complex_plddt",
+        "ligand_iptm",
+        "mean_ligand_plddt",
+    }
+    assert all(
+        flt["feature"] not in ("local_rmsd", "global_rmsd", "designfolding_rmsd")
+        for flt in filter_task.filters
+    )
+    assert "bb_rmsd" in filter_task.df.columns
     assert filter_task.df["pass_filters"].all()
     ranked = filter_task.df.sort_values("final_rank")["id"].tolist()
-    assert ranked[0] == "folded_switch"
+    assert ranked[0] == "apo_switch"
+
+    # Ensure visualization works cleanly even without pass_local_rmsd_filter
+    filter_task.df_div = filter_task.df.copy()
+    hist_metrics, extra_pairs, row_headers, rows, metric_rows, intro_text, csv_expl_rows = (
+        filter_task.prepare_visualization()
+    )
+    filter_task.make_visualization(
+        hist_metrics, extra_pairs, row_headers, rows, metric_rows, intro_text, csv_expl_rows
+    )
+    assert (filter_task.outdir / "results_overview.pdf").exists()

@@ -154,6 +154,7 @@ class Filter(Task):
         outdir: str = None,
         use_affinity: bool = False,  # This changes the filtering metrics to metrics more amenable to small molecule binder design
         ligand_counter_screen: bool = False,  # Apply simplified holo-vs-apo conformational change ranking preset
+        drop_template_rmsd_filters: bool | None = None,  # Drop template-RMSD hard filters (None = auto-drop for ligand_counter_screen / cyclic ligand preset)
         filter_cysteine: bool = True,  # This filters out all designs that have designed cysteins in them (prespecified cysteins in the design are not counted)
         from_inverse_folded: bool = True,  # This makes it so that we use the backbone refolding rmsd instead of the all-atom RMSD
         filter_designfolding: bool = True,  # Additionally filter based on the RMSD from refolding the design in isolation. This makes sure the design has the same shape with and without the target being present.
@@ -181,6 +182,7 @@ class Filter(Task):
         self.top_budget = top_budget
         self.use_affinity = use_affinity
         self.ligand_counter_screen = ligand_counter_screen
+        self.drop_template_rmsd_filters = drop_template_rmsd_filters
         self.filter_cysteine = filter_cysteine
         self.from_inverse_folded = from_inverse_folded
         self.filter_bindingsite = filter_bindingsite
@@ -281,6 +283,15 @@ class Filter(Task):
                     "lower_is_better": False,
                 }
             )
+        if self.drop_template_rmsd_filters is True or (
+            self.drop_template_rmsd_filters is None and self.ligand_counter_screen
+        ):
+            self.filters = [
+                flt
+                for flt in self.filters
+                if flt["feature"]
+                not in ("local_rmsd", "global_rmsd", "designfolding_rmsd")
+            ]
         self.filters.extend(additional_filters)
 
         random.seed(self.random_state)
@@ -330,14 +341,14 @@ class Filter(Task):
         """Auto-apply the cyclic metal-ligand preset when its metrics are present.
 
         Active when analysis emitted fitted-axis symmetry/coordination columns
-        and the user gave no ``metrics_override``. Ranking is switched to
-        symmetry + coordination, template RMSD filters are relaxed, and hard
-        coordination/symmetry filters are added. Missing values are set to the
-        worst observed value so they rank last.
+        and the user gave no ``metrics_override``. In standalone mode, switches
+        ranking to refolded SS + symmetry + coordination + holo quality. In
+        ``ligand_counter_screen`` mode, keeps the simplified counter-screen
+        ranking (``holo_apo_rmsd`` + holo quality) while still adding hard
+        SS/symmetry/coordination guardrails and dropping template RMSD filters.
         """
         from boltzgen.task.filter.material_presets import (
             CYCLIC_LIGAND_SYMMETRY_COLUMNS,
-            CYCLIC_LIGAND_SYMMETRY_RMSD_THRESHOLD,
             cyclic_ligand_symmetry_filtering_overrides,
             cyclic_ligand_symmetry_filters,
         )
@@ -349,24 +360,45 @@ class Filter(Task):
             return df
 
         self.cyclic_ligand_preset = True
-        print("Cyclic metal-ligand assembly detected: ranking by symmetry and coordination sphere.")
-        for key, weight in cyclic_ligand_symmetry_filtering_overrides().items():
-            if weight is None:
-                self.metrics.pop(key, None)
-            else:
-                self.metrics[key] = weight
+        if not self.ligand_counter_screen:
+            print(
+                "Cyclic metal-ligand assembly detected: ranking by secondary structure, symmetry, coordination, and model quality."
+            )
+            for key, weight in cyclic_ligand_symmetry_filtering_overrides().items():
+                if weight is None:
+                    self.metrics.pop(key, None)
+                else:
+                    self.metrics[key] = weight
+        else:
+            print(
+                "Cyclic metal-ligand assembly with counter-screen: keeping counter-screen ranking and applying SS/symmetry/coordination hard guards."
+            )
 
-        for flt in self.filters:
-            if flt["feature"] in ("local_rmsd", "global_rmsd", "designfolding_rmsd"):
-                flt["threshold"] = CYCLIC_LIGAND_SYMMETRY_RMSD_THRESHOLD
+        if self.drop_template_rmsd_filters is not False:
+            self.filters = [
+                flt
+                for flt in self.filters
+                if flt["feature"]
+                not in ("local_rmsd", "global_rmsd", "designfolding_rmsd")
+            ]
+
         present = {f["feature"] for f in self.filters}
         for flt in cyclic_ligand_symmetry_filters():
-            if flt["feature"] in df.columns and flt["feature"] not in present:
+            feat = flt["feature"]
+            if feat in df.columns and df[feat].notna().any() and feat not in present:
                 self.filters.append(flt)
 
-        lower_better = {"sym_chain_rmsd", "sym_ligand_rmsd", "ligand_coord_bond_dev"}
+        lower_better = {
+            "sym_chain_rmsd",
+            "sym_ligand_rmsd",
+            "ligand_coord_bond_dev",
+            "ligand_coord_geom_dev",
+        }
         for col in set(self.metrics) | {f["feature"] for f in self.filters}:
-            if col in df.columns and col.startswith(("neg_sym", "neg_ligand", "sym_", "ligand_")):
+            if col in df.columns and (
+                col.startswith(("neg_sym", "neg_ligand", "sym_", "ligand_"))
+                or col == "ss_accuracy_refolded"
+            ):
                 df[col] = df[col].replace([np.inf, -np.inf], np.nan)
                 finite = df[col].dropna()
                 if len(finite):
@@ -386,10 +418,12 @@ class Filter(Task):
         self.df_in = df_in.copy()
         df = df_in.copy()
 
-        if self.from_inverse_folded:
+        if self.from_inverse_folded and "bb_rmsd" in df:
             df["global_rmsd"] = df["bb_rmsd"]
-        else:
+        elif "rmsd" in df:
             df["global_rmsd"] = df["rmsd"]
+        else:
+            df["global_rmsd"] = np.nan
 
         lattice_informative = "neg_lattice_rmsd_refolded" in df and (
             df["neg_lattice_rmsd_refolded"].fillna(0) != 0
@@ -466,6 +500,7 @@ class Filter(Task):
     def filter_df(self):
         filter_cols = []
         self.df["num_filters_passed"] = 0
+        self.df["pass_filters"] = True
 
         for filter in self.filters:
             feat = filter["feature"]
@@ -613,7 +648,11 @@ class Filter(Task):
         )
 
         self.df["final_rank"] = np.arange(1, len(self.df) + 1)
-        self.df["quality_score"] = 1 - (self.df["final_rank"] - 1) / (len(self.df) - 1)
+        self.df["quality_score"] = (
+            1.0
+            if len(self.df) <= 1
+            else 1 - (self.df["final_rank"] - 1) / (len(self.df) - 1)
+        )
 
         # Reorder columns
         priority_col_candidates = [
@@ -624,6 +663,14 @@ class Filter(Task):
             "designed_chain_sequence",
             "num_design",
             "complex_plddt",
+            "ligand_iptm",
+            "mean_ligand_plddt",
+            "ss_accuracy_refolded",
+            "helix_refolded",
+            "sym_chain_rmsd",
+            "sym_ligand_rmsd",
+            "ligand_min_coord_number",
+            "ligand_coord_geom_dev",
             "design_ptm",
             "local_rmsd",
             "global_rmsd",
@@ -1145,27 +1192,28 @@ class Filter(Task):
             else:
                 filters_df.at[i, "Pass"] = 0
 
-        fig_height = 0.4 * len(filters_df) + 2
-        fig, ax = plt.subplots(figsize=(8.5, fig_height))
-        ax.axis("off")
-        ax.text(
-            0.5,
-            1.0,
-            "Filtering Criteria",
-            fontsize=14,
-            ha="center",
-            va="bottom",
-            transform=ax.transAxes,
-        )
-        table = ax.table(
-            cellText=filters_df.values,
-            colLabels=filters_df.columns.tolist(),
-            loc="center",
-        )
-        table.auto_set_font_size(False)
-        table.set_fontsize(8)
-        table.scale(1, 1.2)
-        show(fig)
+        if not filters_df.empty:
+            fig_height = 0.4 * len(filters_df) + 2
+            fig, ax = plt.subplots(figsize=(8.5, fig_height))
+            ax.axis("off")
+            ax.text(
+                0.5,
+                1.0,
+                "Filtering Criteria",
+                fontsize=14,
+                ha="center",
+                va="bottom",
+                transform=ax.transAxes,
+            )
+            table = ax.table(
+                cellText=filters_df.values,
+                colLabels=filters_df.columns.tolist(),
+                loc="center",
+            )
+            table.auto_set_font_size(False)
+            table.set_fontsize(8)
+            table.scale(1, 1.2)
+            show(fig)
         fig_height = 0.4 * len(metric_rows) + 1
         fig, ax = plt.subplots(figsize=(8.5, fig_height))
         ax.axis("off")
@@ -1258,17 +1306,27 @@ class Filter(Task):
                 • Right – same but limited to designs passing the RMSD filter.
                 """,
         )
+        vis_filter_col = (
+            "pass_local_rmsd_filter"
+            if "pass_local_rmsd_filter" in self.df.columns
+            else "pass_filters"
+        )
+        vis_filter_label = (
+            "(Designs passing RMSD threshold)"
+            if vis_filter_col == "pass_local_rmsd_filter"
+            else "(Designs passing filters)"
+        )
         for x, y in extra_pairs:
             if x in self.df.columns and y in self.df.columns:
                 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8.5, 4.5))
                 self._scatter_plus(ax1, self.df, x, y, "All samples")
-                if self.df["pass_local_rmsd_filter"].sum() > 0:
+                if self.df[vis_filter_col].sum() > 0:
                     self._scatter_plus(
                         ax2,
-                        self.df[self.df["pass_local_rmsd_filter"]],
+                        self.df[self.df[vis_filter_col]],
                         x,
                         y,
-                        "(Designs passing RMSD threshold)",
+                        vis_filter_label,
                     )
                 show(fig)
 
@@ -1277,7 +1335,7 @@ class Filter(Task):
             body=(
                 "Distribution of each metric across all designs (grey) with overlays for Top-quality (red outline) "
                 "and Diversity-optimised (blue dashed) subsets. The right panel repeats the histogram but only for designs "
-                "that pass the RMSD threshold."
+                "that pass the active filters."
             ),
         )
         for m in hist_metrics:
@@ -1287,14 +1345,14 @@ class Filter(Task):
             self._hist_plus(
                 ax1, self.df[m], self.df[: self.top_budget][m], self.df_div[m], m, ""
             )
-            if self.df["pass_local_rmsd_filter"].sum() > 0:
+            if self.df[vis_filter_col].sum() > 0:
                 self._hist_plus(
                     ax2,
-                    self.df[self.df["pass_local_rmsd_filter"]][m],
+                    self.df[self.df[vis_filter_col]][m],
                     self.df[: self.top_budget][m],
                     self.df_div[m],
                     m,
-                    " (Designs passing RMSD threshold)",
+                    f" {vis_filter_label}",
                 )
             show(fig)
 

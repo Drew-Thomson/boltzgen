@@ -459,3 +459,90 @@ def test_material_builder_underscore_and_alias_args(monkeypatch, tmp_path):
 
     assert "--steps" in cmd_args_steps
     assert cmd_args_steps[cmd_args_steps.index("--steps") + 1] == "design"
+
+
+def test_ligand_counter_screen_cli_drops_template_rmsd_and_forwards_max_candidates(
+    monkeypatch, tmp_path
+):
+    import json
+    import boltzgen.cli.boltzgen as boltzgen_cli
+
+    spec = tmp_path / "material.yaml"
+    spec.write_text("entities: []\n")
+    (tmp_path / "material_layout.json").write_text(
+        json.dumps({"copies": 6, "topology": "cyclic"})
+    )
+    monkeypatch.setattr(boltzgen_cli.torch.cuda, "get_device_capability", lambda: (8, 0))
+    monkeypatch.setattr(
+        boltzgen_cli,
+        "get_artifact_path",
+        lambda *args, **kwargs: Path("dummy_checkpoint"),
+    )
+
+    parser = boltzgen_cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run",
+            str(spec),
+            "--protocol",
+            "peptide-anything",
+            "--ligand_counter_screen",
+            "--max_target_candidates",
+            "12",
+            "--use_kernels",
+            "false",
+        ]
+    )
+    args.output = tmp_path / "out"
+    args.config_dir = Path("test_config")
+    args.design_checkpoints = ["dummy_checkpoint"]
+
+    pipeline = boltzgen_cli.BinderDesignPipeline(args, Path("dummy_moldir"))
+    culling_step = next(
+        step for step in pipeline.steps if step.name == "filter_target_candidates"
+    )
+    assert "use_template_rmsd=False" in culling_step.args
+    assert "max_rmsd=null" in culling_step.args
+    assert "rank_initial_candidates=True" in culling_step.args
+    assert "max_candidates=12" in culling_step.args
+
+    filter_step = next(step for step in pipeline.steps if step.name == "filtering")
+    assert "ligand_counter_screen=True" in filter_step.args
+    assert "drop_template_rmsd_filters=True" in filter_step.args
+
+    # Verify material_builder forwards --max_target_candidates
+    root_dir = Path(__file__).resolve().parent.parent
+    if str(root_dir) not in sys.path:
+        sys.path.insert(0, str(root_dir))
+    import material_builder
+    import yaml
+
+    cfg = tmp_path / "cyclic.yaml"
+    cfg.write_text(
+        yaml.dump(
+            {
+                "copies": 6,
+                "topology": "cyclic",
+                "max_target_candidates": 15,
+                "asym_unit": [
+                    {"type": "protein", "length": 20, "secondary_structure": "H"},
+                    {"type": "ligand", "ccd": "ZN", "ligands_per_peptide": 0.5},
+                ],
+            }
+        )
+    )
+    cmd_args = []
+    monkeypatch.setattr(
+        material_builder.subprocess,
+        "run",
+        lambda cmd, check=True: cmd_args.extend(cmd),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["material_builder.py", "--config", str(cfg), "--ligand_counter_screen", "--run"],
+    )
+    material_builder.main()
+    assert "--ligand_counter_screen" in cmd_args
+    assert "--max_target_candidates" in cmd_args
+    assert cmd_args[cmd_args.index("--max_target_candidates") + 1] == "15"

@@ -68,6 +68,26 @@ def test_symmetry_antiparallel_ring_uses_half_order_and_detects_asymmetry():
     assert missing["sym_ligand_orbit_ok"] == 0.0
 
 
+def test_symmetry_orientation_match_enforces_expected_polarity():
+    parallel_chains = _ring_chains(6, alternate=False)
+    antiparallel_chains = _ring_chains(6, alternate=True)
+    ligands = np.array([[6.0, 0, 0] @ _rot_z(120 * i).T for i in range(3)])
+
+    out_mismatch = compute_cyclic_symmetry_metrics(
+        parallel_chains, ligands, expected_antiparallel=True
+    )
+    assert out_mismatch["sym_is_antiparallel"] == 0.0
+    assert out_mismatch["sym_orientation_match"] == 0.0
+    assert out_mismatch["sym_order"] == 3.0
+
+    out_match = compute_cyclic_symmetry_metrics(
+        antiparallel_chains, ligands, expected_antiparallel=True
+    )
+    assert out_match["sym_is_antiparallel"] == 1.0
+    assert out_match["sym_orientation_match"] == 1.0
+    assert out_match["sym_order"] == 3.0
+
+
 def test_symmetry_too_few_chains():
     assert compute_cyclic_symmetry_metrics(_ring_chains(2), np.zeros((1, 3))) == {}
 
@@ -130,4 +150,44 @@ def test_ligand_symmetry_metrics_from_cif(tmp_path):
 def test_preset_disables_template_rmsd_and_prioritises_symmetry():
     ov = cyclic_ligand_symmetry_filtering_overrides()
     assert ov["neg_local_rmsd"] is None and ov["neg_global_rmsd"] is None
+    assert ov["ss_accuracy_refolded"] == 1
     assert ov["neg_sym_ligand_rmsd"] == 1 and ov["neg_ligand_coord_geom_dev"] == 1
+
+
+def test_compute_refolded_ss_metrics_distinguishes_helix_from_extended():
+    import torch
+    from boltzgen.task.analyze.analyze_utils import compute_refolded_ss_metrics
+
+    # Ideal alpha-helix backbone (radius ~2.3 A, rise 1.5 A/res, 100 deg/res)
+    n_res = 16
+    helix_bb = []
+    for i in range(n_res):
+        t = np.deg2rad(100.0 * i)
+        z = 1.5 * i
+        ca = np.array([2.3 * np.cos(t), 2.3 * np.sin(t), z])
+        n_atom = np.array([2.3 * np.cos(t - 0.3), 2.3 * np.sin(t - 0.3), z - 0.5])
+        c_atom = np.array([2.3 * np.cos(t + 0.3), 2.3 * np.sin(t + 0.3), z + 0.5])
+        o_atom = np.array([3.3 * np.cos(t + 0.3), 3.3 * np.sin(t + 0.3), z + 1.2])
+        helix_bb.append([n_atom, ca, c_atom, o_atom])
+    helix_tensor = torch.tensor(np.array(helix_bb), dtype=torch.float32)
+
+    # Extended coil (linear spacing, no H-bonds)
+    ext_bb = [
+        [
+            [3.8 * i - 1.2, 0.0, 0.0],
+            [3.8 * i, 0.0, 0.0],
+            [3.8 * i + 1.2, 0.0, 0.0],
+            [3.8 * i + 1.2, 1.2, 0.0],
+        ]
+        for i in range(n_res)
+    ]
+    ext_tensor = torch.tensor(ext_bb, dtype=torch.float32)
+
+    ss_helix = torch.full((n_res,), 2, dtype=torch.long)  # 2 = HELIX
+    out_helix = compute_refolded_ss_metrics(helix_tensor, ss_helix)
+    out_ext = compute_refolded_ss_metrics(ext_tensor, ss_helix)
+
+    assert out_helix["helix_refolded"] > 0.5
+    assert out_helix["ss_accuracy_refolded"] == out_helix["helix_refolded"]
+    assert out_ext["helix_refolded"] == 0.0
+    assert out_ext["ss_accuracy_refolded"] == 0.0

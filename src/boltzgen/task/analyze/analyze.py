@@ -1158,7 +1158,36 @@ class Analyze(Task):
                         compute_ligand_symmetry_metrics,
                     )
 
-                    metrics.update(compute_ligand_symmetry_metrics(cif_path_refolded))
+                    expected_antiparallel: bool | None = None
+                    ap_raw = os.environ.get("MAT_ANTIPARALLEL_PROB")
+                    if ap_raw is None and os.environ.get("MAT_LAYOUT_FILE"):
+                        try:
+                            layout_path = Path(os.environ["MAT_LAYOUT_FILE"])
+                            if layout_path.exists():
+                                layout_data = json.loads(layout_path.read_text())
+                                ap_val = layout_data.get("topology_params", {}).get(
+                                    "antiparallel_prob"
+                                )
+                                if ap_val is not None:
+                                    ap_raw = str(ap_val)
+                        except Exception:
+                            ap_raw = None
+                    if ap_raw is not None:
+                        try:
+                            ap_prob = float(ap_raw)
+                            if ap_prob >= 0.99:
+                                expected_antiparallel = True
+                            elif ap_prob <= 0.01:
+                                expected_antiparallel = False
+                        except ValueError:
+                            expected_antiparallel = None
+
+                    metrics.update(
+                        compute_ligand_symmetry_metrics(
+                            cif_path_refolded,
+                            expected_antiparallel=expected_antiparallel,
+                        )
+                    )
 
             # noncovalents metrics for refolded structure
             if self.noncovalents_refolded:
@@ -1175,6 +1204,15 @@ class Analyze(Task):
 
             bb_out = feat_out["coords"][bb_design_mask].reshape(-1, 4, 3)
             ca_coords_refolded = bb_out[:, 1, :].cpu()
+            try:
+                from boltzgen.task.analyze.analyze_utils import (
+                    compute_refolded_ss_metrics,
+                )
+
+                ss_cond = feat["ss_type"][design_mask] if "ss_type" in feat else None
+                metrics.update(compute_refolded_ss_metrics(bb_out, ss_cond))
+            except Exception as ss_err:
+                print(f"Refolded DSSP failed for {path}: {ss_err}")
 
         # Affinity metrics
         if self.affinity_metrics:

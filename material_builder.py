@@ -301,6 +301,13 @@ def main():
         help="Minimum allowed average target pLDDT (0-1 scale) for target models before discarding (default: 0.0)",
     )
     parser.add_argument(
+        "--max_target_candidates",
+        "--max-target-candidates",
+        type=int,
+        default=None,
+        help="Maximum number of ranked initial-screen candidates to advance to ligand counter-screen folding (default: keep all passing)",
+    )
+    parser.add_argument(
         "--min_ligand_distance",
         "--min-ligand-distance",
         type=float,
@@ -743,6 +750,8 @@ def main():
             cmd.append("--ligand_counter_screen")
             if hasattr(args, "target_min_plddt"):
                 cmd.extend(["--target_min_plddt", str(args.target_min_plddt)])
+            if getattr(args, "max_target_candidates", None) is not None:
+                cmd.extend(["--max_target_candidates", str(args.max_target_candidates)])
             if getattr(args, "min_ligand_distance", None) is not None:
                 cmd.extend(["--min_ligand_distance", str(args.min_ligand_distance)])
         elif getattr(args, "min_ligand_distance", None) is not None:

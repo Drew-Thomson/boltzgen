@@ -287,6 +287,13 @@ def add_configure_arguments(
         help="Minimum allowed average target pLDDT for target models before discarding without running counter-screens (default: 0.0)",
     )
     p.add_argument(
+        "--max_target_candidates",
+        "--max-target-candidates",
+        type=int,
+        default=None,
+        help="Maximum number of ranked initial-screen candidates to advance to ligand counter-screen folding (default: keep all passing)",
+    )
+    p.add_argument(
         "--min_ligand_distance",
         "--min-ligand-distance",
         type=float,
@@ -1464,7 +1471,7 @@ class BinderDesignPipeline:
         )
         if args.heteromer_counter_screen or getattr(args, "ligand_counter_screen", False):
             self.steps[-1].args.append(
-                "keys_dict_out=[complex_plddt,protein_iptm,design_iptm,min_interaction_pae]"
+                "keys_dict_out=[complex_plddt,protein_iptm,design_iptm,ligand_iptm,design_ptm,min_interaction_pae]"
             )
 
         # Design folding
@@ -1599,26 +1606,24 @@ class BinderDesignPipeline:
             source_dir = output_dir
             counter_screen_dir = args.output / "ligand_counter_screens"
             topology = _resolve_material_topology(args) or "cyclic"
-            if args.target_max_rmsd is not None:
-                ligand_target_max_rmsd: float | None = args.target_max_rmsd
-            elif args.refolding_rmsd_threshold is not None:
-                ligand_target_max_rmsd = args.refolding_rmsd_threshold
-            elif topology == "cyclic":
-                # Allow FilterTargetCandidates to auto-relax to 15.0 A when
-                # cyclic metal-ligand symmetry columns are present.
-                ligand_target_max_rmsd = None
-            else:
-                ligand_target_max_rmsd = _effective_refolding_rmsd_threshold(
-                    config_args_by_step.get("filtering", []),
-                    args.refolding_rmsd_threshold,
-                    topology=topology,
-                )
+            explicit_rmsd = (
+                args.target_max_rmsd
+                if args.target_max_rmsd is not None
+                else args.refolding_rmsd_threshold
+            )
+            use_template_rmsd = explicit_rmsd is not None
             filter_candidate_args = [
                 f"design_dir={input_dir}",
-                f"max_rmsd={'null' if ligand_target_max_rmsd is None else ligand_target_max_rmsd}",
+                f"max_rmsd={'null' if explicit_rmsd is None else explicit_rmsd}",
+                f"use_template_rmsd={use_template_rmsd}",
                 f"min_complex_plddt={args.target_min_plddt}",
                 f"topology={topology}",
+                "rank_initial_candidates=True",
             ]
+            if getattr(args, "max_target_candidates", None) is not None:
+                filter_candidate_args.append(
+                    f"max_candidates={args.max_target_candidates}"
+                )
             if effective_min_ligand_distance is not None:
                 filter_candidate_args.append(f"min_ligand_distance={effective_min_ligand_distance}")
             self.steps.append(
@@ -1758,6 +1763,13 @@ class BinderDesignPipeline:
                 )
         elif getattr(args, "ligand_counter_screen", False):
             filter_args.append("ligand_counter_screen=True")
+            explicit_filter_rmsd = (
+                args.refolding_rmsd_threshold is not None
+                or args.target_max_rmsd is not None
+            )
+            filter_args.append(
+                f"drop_template_rmsd_filters={not explicit_filter_rmsd}"
+            )
         elif getattr(args, "piezo_counter_screen", False):
             filter_args.append(
                 "metrics_override={piezo_e33_mean: 1, polar_order_parameter: 1, "
@@ -1773,7 +1785,7 @@ class BinderDesignPipeline:
             filter_args.append(
                 f"refolding_rmsd_threshold={args.refolding_rmsd_threshold}"
             )
-        elif target_max_rmsd is not None:
+        elif target_max_rmsd is not None and not getattr(args, "ligand_counter_screen", False):
             filter_args.append(f"refolding_rmsd_threshold={target_max_rmsd}")
         if args.metrics_override is not None:
             parsed_metrics = parse_metrics_override(args.metrics_override)

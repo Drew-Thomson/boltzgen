@@ -1065,6 +1065,7 @@ def _matched_rms(rotated: np.ndarray, target: np.ndarray) -> float:
 def compute_cyclic_symmetry_metrics(
     chain_ca: list[np.ndarray],
     ligand_centers: np.ndarray,
+    expected_antiparallel: bool | None = None,
 ) -> dict[str, float]:
     r"""Symmetry of a refolded ring assembly relative to its own fitted axis.
 
@@ -1072,7 +1073,9 @@ def compute_cyclic_symmetry_metrics(
     centroids (smallest right singular vector), passing through their mean.
     The rotation order is :math:`k=N` for chains with uniform axial direction
     and :math:`k=N/2` when chain directions strictly alternate
-    (antiparallel ring). Each object set :math:`X` is rotated by
+    (antiparallel ring). When ``expected_antiparallel`` is supplied, the
+    requested polarity determines :math:`k` and sets ``sym_orientation_match``.
+    Each object set :math:`X` is rotated by
     :math:`2\pi/k` about the axis and compared with itself:
 
     .. math::
@@ -1085,11 +1088,15 @@ def compute_cyclic_symmetry_metrics(
         Per-chain Cα coordinates, each ``(L_c, 3)``.
     ligand_centers : np.ndarray
         Ligand residue centroids, shape ``(n_lig, 3)``.
+    expected_antiparallel : bool | None, default=None
+        If provided, enforce parallel (``False``) or alternating antiparallel
+        (``True``) ring polarity via ``sym_orientation_match``.
 
     Returns
     -------
     dict[str, float]
         ``sym_order``, ``sym_chain_rmsd``, ``neg_sym_chain_rmsd``,
+        ``sym_is_antiparallel``, optional ``sym_orientation_match``,
         ``sym_ligand_rmsd``, ``neg_sym_ligand_rmsd``, ``sym_ligand_orbit_ok``;
         empty if fewer than 3 chains.
     """
@@ -1114,7 +1121,12 @@ def compute_cyclic_symmetry_metrics(
     alternating = (
         n % 2 == 0 and n >= 4 and bool(np.all(signs_arr * np.roll(signs_arr, -1) < 0))
     )
-    k = n // 2 if alternating else n
+    if expected_antiparallel is None:
+        k = n // 2 if alternating else n
+    elif expected_antiparallel and n % 2 == 0 and n >= 4:
+        k = n // 2
+    else:
+        k = n
     R = _rotation_matrix(axis, 2.0 * np.pi / k)
 
     # chain RMSD with assignment (unequal lengths -> prohibitive cost)
@@ -1133,7 +1145,12 @@ def compute_cyclic_symmetry_metrics(
         "sym_order": float(k),
         "sym_chain_rmsd": chain_rmsd,
         "neg_sym_chain_rmsd": -chain_rmsd,
+        "sym_is_antiparallel": 1.0 if alternating else 0.0,
     }
+    if expected_antiparallel is not None:
+        out["sym_orientation_match"] = (
+            1.0 if alternating == expected_antiparallel else 0.0
+        )
     m = len(ligand_centers)
     if m >= 1:
         rel = ligand_centers - origin
@@ -1156,6 +1173,7 @@ def compute_cyclic_symmetry_metrics(
 def compute_ligand_symmetry_metrics(
     cif_path: Path | str,
     coord_tolerance: float = 0.45,
+    expected_antiparallel: bool | None = None,
 ) -> dict[str, float]:
     r"""Metal coordination-sphere and ring-symmetry metrics of a refolded structure.
 
@@ -1263,7 +1281,13 @@ def compute_ligand_symmetry_metrics(
                     "ligand_coord_geom_dev_std": 0.0, "neg_ligand_coord_cn_std": 0.0,
                     "neg_ligand_coord_geom_dev_std": 0.0})
 
-    out.update(compute_cyclic_symmetry_metrics(chain_ca, np.stack(lig_centers)))
+    out.update(
+        compute_cyclic_symmetry_metrics(
+            chain_ca,
+            np.stack(lig_centers),
+            expected_antiparallel=expected_antiparallel,
+        )
+    )
     return out
 
 
@@ -1306,6 +1330,51 @@ def compute_ss_metrics(dssp_pred, ss_conditioning_metricsed):
     )
     ss_metrics["accuracy_overall"] = accuracy_overall
     return ss_metrics
+
+
+def compute_refolded_ss_metrics(
+    bb_out: torch.Tensor,
+    ss_type: torch.Tensor | None = None,
+) -> dict[str, float]:
+    """Compute DSSP secondary-structure fractions and conditioning match on refolded backbone.
+
+    Parameters
+    ----------
+    bb_out : torch.Tensor
+        Refolded N/CA/C/O backbone coordinates with shape ``(L, 4, 3)``.
+    ss_type : torch.Tensor | None, default=None
+        Per-residue conditioning labels of shape ``(L,)`` (0=unspecified,
+        1=loop, 2=helix, 3=sheet).
+
+    Returns
+    -------
+    dict[str, float]
+        ``loop_refolded``, ``helix_refolded``, ``sheet_refolded``, and (when
+        ``ss_type`` contains conditioned residues) ``ss_accuracy_refolded`` plus
+        ``*_refolded`` conditioning metrics.
+    """
+    if bb_out.ndim != 3 or bb_out.shape[1:] != (4, 3):
+        raise ValueError("bb_out must have shape (L, 4, 3)")
+    if len(bb_out) <= 5:
+        return {
+            "loop_refolded": float("nan"),
+            "helix_refolded": float("nan"),
+            "sheet_refolded": float("nan"),
+        }
+    import pydssp
+
+    dssp_refolded = pydssp.assign(bb_out, out_type="index")
+    out: dict[str, float] = {
+        "loop_refolded": (dssp_refolded == 0).float().mean().item(),
+        "helix_refolded": (dssp_refolded == 1).float().mean().item(),
+        "sheet_refolded": (dssp_refolded == 2).float().mean().item(),
+    }
+    if ss_type is not None and (ss_type != 0).any() and len(dssp_refolded) == len(ss_type):
+        ss_metrics_ref = compute_ss_metrics(dssp_refolded + 1, ss_type)
+        for k_ss, v_ss in ss_metrics_ref.items():
+            out[f"{k_ss}_refolded"] = v_ss
+        out["ss_accuracy_refolded"] = ss_metrics_ref["accuracy_overall"]
+    return out
 
 
 def filter_resolved_atoms(structure: Structure) -> Structure:

@@ -171,8 +171,10 @@ def test_filter_target_candidates_with_min_ligand_distance(tmp_path):
 
 def test_ligand_counter_screen_filtering_overrides_includes_ligand_metrics():
     overrides = ligand_counter_screen_filtering_overrides()
-    assert "min_ligand_distance" in overrides
-    assert "neg_num_ligand_clashes" in overrides
-    assert "ligand_iptm" in overrides
-    assert "mean_ligand_coordination" in overrides
-    assert "mean_ligand_plddt" in overrides
+    assert overrides["holo_apo_rmsd"] == 1
+    assert overrides["complex_plddt"] == 2
+    assert overrides["ligand_iptm"] == 2
+    assert overrides["mean_ligand_plddt"] == 2
+    assert overrides["neg_local_rmsd"] is None
+    assert overrides["neg_global_rmsd"] is None
+    assert "apo_complex_plddt" not in overrides
