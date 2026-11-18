@@ -993,8 +993,14 @@ def execute_command(args: argparse.Namespace) -> None:
 
     # Filter steps if specific steps are requested
     enabled_steps = set(args.steps) if args.steps else None
+    has_existing_inverse_fold = (
+        (config_dir / "intermediate_designs_inverse_folded").is_dir()
+        and any((config_dir / "intermediate_designs_inverse_folded").glob("*.cif"))
+    )
     if enabled_steps and "counter_screen_folding" in enabled_steps:
-        required = {"prepare_counter_screens", "inverse_folding"}
+        required = {"prepare_counter_screens"}
+        if not has_existing_inverse_fold:
+            required.add("inverse_folding")
         missing = required - enabled_steps
         if missing:
             raise ValueError(
@@ -1005,12 +1011,14 @@ def execute_command(args: argparse.Namespace) -> None:
         enabled_steps
         and "prepare_counter_screens" in enabled_steps
         and "inverse_folding" not in enabled_steps
+        and not has_existing_inverse_fold
     ):
         raise ValueError("prepare_counter_screens requires inverse_folding")
     if (
         enabled_steps
         and "filter_identity_pairs" in enabled_steps
         and "inverse_folding" not in enabled_steps
+        and not has_existing_inverse_fold
     ):
         raise ValueError("filter_identity_pairs requires inverse_folding")
     if enabled_steps and "merge_counter_screen_metrics" in enabled_steps:

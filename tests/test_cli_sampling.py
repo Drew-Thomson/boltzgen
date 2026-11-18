@@ -546,3 +546,46 @@ def test_ligand_counter_screen_cli_drops_template_rmsd_and_forwards_max_candidat
     assert "--ligand_counter_screen" in cmd_args
     assert "--max_target_candidates" in cmd_args
     assert cmd_args[cmd_args.index("--max_target_candidates") + 1] == "15"
+
+
+def test_execute_allows_counter_screen_resume_when_inverse_fold_exists(
+    monkeypatch, tmp_path
+):
+    import argparse
+    import yaml
+    import boltzgen.cli.boltzgen as boltzgen_cli
+
+    out_dir = tmp_path / "run_out"
+    (out_dir / "config").mkdir(parents=True)
+    (out_dir / "intermediate_designs_inverse_folded").mkdir()
+    (out_dir / "intermediate_designs_inverse_folded" / "sample_0.cif").write_text("data_x\n")
+
+    steps = [
+        "analysis",
+        "filter_target_candidates",
+        "prepare_counter_screens",
+        "counter_screen_folding",
+        "merge_counter_screen_metrics",
+        "filtering",
+    ]
+    for s in steps:
+        (out_dir / "config" / f"{s}.yaml").write_text("dummy: 1\n")
+    (out_dir / "steps.yaml").write_text(
+        yaml.dump({"steps": [{"name": s, "config_file": f"config/{s}.yaml"} for s in steps]})
+    )
+
+    executed = []
+    monkeypatch.setattr(
+        boltzgen_cli.subprocess,
+        "check_call",
+        lambda cmd: executed.append(Path(cmd[-1]).stem),
+    )
+
+    args = argparse.Namespace(
+        output=out_dir,
+        steps=steps,
+        subprocess=True,
+        ligand_counter_screen=True,
+    )
+    boltzgen_cli.execute_command(args)
+    assert executed == steps
