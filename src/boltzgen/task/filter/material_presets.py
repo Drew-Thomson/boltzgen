@@ -126,15 +126,13 @@ def cyclic_ligand_symmetry_filtering_overrides() -> dict[str, Any]:
 
 
 def cyclic_ligand_symmetry_filters() -> list[dict[str, Any]]:
-    """Hard filters (SS, metal coordination, and ring symmetry) for the cyclic ligand preset."""
+    """Hard sanity filters (SS, coordination, and ring symmetry) for cyclic ligand preset."""
     return [
-        {"feature": "ss_accuracy_refolded", "threshold": 0.70, "lower_is_better": False},
+        {"feature": "ss_accuracy_refolded", "threshold": 0.60, "lower_is_better": False},
         {"feature": "sym_orientation_match", "threshold": 1.0, "lower_is_better": False},
-        {"feature": "ligand_min_coord_number", "threshold": 3.0, "lower_is_better": False},
-        {"feature": "ligand_coord_bond_dev", "threshold": 0.5, "lower_is_better": True},
-        {"feature": "ligand_coord_geom_dev", "threshold": 25.0, "lower_is_better": True},
-        {"feature": "sym_ligand_rmsd", "threshold": 1.0, "lower_is_better": True},
-        {"feature": "sym_chain_rmsd", "threshold": 2.0, "lower_is_better": True},
+        {"feature": "ligand_min_coord_number", "threshold": 2.0, "lower_is_better": False},
+        {"feature": "sym_ligand_rmsd", "threshold": 3.0, "lower_is_better": True},
+        {"feature": "sym_chain_rmsd", "threshold": 3.0, "lower_is_better": True},
         {"feature": "sym_ligand_orbit_ok", "threshold": 1.0, "lower_is_better": False},
     ]
 

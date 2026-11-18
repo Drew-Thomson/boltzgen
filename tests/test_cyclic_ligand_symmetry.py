@@ -147,6 +147,47 @@ def test_ligand_symmetry_metrics_from_cif(tmp_path):
     assert out["neg_ligand_coord_bond_dev"] <= 0.0
 
 
+def test_ligand_symmetry_metrics_captures_realistic_zn_distances(tmp_path):
+    """Donors at 2.55 A (e.g. predicted Zn-O/N bonds) are included in coordination count."""
+    import gemmi
+
+    st = gemmi.Structure()
+    model = gemmi.Model("1")
+    zn_pos = [np.array([8.0, 0, 0]) @ _rot_z(120.0 * i).T for i in range(3)]
+    for i in range(3):
+        ch = gemmi.Chain("ABC"[i])
+        res = gemmi.Residue()
+        res.name, res.seqid = "ASP", gemmi.SeqId(1, " ")
+        for name, el, pos in (
+            ("CA", "C", np.array([10.0, 0, 0]) @ _rot_z(120.0 * i).T),
+            ("OD1", "O", zn_pos[i] + TETRA[0] / np.linalg.norm(TETRA[0]) * 2.55),
+            ("OD2", "O", zn_pos[i] + TETRA[1] / np.linalg.norm(TETRA[1]) * 2.15),
+        ):
+            a = gemmi.Atom()
+            a.name, a.element = name, gemmi.Element(el)
+            a.pos = gemmi.Position(*pos)
+            res.add_atom(a)
+        ch.add_residue(res)
+        model.add_chain(ch)
+    zch = gemmi.Chain("Z")
+    for i in range(3):
+        r = gemmi.Residue()
+        r.name, r.seqid = "ZN", gemmi.SeqId(i + 1, " ")
+        r.het_flag = "H"
+        a = gemmi.Atom()
+        a.name, a.element = "ZN", gemmi.Element("Zn")
+        a.pos = gemmi.Position(*zn_pos[i])
+        r.add_atom(a)
+        zch.add_residue(r)
+    model.add_chain(zch)
+    st.add_model(model)
+    cif = tmp_path / "zn_realistic.cif"
+    st.make_mmcif_document().write_file(str(cif))
+
+    out = compute_ligand_symmetry_metrics(cif)
+    assert out["ligand_min_coord_number"] == 2.0
+
+
 def test_preset_disables_template_rmsd_and_prioritises_symmetry():
     ov = cyclic_ligand_symmetry_filtering_overrides()
     assert ov["neg_local_rmsd"] is None and ov["neg_global_rmsd"] is None

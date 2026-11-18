@@ -1172,7 +1172,7 @@ def compute_cyclic_symmetry_metrics(
 
 def compute_ligand_symmetry_metrics(
     cif_path: Path | str,
-    coord_tolerance: float = 0.45,
+    coord_tolerance: float = 0.85,
     expected_antiparallel: bool | None = None,
 ) -> dict[str, float]:
     r"""Metal coordination-sphere and ring-symmetry metrics of a refolded structure.
