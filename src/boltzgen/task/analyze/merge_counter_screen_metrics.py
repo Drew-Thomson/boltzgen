@@ -98,17 +98,74 @@ def _compute_cif_backbone_rmsd(
 
 
 def _load_prediction_metrics(path: Path) -> dict[str, float]:
+    """Load metrics for the best folding sample (matching Analyze/FoldingWriter)."""
     if not path.exists():
         raise FileNotFoundError(f"Counter-screen prediction is missing: {path}")
     with np.load(path, allow_pickle=True) as output:
+        files = set(output.files)
+        # Determine best sample index using the same criterion as get_best_folding_sample
+        n_samples = 1
+        for k in ("coords", "design_iptm", "iptm", "complex_plddt", "ptm"):
+            if k in files:
+                arr = np.asarray(output[k])
+                if arr.ndim >= 1 and arr.shape[0] >= 1:
+                    n_samples = int(arr.shape[0])
+                    break
+
+        def _sample_vec(candidates: tuple[str, ...]) -> np.ndarray | None:
+            for key in candidates:
+                if key not in files:
+                    continue
+                vals = np.asarray(output[key], dtype=float)
+                if vals.ndim == 0:
+                    return np.full(n_samples, float(vals))
+                if vals.shape[0] == n_samples:
+                    if vals.ndim > 1:
+                        vals = vals.reshape(n_samples, -1).mean(axis=1)
+                    return vals
+            return None
+
+        iface = _sample_vec(("design_to_target_iptm", "design_iptm", "protein_iptm", "iptm"))
+        fold = _sample_vec(("design_ptm", "ptm", "target_ptm"))
+        if iface is not None and fold is not None:
+            conf = 0.8 * iface + 0.2 * fold
+        elif iface is not None:
+            conf = iface
+        elif fold is not None:
+            conf = fold
+        else:
+            conf = np.zeros(n_samples, dtype=float)
+        conf = np.where(np.isfinite(conf), conf, -np.inf)
+        best_idx = int(np.argmax(conf))
+
         values = {}
         for key in _METRICS:
-            if key not in output.files:
+            if key not in files:
                 continue
             value = np.asarray(output[key], dtype=float)
-            if value.size:
+            if value.size == 0:
+                continue
+            if value.ndim == 0:
+                values[key] = float(value)
+            elif value.shape[0] == n_samples:
+                values[key] = float(np.nanmean(value[best_idx]))
+            else:
                 values[key] = float(np.nanmean(value))
         return values
+
+
+def _match_parent_rows(parent_id: str, rows: dict[str, int], all_parents: set[str]) -> list[str]:
+    """Match exact parent_id or numeric replica suffix without prefix collisions."""
+    if parent_id in rows:
+        return [parent_id]
+    prefix = f"{parent_id}_"
+    return [
+        cid
+        for cid in rows
+        if cid.startswith(prefix)
+        and cid not in all_parents
+        and cid[len(prefix) :].isdigit()
+    ]
 
 
 class MergeCounterScreenMetrics(Task):
@@ -137,13 +194,9 @@ class MergeCounterScreenMetrics(Task):
             if "id" not in frame:
                 raise ValueError(f"Aggregate metrics CSV lacks an id column: {csv_path}")
             rows = {str(row_id): idx for idx, row_id in enumerate(frame["id"].astype(str))}
+            all_parents = set(mapping.keys())
             for parent_id, partner_ids in mapping.items():
-                matching_rows = [
-                    candidate_id
-                    for candidate_id in rows
-                    if candidate_id == parent_id
-                    or candidate_id.startswith(f"{parent_id}_")
-                ]
+                matching_rows = _match_parent_rows(parent_id, rows, all_parents)
                 if not matching_rows:
                     continue
 
@@ -351,12 +404,7 @@ class MergeCounterScreenMetrics(Task):
                         for _, row in counter_frame.iterrows()
                     }
                     for parent_id, partner_ids in mapping.items():
-                        matching_rows = [
-                            candidate_id
-                            for candidate_id in rows
-                            if candidate_id == parent_id
-                            or candidate_id.startswith(f"{parent_id}_")
-                        ]
+                        matching_rows = _match_parent_rows(parent_id, rows, all_parents)
                         if "apo" in partner_ids:
                             screen_id = partner_ids["apo"]
                             counter_row = counter_rows.get(str(screen_id))
@@ -365,11 +413,19 @@ class MergeCounterScreenMetrics(Task):
                                     row_idx = rows[candidate_id]
                                     for metric in ("complex_plddt", "design_iptm", "protein_iptm", "min_interaction_pae"):
                                         if metric in counter_row and pd.notna(counter_row[metric]):
-                                            frame.loc[row_idx, f"apo_{metric}"] = float(counter_row[metric])
+                                            apo_val = float(counter_row[metric])
+                                            frame.loc[row_idx, f"apo_{metric}"] = apo_val
                                             if metric in frame and pd.notna(frame.loc[row_idx, metric]):
-                                                frame.loc[row_idx, f"delta_{metric}_vs_apo"] = (
-                                                    float(frame.loc[row_idx, metric]) - float(counter_row[metric])
-                                                )
+                                                holo_val = float(frame.loc[row_idx, metric])
+                                                if metric == "min_interaction_pae":
+                                                    if apo_val < 1e4 and holo_val < 1e4:
+                                                        frame.loc[row_idx, "delta_neg_min_interaction_pae_vs_apo"] = (
+                                                            apo_val - holo_val
+                                                        )
+                                                else:
+                                                    frame.loc[row_idx, f"delta_{metric}_vs_apo"] = (
+                                                        holo_val - apo_val
+                                                    )
                             continue
                         for partner in ("A", "B"):
                             screen_id = partner_ids.get(partner)
@@ -416,14 +472,11 @@ class MergeCounterScreenMetrics(Task):
             # contrast metrics and would break contrast-based ranking. Keep them
             # in a side file for traceability and drop them from the CSV that
             # the filtering step consumes.
+            screened_ids: set[str] = set()
+            for parent in mapping:
+                screened_ids.update(_match_parent_rows(parent, rows, all_parents))
             screened = np.array(
-                [
-                    any(
-                        row_id == parent or row_id.startswith(f"{parent}_")
-                        for parent in mapping
-                    )
-                    for row_id in frame["id"].astype(str)
-                ],
+                [row_id in screened_ids for row_id in frame["id"].astype(str)],
                 dtype=bool,
             )
             if not screened.all():

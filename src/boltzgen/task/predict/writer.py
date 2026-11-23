@@ -61,6 +61,14 @@ class FoldingWriter(BasePredictionWriter):
         sample_id: str = None,
     ) -> None:
         """Write the predictions to disk."""
+        # Handle failed/OOM predictions before indexing tensors
+        exc_flag = prediction.get("exception", False)
+        if (isinstance(exc_flag, bool) and exc_flag) or (
+            isinstance(exc_flag, list) and exc_flag and exc_flag[0]
+        ):
+            self.failed += 1
+            return
+
         pred_dict = {}
         for key, value in prediction.items():
             # check object is tensor
@@ -68,15 +76,49 @@ class FoldingWriter(BasePredictionWriter):
                 pred_dict[key] = value.cpu().numpy()
         np.savez_compressed(self.outdir / f"{batch['id'][0]}.npz", **pred_dict)
 
-        # Get best sample
-        confidence = 0.8 * pred_dict["iptm"] + 0.2 * pred_dict["ptm"]
-        best_idx = np.argmax(confidence)
+        # Select best sample using the same criterion as Analyze (get_best_folding_sample)
+        n_samples = len(pred_dict["coords"])
+
+        def _sample_metric(candidates):
+            for key in candidates:
+                if key not in pred_dict:
+                    continue
+                vals = np.asarray(pred_dict[key])
+                if vals.ndim == 0:
+                    return np.full(n_samples, float(vals))
+                if vals.shape[0] == n_samples:
+                    if vals.ndim > 1:
+                        vals = vals.reshape(n_samples, -1).mean(axis=1)
+                    return vals.astype(float)
+            return None
+
+        interface_conf = _sample_metric(
+            ("design_to_target_iptm", "design_iptm", "protein_iptm", "iptm")
+        )
+        fold_conf = _sample_metric(("design_ptm", "ptm", "target_ptm"))
+        if interface_conf is None and fold_conf is None:
+            confidence = np.zeros(n_samples, dtype=float)
+        elif interface_conf is None:
+            confidence = fold_conf
+        elif fold_conf is None:
+            confidence = interface_conf
+        else:
+            confidence = 0.8 * interface_conf + 0.2 * fold_conf
+        confidence = np.where(np.isfinite(confidence), confidence, -np.inf)
+        best_idx = int(np.argmax(confidence))
         best_sample_coords = pred_dict["coords"][best_idx]
 
         prediction_out = {}
         for k in prediction:
             if k == "coords":
                 prediction_out[k] = torch.from_numpy(best_sample_coords)
+            elif (
+                k == "plddt"
+                and isinstance(prediction[k], Tensor)
+                and prediction[k].dim() >= 2
+                and prediction[k].shape[0] == n_samples
+            ):
+                prediction_out[k] = prediction[k][best_idx]
             else:
                 prediction_out[k] = prediction[k][0]
 
@@ -90,14 +132,6 @@ class FoldingWriter(BasePredictionWriter):
         )
         cif_text = to_mmcif(structure)
         open(self.refold_cif_dir / f"{batch['id'][0]}.cif", "w").write(cif_text)
-
-        # Failed prediction handling
-        if isinstance(prediction["exception"], bool):
-            if prediction["exception"]:
-                self.failed += 1
-        elif isinstance(prediction["exception"], list):
-            if prediction["exception"][0]:
-                self.failed += 1
 
     def on_predict_epoch_end(
         self,

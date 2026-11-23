@@ -210,16 +210,38 @@ def cylinder_metrics(
         target_radius = float(env_r) if env_r is not None else None
 
     centroid = chain_coms.mean(dim=0)
+    ca_centered = ca_coords - centroid
     coms_centered = chain_coms - centroid
 
-    _, _, vh = torch.linalg.svd(coms_centered)
-    u_axis = vh[0]
-    v_axis = vh[1]
-
-    ca_centered = ca_coords - centroid
-    x_proj = ca_centered @ u_axis
-    y_proj = ca_centered @ v_axis
-    radii = torch.sqrt(x_proj**2 + y_proj**2)
+    _, s_com, vh_com = torch.linalg.svd(coms_centered)
+    # Single flat ring of COMs: smallest singular value is near 0, so vh_com[2] is the
+    # cylinder axis and (vh_com[0], vh_com[1]) is the cross-sectional plane.
+    if s_com.shape[0] >= 3 and s_com[1] > 1e-6 and (s_com[2] / s_com[1]) < 0.25:
+        x_proj = ca_centered @ vh_com[0]
+        y_proj = ca_centered @ vh_com[1]
+        radii = torch.sqrt(x_proj**2 + y_proj**2)
+    else:
+        # Multi-tier / elongated barrel: pick the principal axis of chain_coms whose
+        # perpendicular CA radii have minimal relative dispersion (lowest CV).
+        best_radii = None
+        best_cv = float("inf")
+        for ax_idx in range(3):
+            plane_idx = [j for j in range(3) if j != ax_idx]
+            x_p = ca_centered @ vh_com[plane_idx[0]]
+            y_p = ca_centered @ vh_com[plane_idx[1]]
+            cand_r = torch.sqrt(x_p**2 + y_p**2)
+            mean_cand = float(cand_r.mean().item())
+            if mean_cand > 1e-4:
+                cv = float(cand_r.std(unbiased=False).item()) / mean_cand
+                if cv < best_cv:
+                    best_cv = cv
+                    best_radii = cand_r
+        if best_radii is None:
+            x_proj = ca_centered @ vh_com[0]
+            y_proj = ca_centered @ vh_com[1]
+            radii = torch.sqrt(x_proj**2 + y_proj**2)
+        else:
+            radii = best_radii
 
     mean_r = float(radii.mean().item())
     ref_radius = (
@@ -457,12 +479,15 @@ def _align_phase(  # noqa: C901, PLR0912, PLR0915
             q = cat_i - cat_i.mean(dim=0)
             h = p.T @ q
             u_mat, _, vh_mat = torch.linalg.svd(h)
-            d_sign = torch.sign(torch.det(u_mat @ vh_mat))
+            det_val = torch.det(u_mat @ vh_mat)
+            d_sign = -1.0 if det_val < 0 else 1.0
             d_rot = torch.eye(3, device=device, dtype=dtype)
             d_rot[2, 2] = d_sign
             r_opt = u_mat @ d_rot @ vh_mat
             p_aligned = p @ r_opt
-            cand_rmsd = float(torch.sqrt(torch.mean((p_aligned - q) ** 2)).item())
+            cand_rmsd = float(
+                torch.sqrt(torch.mean(torch.sum((p_aligned - q) ** 2, dim=-1))).item()
+            )
             if cand_rmsd < best_rmsd:
                 best_rmsd = cand_rmsd
                 best_mismatches = mismatch_count
@@ -586,7 +611,10 @@ def compute_two_chain_alternating_metrics(
     f_alt_ideal = float(n_hetero_ideal / tot_ideal) if tot_ideal > 0 else 1.0
 
     tot_refold = n_hetero_refold + n_homo_refold
-    f_alt_refold = float(n_hetero_refold / tot_refold) if tot_refold > 0 else 1.0
+    if tot_refold > 0:
+        f_alt_refold = float(n_hetero_refold / tot_refold)
+    else:
+        f_alt_refold = 0.0 if tot_ideal > 0 else 1.0
 
     if f_alt_ideal > 0.0:
         alternation_ratio = float(min(1.0, f_alt_refold / f_alt_ideal))
@@ -663,12 +691,13 @@ def _kabsch_rmsd(p_pts: torch.Tensor, q_pts: torch.Tensor) -> float:
     q = q_pts - q_pts.mean(dim=0)
     h = p.T @ q
     u, _, vh = torch.linalg.svd(h)
-    d_sign = torch.sign(torch.det(u @ vh))
+    det_val = torch.det(u @ vh)
+    d_sign = -1.0 if det_val < 0 else 1.0
     d_rot = torch.eye(3, device=p.device, dtype=p.dtype)
     d_rot[2, 2] = d_sign
     r_opt = u @ d_rot @ vh
     p_aligned = p @ r_opt
-    return float(torch.sqrt(torch.mean((p_aligned - q) ** 2)).item())
+    return float(torch.sqrt(torch.mean(torch.sum((p_aligned - q) ** 2, dim=-1))).item())
 
 
 def compute_double_tape_neatness_metrics(  # noqa: C901, PLR0912, PLR0915
@@ -1088,39 +1117,62 @@ def compute_chain_order_independent_rmsd(
     # Generate candidate permutations
     perms_set: set[tuple[int, ...]] = set()
 
-    # 1. Dihedral permutations D_K (cyclic shifts and reflections)
+    # 1. Dihedral permutations D_K on raw chain order
     for s in range(k_count):
         shift_perm = tuple((k + s) % k_count for k in range(k_count))
         perms_set.add(shift_perm)
         refl_perm = tuple((s - k) % k_count for k in range(k_count))
         perms_set.add(refl_perm)
 
-    # 2. Candidate permutations depending on topology constraint
-    if topology in ("cyclic", "cylindrical", "helical", "open_arc"):
-        # For 1D ring/helical topologies, candidate permutations are strictly
-        # the dihedral group D_K (cyclic shifts and reflections) to preserve cyclic symmetry.
-        pass
-    elif k_count <= 6:
-        # For unconstrained multi-chain assemblies of <= 6 chains, test full S_K
+    # 2. For K <= 6 (any topology, including cyclic 6-mers where Boltz-2 refolding
+    # can arbitrarily permute identical chain IDs around the ring), test full S_K.
+    if k_count <= 6:
         for p in itertools.permutations(range(k_count)):
             perms_set.add(p)
     else:
-        # 3. For K > 6, supplement with candidate SE(3) rotation + Hungarian matching
         coms_r = torch.stack([p.mean(dim=0) for p in centered_r])
         coms_i = torch.stack([p.mean(dim=0) for p in centered_i])
-        h_com = coms_r.T @ coms_i
-        u_com, _, vh_com = torch.linalg.svd(h_com)
-        d_com = torch.sign(torch.det(u_com @ vh_com))
-        d_mat = torch.eye(3, device=device, dtype=dtype)
-        d_mat[2, 2] = d_com
-        r0 = u_com @ d_mat @ vh_com
 
-        rot_cands = [r0]
-        rx = torch.diag(torch.tensor([1.0, -1.0, -1.0], device=device, dtype=dtype))
-        ry = torch.diag(torch.tensor([-1.0, 1.0, -1.0], device=device, dtype=dtype))
-        rz = torch.diag(torch.tensor([-1.0, -1.0, 1.0], device=device, dtype=dtype))
-        for flip in (rx, ry, rz):
-            rot_cands.append(r0 @ flip)
+        # For 1D ring/helical topologies with K > 6, also generate spatial D_K
+        # permutations after ordering chains azimuthally around the fitted axis.
+        if topology in ("cyclic", "cylindrical", "helical", "open_arc"):
+            def _azimuthal_order(coms_pts: torch.Tensor) -> list[int]:
+                _, _, vh_c = torch.linalg.svd(coms_pts)
+                if topology in ("cyclic", "open_arc"):
+                    ax = vh_c[2]
+                    e1, e2 = vh_c[0], vh_c[1]
+                    ang = torch.atan2(coms_pts @ e2, coms_pts @ e1)
+                    return torch.argsort(ang).tolist()
+                # Elongated helix/cylinder: order by projection along principal axis
+                proj = coms_pts @ vh_c[0]
+                return torch.argsort(proj).tolist()
+
+            ord_r = _azimuthal_order(coms_r)
+            ord_i = _azimuthal_order(coms_i)
+            for s in range(k_count):
+                perm_shift = [0] * k_count
+                perm_refl = [0] * k_count
+                for idx_pos in range(k_count):
+                    perm_shift[ord_r[idx_pos]] = ord_i[(idx_pos + s) % k_count]
+                    perm_refl[ord_r[idx_pos]] = ord_i[(s - idx_pos) % k_count]
+                perms_set.add(tuple(perm_shift))
+                perms_set.add(tuple(perm_refl))
+
+        # Supplement with PCA-frame alignment + Hungarian matching (8 principal-axis flips)
+        _, _, vh_r = torch.linalg.svd(coms_r)
+        _, _, vh_i = torch.linalg.svd(coms_i)
+        rot_cands = []
+        for s0 in (-1.0, 1.0):
+            for s1 in (-1.0, 1.0):
+                s2 = s0 * s1
+                signs = torch.diag(
+                    torch.tensor([s0, s1, s2], device=device, dtype=dtype)
+                )
+                r_pca = vh_r.T @ signs @ vh_i
+                if torch.det(r_pca) < 0:
+                    signs[2, 2] = -signs[2, 2]
+                    r_pca = vh_r.T @ signs @ vh_i
+                rot_cands.append(r_pca)
 
         for r_cand in rot_cands:
             rot_coms_r = coms_r @ r_cand
@@ -1145,7 +1197,11 @@ def compute_chain_order_independent_rmsd(
     # Batched SVD over all candidate permutations
     u, s, vh = torch.linalg.svd(h_matrices)  # u: [P, 3, 3], s: [P, 3], vh: [P, 3, 3]
     det = torch.det(u @ vh)
-    d = torch.sign(det)
+    d = torch.where(
+        det < 0,
+        torch.tensor(-1.0, device=device, dtype=dtype),
+        torch.tensor(1.0, device=device, dtype=dtype),
+    )
     score = s[..., 0] + s[..., 1] + d * s[..., 2]  # [P]
 
     mse = (norm_r + norm_i - 2.0 * score) / m_atoms

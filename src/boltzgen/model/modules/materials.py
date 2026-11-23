@@ -195,7 +195,13 @@ def generate_ideal_lattice(
     radius = float(params.get("target_radius", 15.0))
     dz = float(params.get("target_dz", 5.0))
     pitch = float(params.get("strand_spacing") or params.get("target_pitch") or 4.8)
+    pitch_offset = float(params.get("pitch_offset") or 0.0)
     identity = torch.eye(3, device=device, dtype=dtype)
+
+    if topology in ("cage_tetrahedral", "cage_octahedral"):
+        raise ValueError(
+            f"Topology {topology!r} is currently shelved/disabled pending point-group symmetry redesign."
+        )
 
     if topology == "cyclic":
         coms, rotations = _ring_points(n_chains, radius, device=device, dtype=dtype)
@@ -270,14 +276,16 @@ def generate_ideal_lattice(
         target_twist = float(params.get("target_twist", 0.0))
         twist_offset = float(params.get("twist_offset") or 0.0)
         step_angle = math.radians(target_twist + twist_offset)
+        eff_pitch = max(1.0, pitch + pitch_offset)
         steps = torch.arange(n_chains, device=device, dtype=dtype) - (n_chains - 1) / 2
         angles = steps * step_angle
         coms = torch.zeros((n_chains, 3), device=device, dtype=dtype)
-        coms[:, 2] = steps * pitch
+        coms[:, 2] = steps * eff_pitch
         rotations = torch.stack(
             [_rotation_z(float(a), device=device, dtype=dtype) for a in angles]
         )
     elif topology == "helical":
+        eff_dz = dz + pitch_offset
         angles = torch.arange(n_chains, device=device, dtype=dtype) * math.radians(
             float(params.get("target_angle", 30.0))
         )
@@ -286,13 +294,13 @@ def generate_ideal_lattice(
         coms[:, 1] = radius * torch.sin(angles)
         coms[:, 2] = (
             torch.arange(n_chains, device=device, dtype=dtype) - (n_chains - 1) / 2
-        ) * dz
+        ) * eff_dz
         rotations = torch.stack(
             [_rotation_z(float(a), device=device, dtype=dtype) for a in angles]
         )
     elif topology == "open_arc":
         arc_radius = float(params.get("arc_radius", 100.0))
-        spacing = float(params.get("target_arc_spacing", 10.0))
+        spacing = max(1.0, float(params.get("target_arc_spacing", 10.0)) + pitch_offset)
         step = 2.0 * math.asin(min(spacing / (2.0 * arc_radius), 1.0))
         angles = (
             torch.arange(n_chains, device=device, dtype=dtype) - (n_chains - 1) / 2
@@ -368,10 +376,13 @@ def generate_ideal_lattice(
     elif topology == "nanotube":
         ring_size = int(params.get("ring_size", 4))
         tiers = int(params.get("num_tiers", 4))
+        if ring_size < 1 or tiers < 1:
+            raise ValueError("nanotube ring_size and num_tiers must be positive")
         if n_chains != ring_size * tiers:
             raise ValueError(
                 f"nanotube requires {ring_size * tiers} copies, got {n_chains}"
             )
+        eff_dz = dz + pitch_offset
         stagger = math.radians(float(params.get("chiral_stagger", 0.0)))
         coms = torch.zeros((n_chains, 3), device=device, dtype=dtype)
         rotations = torch.empty((n_chains, 3, 3), device=device, dtype=dtype)
@@ -382,7 +393,7 @@ def generate_ideal_lattice(
                 [
                     radius * math.cos(angle),
                     radius * math.sin(angle),
-                    (tier - (tiers - 1) / 2) * dz,
+                    (tier - (tiers - 1) / 2) * eff_dz,
                 ],
                 device=device,
                 dtype=dtype,
@@ -390,10 +401,13 @@ def generate_ideal_lattice(
             rotations[i] = _rotation_z(angle, device=device, dtype=dtype)
     elif topology == "multi_helical":
         starts = int(params.get("num_starts", 3))
+        if starts < 1:
+            raise ValueError("multi_helical num_starts must be positive")
         if n_chains % starts:
             raise ValueError(
                 f"multi_helical requires copies divisible by num_starts ({starts})"
             )
+        eff_dz = dz + pitch_offset
         angle_step = math.radians(float(params.get("target_angle", 30.0)))
         coms = torch.zeros((n_chains, 3), device=device, dtype=dtype)
         rotations = torch.empty((n_chains, 3, 3), device=device, dtype=dtype)
@@ -404,62 +418,39 @@ def generate_ideal_lattice(
                 [
                     radius * math.cos(angle),
                     radius * math.sin(angle),
-                    (step - (n_chains // starts - 1) / 2) * dz,
+                    (step - (n_chains // starts - 1) / 2) * eff_dz,
                 ],
                 device=device,
                 dtype=dtype,
             )
             rotations[i] = _rotation_z(angle, device=device, dtype=dtype)
-    elif topology in ("cage_tetrahedral", "cage_octahedral", "hexagonal_mesh"):
-        # Evenly spread directions provide stable deterministic starting
-        # layouts for these compact closed/surface lattices.
-        cage_radius = float(params.get("target_cage_radius", 20.0))
-        if topology == "hexagonal_mesh":
-            gx, gy = int(params.get("grid_dim_x", 2)), int(params.get("grid_dim_y", 2))
-            if n_chains != 3 * gx * gy:
+    elif topology == "hexagonal_mesh":
+        gx, gy = int(params.get("grid_dim_x", 2)), int(params.get("grid_dim_y", 2))
+        if n_chains != 3 * gx * gy:
+            raise ValueError(
+                f"hexagonal_mesh requires {3 * gx * gy} copies, got {n_chains}"
+            )
+        lattice = params.get("lattice_constant")
+        if lattice is None:
+            pore = params.get("pore_diameter")
+            if pore is None:
                 raise ValueError(
-                    f"hexagonal_mesh requires {3 * gx * gy} copies, got {n_chains}"
+                    "hexagonal_mesh requires pore_diameter or lattice_constant"
                 )
-            lattice = params.get("lattice_constant")
-            if lattice is None:
-                pore = params.get("pore_diameter")
-                if pore is None:
-                    raise ValueError(
-                        "hexagonal_mesh requires pore_diameter or lattice_constant"
-                    )
-                lattice = float(pore) + 10.0
-            coms = torch.zeros((n_chains, 3), device=device, dtype=dtype)
-            for i in range(n_chains):
-                position, orientation = divmod(i, 3)
-                x, y = divmod(position, gy)
-                coms[i, 0] = x * float(lattice)
-                coms[i, 1] = y * float(lattice) * math.sqrt(3.0) / 2.0
-                coms[i, 2] = 0.0
-            rotations = identity.expand(n_chains, -1, -1).clone()
-            angles = (
-                torch.arange(n_chains, device=device, dtype=dtype) % 3 * (math.pi / 3.0)
-            )
-            rotations = torch.stack(
-                [_rotation_z(float(a), device=device, dtype=dtype) for a in angles]
-            )
-        else:
-            angles = torch.arange(n_chains, device=device, dtype=dtype) * (
-                math.pi * (3.0 - math.sqrt(5.0))
-            )
-            y = (
-                1.0
-                - 2.0
-                * (torch.arange(n_chains, device=device, dtype=dtype) + 0.5)
-                / n_chains
-            )
-            radial = torch.sqrt(torch.clamp(1.0 - y * y, min=0.0))
-            coms = (
-                torch.stack(
-                    (radial * torch.cos(angles), radial * torch.sin(angles), y), dim=-1
-                )
-                * cage_radius
-            )
-            rotations = identity.expand(n_chains, -1, -1).clone()
+            lattice = float(pore) + 10.0
+        coms = torch.zeros((n_chains, 3), device=device, dtype=dtype)
+        for i in range(n_chains):
+            position, orientation = divmod(i, 3)
+            x, y = divmod(position, gy)
+            coms[i, 0] = x * float(lattice)
+            coms[i, 1] = y * float(lattice) * math.sqrt(3.0) / 2.0
+            coms[i, 2] = 0.0
+        angles = (
+            torch.arange(n_chains, device=device, dtype=dtype) % 3 * (math.pi / 3.0)
+        )
+        rotations = torch.stack(
+            [_rotation_z(float(a), device=device, dtype=dtype) for a in angles]
+        )
     else:
         raise ValueError(f"Unsupported material topology: {topology}")
 
@@ -542,6 +533,76 @@ def build_layout_guidance_masks(
     return guidance_masks, protein_masks, ligand_masks
 
 
+def safe_kabsch_rotation(
+    source_centered: torch.Tensor,
+    target_centered: torch.Tensor,
+    *,
+    prev_axis: torch.Tensor | None = None,
+    planar_target: bool = False,
+) -> torch.Tensor:
+    r"""Compute proper SO(3) rotation $R$ minimizing $\|P R - Q\|_F^2$.
+
+    Guards against rank-0 degeneracy ($\det = 0$) and stabilizes the normal-axis
+    sign ($\pm \hat{z}$) on planar targets ($Q_{:,2} = 0$) using ``prev_axis``.
+
+    Parameters
+    ----------
+    source_centered : torch.Tensor
+        Centered source points, shape ``[N, 3]``.
+    target_centered : torch.Tensor
+        Centered target points, shape ``[N, 3]``.
+    prev_axis : torch.Tensor | None
+        Optional reference axis in source frame for continuous $\pm z$ sign on planar lattices.
+    planar_target : bool
+        If True, enforces continuity of column 2 ($R_{:,2}$) against ``prev_axis``.
+
+    Returns
+    -------
+    torch.Tensor
+        Proper rotation matrix $R \in SO(3)$ of shape ``[3, 3]``.
+    """
+    device, dtype = source_centered.device, source_centered.dtype
+    h = source_centered.T @ target_centered
+    if torch.linalg.norm(h) < 1e-8 or not torch.isfinite(h).all():
+        return torch.eye(3, device=device, dtype=dtype)
+    u, _, vh = torch.linalg.svd(h)
+    det_val = torch.det(u @ vh)
+    d = torch.where(
+        det_val < 0,
+        torch.tensor(-1.0, device=device, dtype=dtype),
+        torch.tensor(1.0, device=device, dtype=dtype),
+    )
+    corr = torch.eye(3, device=device, dtype=dtype)
+    corr[2, 2] = d
+    rot = u @ corr @ vh
+
+    if planar_target and prev_axis is not None and torch.linalg.norm(prev_axis) > 1e-6:
+        # For planar Q (Q[:, 2] == 0), negating both column 2 of U and row 2 of Vh
+        # flips R[:, 2] -> -R[:, 2] while leaving the planar projection on X,Y unchanged
+        # if we rotate 180 deg around an in-plane axis; wait: flipping column 2 of R
+        # alone would make det(R) = -1. Instead, if R[:, 2] opposes prev_axis,
+        # the reflection in the XY plane + Z-flip is achieved by a 180-deg rotation
+        # about the X axis in the Q-frame (diag(1, -1, -1)), which preserves det = +1
+        # and maps planar ring onto itself (with reversed chirality if unchecked).
+        # Better: check if flipping column 2 of U AND column 1 of U preserves det=+1
+        # ONLY when S[1] == 0; when rank == 2 (S[2] == 0), U[:, 2] is uniquely fixed
+        # up to sign by U[:, 0] x U[:, 1] and det(R) = +1. So the sign of R[:, 2]
+        # reflects the winding orientation of P in 3D, and flipping Vh[2, :] flips
+        # R[:, 2] ONLY if det flips. We therefore orient using Q-plane reflection only
+        # when S[2] == 0 and R[:, 2] opposes prev_axis:
+        if torch.dot(rot[:, 2], prev_axis.to(device=device, dtype=dtype)) < 0:
+            # 180-deg rotation about local X in Q-frame: flips Y and Z while preserving SO(3)
+            # Note: this is a symmetry of cyclic/open_arc rings only when pairing is updated,
+            # so for ordered chains we keep rot unchanged unless near-degenerate (S[1] < 1e-3).
+            s_vals = torch.linalg.svdvals(h)
+            if s_vals[1] < 1e-3:
+                flip_x = torch.diag(
+                    torch.tensor([1.0, -1.0, -1.0], device=device, dtype=dtype)
+                )
+                rot = rot @ flip_x
+    return rot
+
+
 def fit_rigid_transform(source: torch.Tensor, target: torch.Tensor):
     """Least-squares row-vector transform mapping source coordinates to target."""
     n = min(source.shape[0], target.shape[0])
@@ -552,13 +613,158 @@ def fit_rigid_transform(source: torch.Tensor, target: torch.Tensor):
     target_mean = target.mean(dim=0)
     source_centered = source - source_mean
     target_centered = target - target_mean
-    u, _, vh = torch.linalg.svd(source_centered.T @ target_centered)
-    determinant = torch.sign(torch.det(u @ vh))
-    correction = torch.eye(3, device=source.device, dtype=source.dtype)
-    correction[2, 2] = determinant
-    rotation = u @ correction @ vh
+    rotation = safe_kabsch_rotation(source_centered, target_centered)
     translation = target_mean - source_mean @ rotation
     return rotation, translation
+
+
+def _rodrigues_exp(rot_vec: torch.Tensor) -> torch.Tensor:
+    """Exponential map so(3) -> SO(3) for a 3-vector axis * angle."""
+    device, dtype = rot_vec.device, rot_vec.dtype
+    theta = torch.linalg.norm(rot_vec)
+    eye = torch.eye(3, device=device, dtype=dtype)
+    if theta < 1e-6:
+        k = torch.zeros((3, 3), device=device, dtype=dtype)
+        k[0, 1], k[0, 2] = -rot_vec[2], rot_vec[1]
+        k[1, 0], k[1, 2] = rot_vec[2], -rot_vec[0]
+        k[2, 0], k[2, 1] = -rot_vec[1], rot_vec[0]
+        return eye + k + 0.5 * (k @ k)
+    u = rot_vec / theta
+    k = torch.zeros((3, 3), device=device, dtype=dtype)
+    k[0, 1], k[0, 2] = -u[2], u[1]
+    k[1, 0], k[1, 2] = u[2], -u[0]
+    k[2, 0], k[2, 1] = -u[1], u[0]
+    return eye + torch.sin(theta) * k + (1.0 - torch.cos(theta)) * (k @ k)
+
+
+def _so3_log(rot: torch.Tensor) -> torch.Tensor:
+    """Logarithmic map SO(3) -> so(3) returning axis * angle vector of shape (3,)."""
+    device, dtype = rot.device, rot.dtype
+    trace = torch.trace(rot)
+    cos_theta = torch.clamp(0.5 * (trace - 1.0), -1.0, 1.0)
+    theta = torch.acos(cos_theta)
+    if theta < 1e-5:
+        return 0.5 * torch.stack(
+            [rot[2, 1] - rot[1, 2], rot[0, 2] - rot[2, 0], rot[1, 0] - rot[0, 1]]
+        )
+    if math.pi - float(theta.item()) < 1e-3:
+        # Near 180 degrees: extract axis from eigenvector of R + I with largest norm
+        m = rot + torch.eye(3, device=device, dtype=dtype)
+        col_norms = torch.linalg.norm(m, dim=0)
+        best = int(torch.argmax(col_norms).item())
+        axis = m[:, best] / (col_norms[best] + 1e-8)
+        return axis * theta
+    sin_theta = torch.sin(theta)
+    axis = torch.stack(
+        [rot[2, 1] - rot[1, 2], rot[0, 2] - rot[2, 0], rot[1, 0] - rot[0, 1]]
+    ) / (2.0 * sin_theta)
+    return axis * theta
+
+
+def so3_interpolate_coords(
+    rel_orig: torch.Tensor,
+    rel_guided: torch.Tensor,
+    weight: float,
+) -> torch.Tensor:
+    r"""Interpolate centered subunit coordinates via SO(3) geodesic + aligned shape blend.
+
+    Decomposes the transformation from ``rel_orig`` to ``rel_guided`` into an
+    optimal Kabsch rotation $R_{\text{align}} \in SO(3)$ plus residual internal
+    shape deformation, then applies the geodesic rotation
+    $R(\lambda) = \exp(\lambda \log(R_{\text{align}}))$:
+
+    $$\mathbf{X}(\lambda) = \left[(1 - \lambda)\,(\mathbf{X}_{\text{orig}} R_{\text{align}}) + \lambda\,\mathbf{X}_{\text{guided}}\right] R_{\text{align}}^T R(\lambda)$$
+
+    Unlike raw Euclidean interpolation $(1-\lambda)\mathbf{X}_{\text{orig}} + \lambda\mathbf{X}_{\text{guided}}$,
+    this preserves 100% of covalent bond lengths and chirality across arbitrary
+    rotational differences (including $180^\circ$ flips).
+
+    Parameters
+    ----------
+    rel_orig : torch.Tensor
+        Centered original subunit coordinates, shape ``[N, 3]``.
+    rel_guided : torch.Tensor
+        Centered guided consensus coordinates, shape ``[N, 3]``.
+    weight : float
+        Interpolation factor $\lambda \in [0, 1]$.
+
+    Returns
+    -------
+    torch.Tensor
+        Interpolated centered coordinates of shape ``[N, 3]``.
+    """
+    lam = max(0.0, min(1.0, float(weight)))
+    if lam <= 0.0:
+        return rel_orig
+    if lam >= 1.0:
+        return rel_guided
+    if rel_orig.shape[0] < 3:
+        return (1.0 - lam) * rel_orig + lam * rel_guided
+
+    # Row-vector Kabsch: rel_orig @ R_align ~= rel_guided
+    r_align = safe_kabsch_rotation(rel_orig, rel_guided)
+    # Row-vector geodesic: (v @ R_align) == (R_align^T v)^T, so apply exp(lam * log(R_align))
+    rot_vec = _so3_log(r_align)
+    r_lam = _rodrigues_exp(lam * rot_vec)
+    rel_orig_aligned = rel_orig @ r_align
+    blended_in_guided_frame = (1.0 - lam) * rel_orig_aligned + lam * rel_guided
+    return blended_in_guided_frame @ r_align.T @ r_lam
+
+
+def rotational_consensus_average(
+    folded_chains: list[torch.Tensor],
+    *,
+    align_rotations: bool = True,
+) -> torch.Tensor:
+    r"""Compute non-collapsing consensus subunit coordinates across symmetric copies.
+
+    When subunits have diverged in 3D orientation or helical roll during early
+    diffusion, naive Euclidean averaging shrinks bond lengths toward zero.
+    Instead, each centered copy is Kabsch-aligned to the medoid/reference copy
+    before averaging internal shape, and the resulting consensus is oriented by
+    the Fréchet/SVD mean rotation $\bar{R} \in SO(3)$ of the copies.
+
+    Parameters
+    ----------
+    folded_chains : list[torch.Tensor]
+        List of $K \ge 1$ tensors of shape ``[N, 3]`` in the local consensus frame.
+    align_rotations : bool, default=True
+        If True, Kabsch-align internal coordinates before averaging and restore
+        mean $SO(3)$ orientation.
+
+    Returns
+    -------
+    torch.Tensor
+        Centered consensus coordinates of shape ``[N, 3]``.
+    """
+    if not folded_chains:
+        raise ValueError("folded_chains must be non-empty")
+    centered = [c - c.mean(dim=0, keepdim=True) for c in folded_chains]
+    if len(centered) == 1 or not align_rotations or centered[0].shape[0] < 3:
+        mean_c = torch.stack(centered, dim=0).mean(dim=0)
+        return mean_c - mean_c.mean(dim=0, keepdim=True)
+
+    # Pick medoid copy (lowest mean pairwise Kabsch RMSD or highest norm consistency)
+    # Using copy 0 as initial frame, align all copies, compute aligned mean, then
+    # project sum of inverse rotations onto SO(3) to preserve average orientation.
+    ref = centered[0]
+    aligned_list: list[torch.Tensor] = [ref]
+    r_inv_sum = torch.eye(3, device=ref.device, dtype=ref.dtype)
+    for c in centered[1:]:
+        r_c_to_ref = safe_kabsch_rotation(c, ref)
+        aligned_list.append(c @ r_c_to_ref)
+        r_inv_sum = r_inv_sum + r_c_to_ref.T
+
+    consensus_in_ref = torch.stack(aligned_list, dim=0).mean(dim=0)
+    # Project r_inv_sum onto SO(3) for mean orientation across all copies
+    u, _, vh = torch.linalg.svd(r_inv_sum)
+    det_val = torch.det(u @ vh)
+    corr = torch.eye(3, device=ref.device, dtype=ref.dtype)
+    corr[2, 2] = -1.0 if det_val < 0 else 1.0
+    r_mean = u @ corr @ vh
+
+    consensus = consensus_in_ref @ r_mean
+    return consensus - consensus.mean(dim=0, keepdim=True)
 
 
 def resolve_anchor_residue_index(
@@ -1118,11 +1324,11 @@ def beta_strand_pleating_direction(
 
         b = ca_pts - n_pts
         c_vec = c_pts - ca_pts
-        b_norm = torch.linalg.norm(b - c_vec, dim=-1, keepdim=True) + 1e-8
         cross = torch.linalg.cross(b, c_vec)
-        c_norm = torch.linalg.norm(cross, dim=-1, keepdim=True) + 1e-8
 
-        vecs = -0.531018 * ((b - c_vec) / b_norm) + 1.20673 * (cross / c_norm)
+        # Standard L-amino-acid virtual C-beta vector:
+        # CB - CA = -0.58273431 * (b x c) + 0.56802827 * b - 0.54067466 * c
+        vecs = -0.58273431 * cross + 0.56802827 * b - 0.54067466 * c_vec
         vecs = vecs / (torch.linalg.norm(vecs, dim=-1, keepdim=True) + 1e-8)
 
         odd_mean = vecs[0::2].mean(dim=0)
@@ -1530,9 +1736,20 @@ def unwrap_cylinder_to_consensus(
 
     rho_axis = torch.sqrt(axis_3d[:, 0] ** 2 + axis_3d[:, 1] ** 2 + eps)
     phi_axis = torch.atan2(axis_3d[:, 1], axis_3d[:, 0])
-    dphi_axis = (
-        torch.remainder(phi_axis - phi_val + math.pi, 2 * math.pi) - math.pi
-    )
+    # Unwrap azimuthal angle continuously along the chain to avoid 2*pi*R branch cuts
+    dphi_raw = torch.remainder(phi_axis - phi_val + math.pi, 2 * math.pi) - math.pi
+    if dphi_raw.shape[0] > 1:
+        step_diffs = torch.remainder(
+            dphi_raw[1:] - dphi_raw[:-1] + math.pi, 2 * math.pi
+        ) - math.pi
+        dphi_axis = torch.cat(
+            [dphi_raw[:1], dphi_raw[:1] + torch.cumsum(step_diffs, dim=0)], dim=0
+        )
+        # Re-center the continuous curve near 0 so mean offset stays in (-pi, pi]
+        center_shift = torch.round(dphi_axis.mean() / (2 * math.pi)) * (2 * math.pi)
+        dphi_axis = dphi_axis - center_shift
+    else:
+        dphi_axis = dphi_raw
 
     axis_flat = torch.stack(
         [
@@ -1832,4 +2049,90 @@ def compute_scheduled_guidance_scale(
         weight = progress
 
     return float(base_scale * weight)
+
+
+def compute_sigma_guidance_scale(
+    sigma: float,
+    base_scale: float = 1.0,
+    *,
+    sigma_start: float = 40.0,
+    sigma_peak: float = 12.0,
+    sigma_taper_start: float = 4.0,
+    sigma_release: float = 1.5,
+    schedule: str = "cosine",
+) -> float:
+    r"""Compute noise-level ($\sigma$)-scheduled 3-phase guidance weight $\lambda(\sigma) \in [0, 1]$.
+
+    Schedules guidance directly in physical noise units ($\text{\AA}$), making it
+    invariant to ``sampling_steps`` and ``sampling_schedule`` (e.g. AF3 vs dilated):
+
+    1. **Pure noise** ($\sigma \ge \sigma_{\text{start}}$): $\lambda = 0$.
+    2. **Ramp-in** ($\sigma_{\text{peak}} < \sigma < \sigma_{\text{start}}$): smooth
+       log-$\sigma$ ramp from $0$ to $\lambda_{\max} = \operatorname{clip}(\text{base\_scale}, 0, 1)$.
+    3. **Active plateau** ($\sigma_{\text{taper\_start}} \le \sigma \le \sigma_{\text{peak}}$):
+       $\lambda = \lambda_{\max}$.
+    4. **Late release taper** ($\sigma_{\text{release}} < \sigma < \sigma_{\text{taper\_start}}$):
+       smooth log-$\sigma$ decay from $\lambda_{\max}$ back to $0$.
+    5. **Free refinement** ($\sigma \le \sigma_{\text{release}}$): $\lambda = 0$, allowing
+       the denoiser to refine bond lengths, stereochemistry, and metal coordination
+       without hard-projection or ``step_scale`` overshoot.
+
+    Parameters
+    ----------
+    sigma : float
+        Current effective noise standard deviation $\hat{t}$ in Angstroms.
+    base_scale : float, default=1.0
+        Maximum guidance weight, clamped strictly to $[0.0, 1.0]$.
+    sigma_start : float, default=40.0
+        Upper noise level ($\text{\AA}$) where guidance begins ramping in.
+    sigma_peak : float, default=12.0
+        Noise level ($\text{\AA}$) where guidance reaches ``base_scale``.
+    sigma_taper_start : float, default=4.0
+        Noise level ($\text{\AA}$) where guidance begins tapering back to zero.
+    sigma_release : float, default=1.5
+        Lower noise level ($\text{\AA}$) at/below which guidance is fully off ($0.0$).
+    schedule : str, default="cosine"
+        Interpolation curve: ``"cosine"``/``"sigmoid"``, ``"linear"``, or ``"constant"``.
+
+    Returns
+    -------
+    float
+        Clamped guidance weight $\lambda(\sigma) \in [0.0, 1.0]$.
+    """
+    eff_base = max(0.0, min(1.0, float(base_scale)))
+    if eff_base <= 0.0:
+        return 0.0
+    if schedule == "constant":
+        return eff_base
+
+    s = max(float(sigma), 1e-8)
+    s_start = max(float(sigma_start), 1e-6)
+    s_peak = max(min(float(sigma_peak), s_start), 1e-6)
+    s_taper = max(min(float(sigma_taper_start), s_peak), 1e-6)
+    s_release = max(min(float(sigma_release), s_taper), 0.0)
+
+    def _interp(u: float) -> float:
+        u_c = max(0.0, min(1.0, u))
+        if schedule in ("cosine", "sigmoid"):
+            return 0.5 * (1.0 - math.cos(math.pi * u_c))
+        return u_c
+
+    if s >= s_start:
+        return 0.0
+    if s <= s_release:
+        return 0.0
+    if s > s_peak:
+        denom = math.log(s_start / s_peak)
+        u = math.log(s_start / s) / denom if denom > 1e-8 else 1.0
+        return float(eff_base * _interp(u))
+    if s >= s_taper:
+        return float(eff_base)
+
+    # Late release taper: s_release < s < s_taper
+    if s_release <= 0.0:
+        v = s / s_taper
+    else:
+        denom = math.log(s_taper / s_release)
+        v = math.log(s / s_release) / denom if denom > 1e-8 else 0.0
+    return float(eff_base * _interp(v))
 

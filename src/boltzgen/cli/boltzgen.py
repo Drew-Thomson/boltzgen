@@ -357,41 +357,46 @@ def add_configure_arguments(
         "--double-tape-core-bias",
         type=float,
         default=0.0,
-        help="Strength of penalty for T and boost for A in the core (inward-facing) of double-tape (default: 0.0)",
+        help="Strength of inward core bias (boosts A,V,I,L,M,F,W; penalizes polar/charged) for double_tape (default: 0.0)",
     )
     p.add_argument(
         "--double_tape_aromatic_bias",
         "--double-tape-aromatic-bias",
         type=float,
         default=0.0,
-        help="Strength of boost for W and Y on the outside (outward-facing) of double-tape (default: 0.0)",
+        help="Strength of outward boost for Y, W on double_tape exterior (default: 0.0)",
     )
     p.add_argument(
         "--double_tape_polar_bias",
+        "--double-tape-polar-bias",
         type=float,
         default=0.0,
-        help="Strength of boost for R, K, D, E, N, Q, H on the outside (outward-facing) of double-tape (default: 0.0)",
+        help="Strength of outward boost for R, K, D, E, N, Q, H, T, S on double_tape exterior (default: 0.0)",
     )
     p.add_argument(
         "--backbone_noise",
+        "--backbone-noise",
         type=float,
         default=0.0,
         help="Std (A) of Gaussian noise added to all backbone atoms (N, CA, C, O) during inverse folding inference (default: 0.0; ProteinMPNN uses ~0.1-0.2)",
     )
     p.add_argument(
         "--background_unbias_strength",
+        "--background-unbias-strength",
         type=float,
         default=0.0,
         help="Strength of removal of the natural amino acid background prior from inverse folding logits (default: 0.0; try 0.5-1.0)",
     )
     p.add_argument(
         "--top_p",
+        "--top-p",
         type=float,
         default=1.0,
         help="Nucleus sampling threshold for inverse folding (default: 1.0 = disabled)",
     )
     p.add_argument(
         "--repetition_penalty",
+        "--repetition-penalty",
         type=float,
         default=0.0,
         help="Logit penalty per prior occurrence of an amino acid within the same chain during inverse folding (default: 0.0)",
@@ -561,6 +566,7 @@ def add_configure_arguments(
     )
     p.add_argument(
         "--refolding_rmsd_threshold",
+        "--refolding-rmsd-threshold",
         type=float,
         help="Threshold used for RMSD-based filters (lower is better).",
         default=None,
@@ -997,10 +1003,29 @@ def execute_command(args: argparse.Namespace) -> None:
         (config_dir / "intermediate_designs_inverse_folded").is_dir()
         and any((config_dir / "intermediate_designs_inverse_folded").glob("*.cif"))
     )
+    has_existing_cs_inputs = any(
+        (config_dir / d).is_dir() and any((config_dir / d).glob("*.cif"))
+        for d in ("heteromer_counter_screens", "ligand_counter_screens")
+    )
+    has_existing_cs_folds = any(
+        (config_dir / d / const.folding_dirname).is_dir()
+        and any((config_dir / d / const.folding_dirname).glob("*.npz"))
+        for d in ("heteromer_counter_screens", "ligand_counter_screens")
+    )
+    has_existing_analysis = (
+        (config_dir / "intermediate_designs_inverse_folded").is_dir()
+        and any(
+            (config_dir / "intermediate_designs_inverse_folded").glob(
+                "aggregate_metrics_*.csv"
+            )
+        )
+    )
     if enabled_steps and "counter_screen_folding" in enabled_steps:
-        required = {"prepare_counter_screens"}
-        if not has_existing_inverse_fold:
-            required.add("inverse_folding")
+        required: set[str] = set()
+        if not has_existing_cs_inputs:
+            required.add("prepare_counter_screens")
+            if not has_existing_inverse_fold:
+                required.add("inverse_folding")
         missing = required - enabled_steps
         if missing:
             raise ValueError(
@@ -1022,8 +1047,14 @@ def execute_command(args: argparse.Namespace) -> None:
     ):
         raise ValueError("filter_identity_pairs requires inverse_folding")
     if enabled_steps and "merge_counter_screen_metrics" in enabled_steps:
-        required = {"analysis", "counter_screen_folding", "prepare_counter_screens"}
-        missing = required - enabled_steps
+        required_merge: set[str] = set()
+        if not has_existing_analysis:
+            required_merge.add("analysis")
+        if not has_existing_cs_folds:
+            required_merge.add("counter_screen_folding")
+            if not has_existing_cs_inputs:
+                required_merge.add("prepare_counter_screens")
+        missing = required_merge - enabled_steps
         if missing:
             raise ValueError(
                 "merge_counter_screen_metrics requires the pipeline steps: "
@@ -1062,10 +1093,15 @@ def execute_command(args: argparse.Namespace) -> None:
         os.environ["BOLTZGEN_PIPELINE_STEP"] = step_name
 
         if step_name == "counter_screen_folding":
-            cs_dir_hetero = Path(args.output) / "heteromer_counter_screens"
-            cs_dir_ligand = Path(args.output) / "ligand_counter_screens"
-            cs_dir = cs_dir_ligand if getattr(args, "ligand_counter_screen", False) else cs_dir_hetero
-            if cs_dir.is_dir() and not any(cs_dir.glob("*.cif")):
+            cs_dirs = [
+                d
+                for d in (
+                    Path(args.output) / "ligand_counter_screens",
+                    Path(args.output) / "heteromer_counter_screens",
+                )
+                if d.is_dir()
+            ]
+            if cs_dirs and not any(any(d.glob("*.cif")) for d in cs_dirs):
                 print(
                     "No candidate designs passed the quality filter for counter-screening; "
                     "skipping counter_screen_folding."
@@ -1199,22 +1235,46 @@ class BinderDesignPipeline:
         protocol_config = protocol_configs[protocol]
         print(f"Config overrides for protocol {protocol}: {protocol_config}")
 
-        # Set protocol-specific and user-specified step specific args
+        # Separate protocol defaults from explicit user --config overrides so CLI
+        # options (e.g. --refolding_rmsd_threshold, --alpha, --metrics_override)
+        # take precedence over protocol defaults while explicit --config wins last.
+        protocol_args_by_step = parse_config_args(protocol_config, None, step_names)
+        user_config_args_by_step = parse_config_args({}, args.config, step_names)
         config_args_by_step = parse_config_args(
             protocol_config, args.config, step_names
         )
 
-        # Counter-screen candidate culling must use the same local RMSD cutoff
-        # as final filtering unless the caller explicitly asks for a different
-        # target_max_rmsd. The filtering step consumes protocol/config overrides
-        # after the CLI filtering args, so its last configured value wins here.
+        if getattr(args, "piezo_counter_screen", False):
+            raise ValueError(
+                "--piezo_counter_screen is currently shelved/quarantined pending "
+                "strained-template conditioning and real dipole extraction fixes."
+            )
+        if args.heteromer_counter_screen and getattr(args, "ligand_counter_screen", False):
+            raise ValueError(
+                "Cannot combine --heteromer_counter_screen and --ligand_counter_screen in one run."
+            )
+
+        topology = _resolve_material_topology(args)
+        # Resolve material_layout.json once (if present next to design_spec[0] or via env)
+        material_layout_path: Path | None = None
+        if getattr(args, "design_spec", None):
+            cand = args.design_spec[0].resolve().parent / "material_layout.json"
+            if cand.exists():
+                material_layout_path = cand
+        if material_layout_path is None and os.environ.get("MAT_LAYOUT_FILE"):
+            env_cand = Path(os.environ["MAT_LAYOUT_FILE"])
+            if env_cand.exists():
+                material_layout_path = env_cand
+
+        # Counter-screen candidate culling uses the same effective local RMSD cutoff
+        # as final filtering unless the caller explicitly sets --target_max_rmsd.
         target_max_rmsd = args.target_max_rmsd
         if target_max_rmsd is None:
-            topology = _resolve_material_topology(args)
             target_max_rmsd = _effective_refolding_rmsd_threshold(
-                config_args_by_step.get("filtering", []),
+                user_config_args_by_step.get("filtering", []),
                 args.refolding_rmsd_threshold,
                 topology=topology,
+                protocol_filtering_args=protocol_args_by_step.get("filtering", []),
             )
 
         devices = (
@@ -1235,16 +1295,17 @@ class BinderDesignPipeline:
         output_dir = args.output / "intermediate_designs"
         print(f"Raw designs will be saved to: {output_dir}")
         effective_min_ligand_distance = getattr(args, "min_ligand_distance", None)
-        if effective_min_ligand_distance is None and getattr(args, "design_spec", None):
+        if effective_min_ligand_distance is None and material_layout_path is not None:
             try:
-                candidate_layout = args.design_spec[0].resolve().parent / "material_layout.json"
-                if candidate_layout.exists():
-                    layout_data = json.loads(candidate_layout.read_text())
-                    for lig in layout_data.get("ligands", []):
-                        val = lig.get("min_ligand_distance", lig.get("min_distance"))
-                        if val is not None:
-                            effective_min_ligand_distance = float(val)
-                            break
+                layout_data = json.loads(material_layout_path.read_text())
+                ligand_entries = list(layout_data.get("ligands", [])) + [
+                    c for c in layout_data.get("chains", []) if c.get("role") == "ligand"
+                ]
+                for lig in ligand_entries:
+                    val = lig.get("min_ligand_distance", lig.get("min_distance"))
+                    if val is not None:
+                        effective_min_ligand_distance = float(val)
+                        break
             except Exception:
                 pass
         diffusion_batch_size = args.diffusion_batch_size
@@ -1291,11 +1352,15 @@ class BinderDesignPipeline:
 
         if args.only_inverse_fold:
             exclude_residues = []
-            avoid_str = args.inverse_fold_avoid if args.inverse_fold_avoid is not None else ""
-            if protocol in ["peptide-anything", "nanobody-anything", "antibody-anything"]:
-                if "C" not in avoid_str:
-                    avoid_str = "C" + avoid_str
-            inverse_fold_avoid = avoid_str
+            if args.inverse_fold_avoid is None:
+                inverse_fold_avoid = (
+                    "C"
+                    if protocol
+                    in ["peptide-anything", "nanobody-anything", "antibody-anything"]
+                    else ""
+                )
+            else:
+                inverse_fold_avoid = args.inverse_fold_avoid
 
             for one_letter_code in inverse_fold_avoid:
                 exclude_residues.append(const.prot_letter_to_token[one_letter_code])
@@ -1318,7 +1383,7 @@ class BinderDesignPipeline:
                 f"data.cfg.moldir={moldir}",
                 f"override.inverse_fold_args.inverse_fold_restriction=[{', '.join(exclude_residues)}]",
             ]
-            inverse_fold_args.extend(_inverse_fold_bias_args(args))
+            inverse_fold_args.extend(_inverse_fold_bias_args(args, topology=topology))
             inverse_fold_args.extend(_inverse_fold_diversity_args(args))
 
             self.steps.append(
@@ -1342,6 +1407,12 @@ class BinderDesignPipeline:
             if not getattr(args, "save_traj_npz", True):
                 design_traj_args.append("writer.save_traj_npz=False")
 
+            material_design_args = []
+            if material_layout_path is not None:
+                material_design_args.append(
+                    f"override.diffusion_process_args.material_config_path={material_layout_path}"
+                )
+
             self.steps.append(
                 PipelineStep(
                     name="design",
@@ -1357,6 +1428,7 @@ class BinderDesignPipeline:
                         f"override.use_kernels={use_kernels}",
                         f"data.cfg.moldir={moldir}",
                     ]
+                    + material_design_args
                     + design_step_and_noise_scale_args
                     + design_traj_args
                     + checkpoint_args
@@ -1367,11 +1439,15 @@ class BinderDesignPipeline:
             # Inverse folding of diffusion-generated backbones.
             if not args.skip_inverse_folding:
                 exclude_residues = []
-                avoid_str = args.inverse_fold_avoid if args.inverse_fold_avoid is not None else ""
-                if protocol in ["peptide-anything", "nanobody-anything", "antibody-anything"]:
-                    if "C" not in avoid_str:
-                        avoid_str = "C" + avoid_str
-                inverse_fold_avoid = avoid_str
+                if args.inverse_fold_avoid is None:
+                    inverse_fold_avoid = (
+                        "C"
+                        if protocol
+                        in ["peptide-anything", "nanobody-anything", "antibody-anything"]
+                        else ""
+                    )
+                else:
+                    inverse_fold_avoid = args.inverse_fold_avoid
 
                 for one_letter_code in inverse_fold_avoid:
                     exclude_residues.append(const.prot_letter_to_token[one_letter_code])
@@ -1397,7 +1473,7 @@ class BinderDesignPipeline:
                     f"trainer.devices={devices}",
                     f"override.inverse_fold_args.inverse_fold_restriction=[{', '.join(exclude_residues)}]",
                 ]
-                inverse_fold_args.extend(_inverse_fold_bias_args(args))
+                inverse_fold_args.extend(_inverse_fold_bias_args(args, topology=topology))
                 inverse_fold_args.extend(_inverse_fold_diversity_args(args))
 
                 self.steps.append(
@@ -1410,19 +1486,18 @@ class BinderDesignPipeline:
 
         if args.heteromer_counter_screen and not args.skip_inverse_folding:
             source_dir = output_dir
-            layout_path = args.design_spec[0].resolve().parent / "material_layout.json"
-            counter_screen_dir = args.output / "heteromer_counter_screens"
             if len(args.design_spec) != 1:
                 raise ValueError(
                     "heteromer counter-screening currently requires exactly one material design spec"
                 )
-            layout_metadata_path = args.design_spec[0].resolve().parent / "material_layout.json"
-            if not layout_metadata_path.exists():
+            layout_path = args.design_spec[0].resolve().parent / "material_layout.json"
+            counter_screen_dir = args.output / "heteromer_counter_screens"
+            if not layout_path.exists():
                 raise FileNotFoundError(
                     "heteromer counter-screening requires material_builder layout metadata: "
-                    f"{layout_metadata_path}"
+                    f"{layout_path}"
                 )
-            layout_metadata = json.loads(layout_metadata_path.read_text())
+            layout_metadata = json.loads(layout_path.read_text())
             heteromer_meta = layout_metadata.get("heteromer_screening", {})
             if not heteromer_meta.get("enabled"):
                 raise ValueError(
@@ -1433,9 +1508,10 @@ class BinderDesignPipeline:
             topology = heteromer_meta.get("topology")
             if args.target_max_rmsd is None:
                 target_max_rmsd = _effective_refolding_rmsd_threshold(
-                    config_args_by_step.get("filtering", []),
+                    user_config_args_by_step.get("filtering", []),
                     args.refolding_rmsd_threshold,
                     topology=topology,
+                    protocol_filtering_args=protocol_args_by_step.get("filtering", []),
                 )
             filter_args = [
                 f"design_dir={source_dir}",
@@ -1457,7 +1533,7 @@ class BinderDesignPipeline:
                 )
             )
 
-        # Folding
+        # Folding (preserve full fold.yaml keys_dict_out so iptm/ptm/design_* remain available)
         input_dir = output_dir
         self.steps.append(
             PipelineStep(
@@ -1477,10 +1553,6 @@ class BinderDesignPipeline:
                 + config_args_by_step["folding"],
             )
         )
-        if args.heteromer_counter_screen or getattr(args, "ligand_counter_screen", False):
-            self.steps[-1].args.append(
-                "keys_dict_out=[complex_plddt,protein_iptm,design_iptm,ligand_iptm,design_ptm,min_interaction_pae]"
-            )
 
         # Design folding
         input_dir = output_dir
@@ -1530,6 +1602,11 @@ class BinderDesignPipeline:
             )
 
         # Analysis
+        analysis_material_args = []
+        if material_layout_path is not None:
+            analysis_material_args.append(f"material_layout_path={material_layout_path}")
+        if topology:
+            analysis_material_args.append(f"material_topology={topology}")
         self.steps.append(
             PipelineStep(
                 name="analysis",
@@ -1545,6 +1622,7 @@ class BinderDesignPipeline:
                     f"noncovalents_original={args.skip_inverse_folding}",
                     f"allatom_fold_metrics={args.skip_inverse_folding}",
                 ]
+                + analysis_material_args
                 + config_args_by_step["analysis"],
             )
         )
@@ -1825,7 +1903,9 @@ class BinderDesignPipeline:
             PipelineStep(
                 name="filtering",
                 config_path=args.config_dir / "filtering.yaml",
-                args=filter_args + config_args_by_step["filtering"],
+                args=protocol_args_by_step["filtering"]
+                + filter_args
+                + user_config_args_by_step["filtering"],
             )
         )
 
@@ -1838,7 +1918,9 @@ class BinderDesignPipeline:
 
 
 ### Misc utiltiies ###
-def _inverse_fold_bias_args(args: argparse.Namespace) -> List[str]:
+def _inverse_fold_bias_args(
+    args: argparse.Namespace, *, topology: str | None = None
+) -> List[str]:
     """Hydra overrides for sequence bias and anti-correlation options."""
     out = []
     anti_corr = getattr(args, "anti_correlation_strength", 0.0)
@@ -1852,15 +1934,17 @@ def _inverse_fold_bias_args(args: argparse.Namespace) -> List[str]:
         if getattr(args, "anti_correlation_surface_only", False):
             out.append("override.inverse_fold_args.anti_correlation_surface_only=True")
 
-    if getattr(args, "double_tape_core_bias", 0.0) > 0.0:
+    # Only apply double-tape-specific biases when topology is double_tape or unspecified
+    allow_dt_bias = topology is None or topology == "double_tape"
+    if allow_dt_bias and getattr(args, "double_tape_core_bias", 0.0) > 0.0:
         out.append(
             f"override.inverse_fold_args.double_tape_core_bias={args.double_tape_core_bias}"
         )
-    if getattr(args, "double_tape_aromatic_bias", 0.0) > 0.0:
+    if allow_dt_bias and getattr(args, "double_tape_aromatic_bias", 0.0) > 0.0:
         out.append(
             f"override.inverse_fold_args.double_tape_aromatic_bias={args.double_tape_aromatic_bias}"
         )
-    if getattr(args, "double_tape_polar_bias", 0.0) > 0.0:
+    if allow_dt_bias and getattr(args, "double_tape_polar_bias", 0.0) > 0.0:
         out.append(
             f"override.inverse_fold_args.double_tape_polar_bias={args.double_tape_polar_bias}"
         )
@@ -2049,8 +2133,8 @@ def parse_config_args(base_config, config_args, valid_step_names):
 
 
 def _resolve_material_topology(args: argparse.Namespace) -> str | None:
-    """Resolve material topology from CLI args, environment, or material_layout.json."""
-    topology = getattr(args, "topology", None) or os.environ.get("MAT_TOPOLOGY")
+    """Resolve material topology from CLI args, material_layout.json, or environment."""
+    topology = getattr(args, "topology", None)
     if topology:
         return str(topology)
     if getattr(args, "design_spec", None):
@@ -2058,11 +2142,16 @@ def _resolve_material_topology(args: argparse.Namespace) -> str | None:
             candidate_layout = args.design_spec[0].resolve().parent / "material_layout.json"
             if candidate_layout.exists():
                 layout_data = json.loads(candidate_layout.read_text())
-                layout_top = layout_data.get("topology")
+                layout_top = layout_data.get("topology") or layout_data.get(
+                    "heteromer_screening", {}
+                ).get("topology")
                 if layout_top:
                     return str(layout_top)
         except Exception:
             pass
+    env_top = os.environ.get("MAT_TOPOLOGY")
+    if env_top:
+        return str(env_top)
     return None
 
 
@@ -2070,17 +2159,25 @@ def _effective_refolding_rmsd_threshold(
     filtering_config_args: List[str],
     cli_threshold: float | None,
     topology: str | None = None,
+    protocol_filtering_args: List[str] | None = None,
 ) -> float:
     """Resolve the local RMSD cutoff used by final filtering.
 
-    The filtering task defaults to 2.5 A (5.0 A for sheet/tape materials).
-    The CLI RMSD option is appended before per-step config overrides, so
-    explicit filtering config arguments take precedence over the CLI value,
-    matching Hydra's actual merge order.
+    Precedence (lowest to highest):
+    1. Topology default (5.0 A for sheet/tape materials, 2.5 A otherwise).
+    2. Protocol default (e.g. peptide-anything -> 2.0 A).
+    3. Explicit CLI ``--refolding_rmsd_threshold``.
+    4. Explicit per-step ``--config filtering refolding_rmsd_threshold=...``.
     """
     is_sheet_tape = topology in {"double_tape", "linear_tape", "bilayer_sheet"}
-    default_threshold = 5.0 if is_sheet_tape else 2.5
-    threshold = default_threshold if cli_threshold is None else cli_threshold
+    threshold = 5.0 if is_sheet_tape else 2.5
+    if protocol_filtering_args:
+        for override in protocol_filtering_args:
+            key, separator, value = override.partition("=")
+            if separator and key == "refolding_rmsd_threshold":
+                threshold = float(value)
+    if cli_threshold is not None:
+        threshold = cli_threshold
     for override in filtering_config_args:
         key, separator, value = override.partition("=")
         if separator and key == "refolding_rmsd_threshold":

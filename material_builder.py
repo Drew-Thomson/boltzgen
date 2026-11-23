@@ -42,11 +42,8 @@ def generate_yaml_from_spec(
     heteromer_counter_screen=False,
     topology=None,
     topology_params=None,
+    guidance_params=None,
     charge_bias_strength=None,
-    piezo_screening=False,
-    axial_strain=0.10,
-    piezo_mode="rigid_centroid",
-    piezo_poisson_ratio=0.35,
 ):
     entities, layout = expand_material_spec(
         num_copies,
@@ -54,50 +51,19 @@ def generate_yaml_from_spec(
         heteromer_screening=heteromer_counter_screen,
         topology=topology,
         topology_params=topology_params,
+        guidance_params=guidance_params,
         charge_bias_strength=charge_bias_strength,
     )
-    if piezo_screening:
-        layout["piezo_screening"] = {
-            "enabled": True,
-            "axial_strain": float(axial_strain),
-            "mode": str(piezo_mode),
-            "poisson_ratio": float(piezo_poisson_ratio),
-        }
     spec = {"entities": entities}
-    with open(output_file, "w") as f:
-        yaml.dump(spec, f, sort_keys=False)
     output_path = Path(output_file).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
+        yaml.dump(spec, f, sort_keys=False)
     layout_path = output_path.with_name("material_layout.json")
     write_layout(layout, layout_path)
     os.environ["MAT_LAYOUT_FILE"] = str(layout_path)
-    print(f"Generated design spec: {output_file}")
-    return output_file
-
-def calculate_bsa(structure_file):
-    if structure_file.endswith(".cif"):
-        cif_file = pdbx.CIFFile.read(structure_file)
-        array = pdbx.get_structure(cif_file, model=1)
-    else:
-        pdb_file = pdb.PDBFile.read(structure_file)
-        array = pdb.get_structure(pdb_file, model=1)
-        
-    # Filter for protein heavy atoms only
-    protein = array[struc.filter_amino_acids(array) & (array.element != "H")]
-    
-    # Calculate SASA for the complex
-    sasa_complex = struc.sasa(protein)
-    total_sasa_complex = sasa_complex.sum()
-    
-    # Calculate SASA for individual chains
-    total_sasa_chains = 0
-    chain_ids = set(protein.chain_id)
-    for c_id in chain_ids:
-        chain_atoms = protein[protein.chain_id == c_id]
-        sasa_chain = struc.sasa(chain_atoms)
-        total_sasa_chains += sasa_chain.sum()
-        
-    bsa = total_sasa_chains - total_sasa_complex
-    return bsa, total_sasa_complex
+    print(f"Generated design spec: {output_path}")
+    return str(output_path)
 
 def main():
     parser = argparse.ArgumentParser(description="Build peptide materials using BoltzGen")
@@ -137,18 +103,30 @@ def main():
     parser.add_argument("--num_designs", type=int, default=1, help="Number of design candidates to generate")
     parser.add_argument("--diffusion_batch_size", type=int, default=1, help="Number of diffusion samples per trunk run (default: 1)")
     parser.add_argument("--asym_unit_size", type=int, default=1, help="Number of chains in the asymmetric unit")
-    parser.add_argument("--topology", type=str, choices=["floating", "cyclic", "cylindrical", "linear_tape", "double_tape", "helical", "open_arc", "cage_tetrahedral", "cage_octahedral", "bilayer_sheet", "hexagonal_mesh", "nanotube", "multi_helical"], default="floating", help="Topology constraint during diffusion")
-    parser.add_argument("--guidance_scale", type=float, default=1.0, help="Strength of the shape guidance")
-    parser.add_argument("--guidance_mode", type=str, choices=["decoupled", "unified"], default="decoupled", help="Guidance architecture: decoupled (separate centroid positioning from shape consensus) or unified (default: decoupled)")
-    parser.add_argument("--guidance_start", type=float, default=0.50, help="Diffusion time parameter t in [0.0, 1.0] to start ramping symmetry guidance (default: 0.50)")
-    parser.add_argument("--guidance_end", type=float, default=0.30, help="Diffusion time parameter t in [0.0, 1.0] where guidance reaches full scale (default: 0.30)")
-    parser.add_argument("--guidance_pos_start", type=float, default=0.85, help="Diffusion time t to start centroid positioning guidance in decoupled mode (default: 0.85)")
-    parser.add_argument("--guidance_pos_end", type=float, default=0.50, help="Diffusion time t where centroid guidance reaches full scale in decoupled mode (default: 0.50)")
-    parser.add_argument("--guidance_shape_start", type=float, default=0.50, help="Diffusion time t to start internal shape consensus guidance in decoupled mode (default: 0.50)")
-    parser.add_argument("--guidance_shape_end", type=float, default=0.30, help="Diffusion time t where shape consensus reaches full scale in decoupled mode (default: 0.30)")
+    parser.add_argument("--topology", type=str, choices=["floating", "cyclic", "cylindrical", "linear_tape", "double_tape", "helical", "open_arc", "bilayer_sheet", "hexagonal_mesh", "nanotube", "multi_helical"], default="floating", help="Topology constraint during diffusion")
+    parser.add_argument("--guidance_scale", type=float, default=1.0, help="Maximum strength of shape guidance in [0.0, 1.0] (default: 1.0)")
+    parser.add_argument("--guidance_mode", type=str, choices=["decoupled", "unified"], default="decoupled", help="Guidance architecture: decoupled (noise-level sigma-scheduled COM/shape/ligand guidance with late release) or unified (default: decoupled)")
+    parser.add_argument("--guidance_start", type=float, default=0.50, help="Legacy unified-mode diffusion time t in [0.0, 1.0] to start ramping symmetry guidance (default: 0.50)")
+    parser.add_argument("--guidance_end", type=float, default=0.30, help="Legacy unified-mode diffusion time t in [0.0, 1.0] where guidance reaches full scale (default: 0.30)")
+    parser.add_argument("--guidance_pos_start", type=float, default=0.85, help="Legacy t-based start time for COM guidance (superseded by sigma schedule in decoupled mode)")
+    parser.add_argument("--guidance_pos_end", type=float, default=0.50, help="Legacy t-based end time for COM guidance")
+    parser.add_argument("--guidance_shape_start", type=float, default=0.50, help="Legacy t-based start time for shape consensus guidance")
+    parser.add_argument("--guidance_shape_end", type=float, default=0.30, help="Legacy t-based end time for shape consensus guidance")
+    parser.add_argument("--guidance_sigma_pos_start", type=float, default=50.0, help="Noise level sigma (A) where COM guidance starts ramping in (default: 50.0)")
+    parser.add_argument("--guidance_sigma_pos_peak", type=float, default=18.0, help="Noise level sigma (A) where COM guidance reaches full scale (default: 18.0)")
+    parser.add_argument("--guidance_sigma_pos_taper", type=float, default=4.0, help="Noise level sigma (A) where COM guidance begins late release taper (default: 4.0)")
+    parser.add_argument("--guidance_sigma_pos_release", type=float, default=1.5, help="Noise level sigma (A) where COM guidance reaches 0 for free refinement (default: 1.5)")
+    parser.add_argument("--guidance_sigma_shape_start", type=float, default=18.0, help="Noise level sigma (A) where shape consensus starts ramping in (default: 18.0)")
+    parser.add_argument("--guidance_sigma_shape_peak", type=float, default=8.0, help="Noise level sigma (A) where shape consensus reaches full scale (default: 8.0)")
+    parser.add_argument("--guidance_sigma_shape_taper", type=float, default=3.5, help="Noise level sigma (A) where shape consensus begins late release taper (default: 3.5)")
+    parser.add_argument("--guidance_sigma_shape_release", type=float, default=1.5, help="Noise level sigma (A) where shape consensus reaches 0 for free refinement (default: 1.5)")
+    parser.add_argument("--guidance_sigma_lig_start", type=float, default=40.0, help="Noise level sigma (A) where ligand guidance starts ramping in (default: 40.0)")
+    parser.add_argument("--guidance_sigma_lig_peak", type=float, default=12.0, help="Noise level sigma (A) where ligand guidance reaches full scale (default: 12.0)")
+    parser.add_argument("--guidance_sigma_lig_taper", type=float, default=2.0, help="Noise level sigma (A) where ligand guidance begins early release taper (default: 2.0)")
+    parser.add_argument("--guidance_sigma_lig_release", type=float, default=0.8, help="Noise level sigma (A) where ligand guidance reaches 0 so coordination forms freely (default: 0.8)")
     parser.add_argument("--guidance_mid", type=float, default=None, help="Intermediate transition point for multi-stage unified schedules")
     parser.add_argument("--guidance_early_scale", type=float, default=0.10, help="Guidance scale plateau for early gentle sampling phases (default: 0.10)")
-    parser.add_argument("--guidance_schedule", type=str, choices=["linear", "sigmoid", "constant", "two_stage", "gentle_early", "quadratic", "power"], default="linear", help="Symmetry guidance ramp schedule (default: linear)")
+    parser.add_argument("--guidance_schedule", type=str, choices=["cosine", "linear", "sigmoid", "constant", "two_stage", "gentle_early", "quadratic", "power"], default="cosine", help="Symmetry guidance ramp schedule (default: cosine)")
     parser.add_argument(
         "--strand_spacing",
         "--target_pitch",
@@ -188,10 +166,10 @@ def main():
     parser.add_argument("--secondary_structure", type=str, default=None, help="Secondary structure constraint (H, S, L, or a full string)")
     parser.add_argument("--inverse_temp", type=float, default=0.1, help="Sampling temperature for inverse folding (higher = more diverse)")
     parser.add_argument("--seqs_per_backbone", type=int, default=1, help="Number of sequences to generate per structural backbone")
-    parser.add_argument("--avoid_aa", type=str, default="", help="String of amino acids to completely avoid (e.g. 'CWP')")
+    parser.add_argument("--avoid_aa", type=str, default=None, help="String of amino acids to completely avoid (e.g. 'CWP'); pass '' to explicitly allow Cysteine")
     parser.add_argument("--aa_bias", type=str, default="", help="Amino acid bias string for ProteinMPNN (e.g. 'T:1.0,S:0.5,V:-0.5,I:-0.5')")
     parser.add_argument("--ligand_inclusion_bias", type=float, default=0.0, help="Strength of the inward centripetal force for ligands during diffusion (default: 0.0)")
-    parser.add_argument("--ligand_anchor_residue", type=str, default="random", help="Residue index (1-indexed), 'random' to anchor ligand to parent protein, or 'none' to disable (default: random)")
+    parser.add_argument("--ligand_anchor_residue", type=str, default=None, help="Optional residue index (1-indexed) or 'random' to anchor non-axial ligands to parent protein (default: None = disabled/rigid carry)")
     parser.add_argument("--ligand_anchor_distance", type=float, default=4.0, help="Distance in Angstroms from C_alpha for anchored ligand (default: 4.0)")
     parser.add_argument("--ligand_anchor_direction", type=str, choices=["outward", "radial", "sidechain", "auto"], default="outward", help="Direction to project anchored ligand from C_alpha (default: outward)")
     parser.add_argument("--run", action="store_true", help="Execute BoltzGen after generating YAML")
@@ -213,8 +191,8 @@ def main():
         "--heteromer_charge_bias",
         "--heteromer-charge-bias",
         type=float,
-        default=0.5,
-        help="Strength of global charge complementarity bias applied to sequences during inverse folding (0 to disable)",
+        default=None,
+        help="Strength of global charge complementarity bias applied to sequences during inverse folding (default: 0.5 when --heteromer_counter_screen is enabled, 0.0 otherwise)",
     )
     parser.add_argument(
         "--max_partner_identity",
@@ -319,20 +297,21 @@ def main():
         "--double-tape-core-bias",
         type=float,
         default=0.0,
-        help="Strength of penalty for T and boost for A in the core (inward-facing) of double-tape (default: 0.0)",
+        help="Strength of inward core bias (boosts A,V,I,L,M,F,W; penalizes polar/charged) for double_tape (default: 0.0)",
     )
     parser.add_argument(
         "--double_tape_aromatic_bias",
         "--double-tape-aromatic-bias",
         type=float,
-        default=1.0,
-        help="Strength of boost for F, W and Y on the outside (outward-facing) of double-tape (default: 1.0)",
+        default=0.0,
+        help="Strength of outward boost for Y, W on double_tape exterior (default: 0.0)",
     )
     parser.add_argument(
         "--double_tape_polar_bias",
+        "--double-tape-polar-bias",
         type=float,
         default=0.0,
-        help="Strength of boost for R, K, D, E, N, Q, H, T, S on the outside (outward-facing) of double-tape (default: 0.0)",
+        help="Strength of outward boost for R, K, D, E, N, Q, H, T, S on double_tape exterior (default: 0.0)",
     )
     parser.add_argument(
         "--filter_composition",
@@ -408,7 +387,23 @@ def main():
     )
     
     args = parser.parse_args()
-    
+
+    # Determine which options were explicitly supplied on the CLI so precedence is
+    # strictly CLI > YAML config > parser defaults.
+    import sys as _sys
+    explicit_dests: set[str] = set()
+    option_to_dest: dict[str, str] = {}
+    for action in parser._actions:
+        for opt in action.option_strings:
+            option_to_dest[opt] = action.dest
+            norm_opt = opt.lstrip("-").replace("-", "_")
+            option_to_dest[norm_opt] = action.dest
+    for tok in _sys.argv[1:]:
+        if tok.startswith("-"):
+            opt_name = tok.split("=", 1)[0]
+            if opt_name in option_to_dest:
+                explicit_dests.add(option_to_dest[opt_name])
+
     config = {}
     step_config_overrides = []
     if args.config:
@@ -419,26 +414,41 @@ def main():
                 or Path(cfg_item[0]).is_file()
             ):
                 with open(cfg_item[0], "r") as f:
-                    config = yaml.safe_load(f)
+                    loaded = yaml.safe_load(f)
+                    if isinstance(loaded, dict):
+                        config = loaded
             else:
                 step_config_overrides.append(cfg_item)
 
         if config:
             action_map = {action.dest: action for action in parser._actions}
+            alias_map = {
+                "exclude_aa": "avoid_aa",
+                "exclude_residues": "avoid_aa",
+                "target_pitch": "strand_spacing",
+                "enable_composition_filters": "filter_composition",
+                "apo_counter_screen": "ligand_counter_screen",
+                "piezo_counter_screen": "piezo_screen",
+            }
             for k, v in config.items():
                 norm_k = k.replace("-", "_")
-                if norm_k in {"exclude_aa", "exclude_residues"}:
-                    setattr(args, "avoid_aa", v)
-                elif hasattr(args, norm_k) and norm_k != "asym_unit":
-                    action = action_map.get(norm_k)
-                    if norm_k == "steps" and isinstance(v, str):
+                if norm_k == "asym_unit":
+                    continue
+                target_dest = alias_map.get(norm_k, option_to_dest.get(norm_k, norm_k))
+                if target_dest in explicit_dests:
+                    continue
+                if hasattr(args, target_dest):
+                    action = action_map.get(target_dest)
+                    if target_dest == "steps" and isinstance(v, str):
                         v = [v]
                     elif action and action.type is not None and v is not None:
                         try:
                             v = action.type(v)
                         except (ValueError, TypeError) as e:
                             parser.error(f"Invalid value for config option '{k}': {e}")
-                    setattr(args, norm_k, v)
+                    setattr(args, target_dest, v)
+                else:
+                    print(f"WARNING: Ignoring unrecognized config key '{k}' in YAML config.")
 
     if args.secondary_structure:
         args.secondary_structure = args.secondary_structure.replace("E", "S").replace("e", "s")
@@ -579,36 +589,26 @@ def main():
             )
 
     if args.piezo_screen:
-        args.antiparallel_prob = 0.0
-        if not args.secondary_structure:
-            args.secondary_structure = "H"
-        supported_piezo_topologies = {"helical", "cylindrical", "multi_helical", "nanotube"}
-        if args.topology not in supported_piezo_topologies:
-            parser.error(
-                f"--piezo_screen requires a polar helical/tubular topology ({sorted(supported_piezo_topologies)}); got {args.topology}"
-            )
-
-    if args.target_cage_radius is None:
-        args.target_cage_radius = 20.0 if args.topology == "cage_tetrahedral" else 35.0
-
-    expected_copies = {
-        "cage_tetrahedral": 12,
-        "cage_octahedral": 24,
-    }.get(args.topology)
-    if expected_copies is not None and args.copies != expected_copies:
         parser.error(
-            f"{args.topology} requires --copies {expected_copies}; got {args.copies}"
+            "--piezo_screen is currently shelved/quarantined pending strained-template "
+            "conditioning and real dipole extraction fixes."
         )
-    if expected_copies is not None and args.asym_unit_size != 1:
-        parser.error(f"{args.topology} requires exactly one protein template per placement")
-    
+
     if args.output_dir == "material_out":
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         args.output_dir = f"{args.output_dir}_{timestamp}"
-        
-    # Set environment variables for the modified diffusion loop
+
+    args.target_pitch = getattr(args, "strand_spacing", getattr(args, "target_pitch", 4.8))
+    effective_charge_bias = (
+        args.heteromer_charge_bias
+        if args.heteromer_charge_bias is not None
+        else (0.5 if args.heteromer_counter_screen else 0.0)
+    )
+    eff_asym_unit_size = 1 if is_heteromer_assembly else args.asym_unit_size
+
+    # Keep MAT_* env vars synchronized for backward compatibility, while persisting
+    # the canonical configuration inside material_layout.json.
     os.environ["MAT_TOPOLOGY"] = args.topology
-    os.environ["MAT_COPIES"] = str(args.copies)
     os.environ["MAT_GUIDANCE_MODE"] = str(args.guidance_mode)
     os.environ["MAT_GUIDANCE_SCALE"] = str(args.guidance_scale)
     os.environ["MAT_GUIDANCE_START"] = str(args.guidance_start)
@@ -620,19 +620,17 @@ def main():
     os.environ["MAT_GUIDANCE_SHAPE_END"] = str(args.guidance_shape_end)
     if args.guidance_mid is not None:
         os.environ["MAT_GUIDANCE_MID"] = str(args.guidance_mid)
+    else:
+        os.environ.pop("MAT_GUIDANCE_MID", None)
     os.environ["MAT_GUIDANCE_EARLY_SCALE"] = str(args.guidance_early_scale)
     os.environ["MAT_LIGAND_INCLUSION_BIAS"] = str(args.ligand_inclusion_bias)
     if args.ligand_anchor_residue is not None:
         os.environ["MAT_LIGAND_ANCHOR_RESIDUE"] = str(args.ligand_anchor_residue)
     else:
-        os.environ["MAT_LIGAND_ANCHOR_RESIDUE"] = "random"
+        os.environ.pop("MAT_LIGAND_ANCHOR_RESIDUE", None)
     os.environ["MAT_LIGAND_ANCHOR_DISTANCE"] = str(args.ligand_anchor_distance)
     os.environ["MAT_LIGAND_ANCHOR_DIRECTION"] = str(args.ligand_anchor_direction)
-    os.environ["MAT_ASYM_UNIT_SIZE"] = str(
-        1 if is_heteromer_assembly else args.asym_unit_size
-    )
-    args.target_pitch = getattr(args, "strand_spacing", getattr(args, "target_pitch", 4.8))
-    os.environ["MAT_HETEROMER_SCREEN"] = str(args.heteromer_counter_screen).lower()
+    os.environ["MAT_ASYM_UNIT_SIZE"] = str(eff_asym_unit_size)
     os.environ["MAT_TARGET_PITCH"] = str(args.target_pitch)
     os.environ["MAT_STRAND_SPACING"] = str(args.target_pitch)
     os.environ["MAT_TARGET_RADIUS"] = str(args.target_radius)
@@ -641,74 +639,108 @@ def main():
     os.environ["MAT_ARC_RADIUS"] = str(args.arc_radius)
     os.environ["MAT_TARGET_ARC_SPACING"] = str(args.target_arc_spacing)
     os.environ["MAT_SPACING_NOISE"] = str(args.spacing_noise)
-    if args.radius_noise is not None:
-        os.environ["MAT_RADIUS_NOISE"] = str(args.radius_noise)
-    else:
-        os.environ.pop("MAT_RADIUS_NOISE", None)
-    if args.slide_noise is not None:
-        os.environ["MAT_SLIDE_NOISE"] = str(args.slide_noise)
-    else:
-        os.environ.pop("MAT_SLIDE_NOISE", None)
+    for env_k, val in [
+        ("MAT_RADIUS_NOISE", args.radius_noise),
+        ("MAT_SLIDE_NOISE", args.slide_noise),
+        ("MAT_LAYER_OFFSET_Z", args.layer_offset_z),
+        ("MAT_PORE_DIAMETER", args.pore_diameter),
+        ("MAT_LATTICE_CONSTANT", args.lattice_constant),
+    ]:
+        if val is not None:
+            os.environ[env_k] = str(val)
+        else:
+            os.environ.pop(env_k, None)
     os.environ["MAT_ANTIPARALLEL_PROB"] = str(args.antiparallel_prob)
     os.environ["MAT_LAYER_DIST"] = str(args.layer_dist)
-    if args.layer_offset_z is not None:
-        os.environ["MAT_LAYER_OFFSET_Z"] = str(args.layer_offset_z)
-    else:
-        os.environ.pop("MAT_LAYER_OFFSET_Z", None)
     os.environ["MAT_TARGET_TWIST"] = str(args.target_twist)
     os.environ["MAT_TWIST_NOISE"] = str(args.twist_noise)
-    os.environ["MAT_TARGET_CAGE_RADIUS"] = str(args.target_cage_radius)
     os.environ["MAT_GRID_DIM_X"] = str(args.grid_dim_x)
     os.environ["MAT_GRID_DIM_Y"] = str(args.grid_dim_y)
     os.environ["MAT_ROW_PITCH"] = str(args.row_pitch)
-    if args.pore_diameter is not None:
-        os.environ["MAT_PORE_DIAMETER"] = str(args.pore_diameter)
-    if args.lattice_constant is not None:
-        os.environ["MAT_LATTICE_CONSTANT"] = str(args.lattice_constant)
     os.environ["MAT_RING_SIZE"] = str(args.ring_size)
     os.environ["MAT_NUM_TIERS"] = str(args.num_tiers)
     os.environ["MAT_CHIRAL_STAGGER"] = str(args.chiral_stagger)
     os.environ["MAT_NUM_STARTS"] = str(args.num_starts)
     os.environ.pop("MAT_LAYOUT_FILE", None)
-    
+
+    topology_params_dict = {
+        "asym_unit_size": eff_asym_unit_size,
+        "target_pitch": args.target_pitch,
+        "strand_spacing": args.target_pitch,
+        "target_radius": args.target_radius,
+        "target_dz": args.target_dz,
+        "target_angle": args.target_angle,
+        "arc_radius": args.arc_radius,
+        "target_arc_spacing": args.target_arc_spacing,
+        "layer_dist": args.layer_dist,
+        "layer_offset_z": args.layer_offset_z,
+        "spacing_noise": args.spacing_noise,
+        "radius_noise": args.radius_noise,
+        "slide_noise": args.slide_noise,
+        "target_twist": args.target_twist,
+        "twist_noise": args.twist_noise,
+        "antiparallel_prob": args.antiparallel_prob,
+        "grid_dim_x": args.grid_dim_x,
+        "grid_dim_y": args.grid_dim_y,
+        "row_pitch": args.row_pitch,
+        "pore_diameter": args.pore_diameter,
+        "lattice_constant": args.lattice_constant,
+        "ring_size": args.ring_size,
+        "num_tiers": args.num_tiers,
+        "chiral_stagger": args.chiral_stagger,
+        "num_starts": args.num_starts,
+    }
+    guidance_params_dict = {
+        "guidance_mode": args.guidance_mode,
+        "guidance_scale": args.guidance_scale,
+        "guidance_schedule": args.guidance_schedule,
+        "guidance_start": args.guidance_start,
+        "guidance_end": args.guidance_end,
+        "guidance_mid": args.guidance_mid,
+        "guidance_early_scale": args.guidance_early_scale,
+        "guidance_pos_start": args.guidance_pos_start,
+        "guidance_pos_end": args.guidance_pos_end,
+        "guidance_shape_start": args.guidance_shape_start,
+        "guidance_shape_end": args.guidance_shape_end,
+        "guidance_sigma_pos_start": args.guidance_sigma_pos_start,
+        "guidance_sigma_pos_peak": args.guidance_sigma_pos_peak,
+        "guidance_sigma_pos_taper": args.guidance_sigma_pos_taper,
+        "guidance_sigma_pos_release": args.guidance_sigma_pos_release,
+        "guidance_sigma_shape_start": args.guidance_sigma_shape_start,
+        "guidance_sigma_shape_peak": args.guidance_sigma_shape_peak,
+        "guidance_sigma_shape_taper": args.guidance_sigma_shape_taper,
+        "guidance_sigma_shape_release": args.guidance_sigma_shape_release,
+        "guidance_sigma_lig_start": args.guidance_sigma_lig_start,
+        "guidance_sigma_lig_peak": args.guidance_sigma_lig_peak,
+        "guidance_sigma_lig_taper": args.guidance_sigma_lig_taper,
+        "guidance_sigma_lig_release": args.guidance_sigma_lig_release,
+        "ligand_inclusion_bias": args.ligand_inclusion_bias,
+        "ligand_anchor_residue": args.ligand_anchor_residue,
+        "ligand_anchor_distance": args.ligand_anchor_distance,
+        "ligand_anchor_direction": args.ligand_anchor_direction,
+    }
+
+    spec_output_path = Path(args.output_dir) / "material_spec.yaml"
     yaml_file = generate_yaml_from_spec(
         args.copies,
         asym_unit_def,
-        output_file="material_spec.yaml",
+        output_file=str(spec_output_path),
         heteromer_counter_screen=args.heteromer_counter_screen,
         topology=args.topology,
-        topology_params={
-            "target_pitch": args.target_pitch,
-            "strand_spacing": args.target_pitch,
-            "target_radius": args.target_radius,
-            "target_dz": args.target_dz,
-            "target_angle": args.target_angle,
-            "arc_radius": args.arc_radius,
-            "target_arc_spacing": args.target_arc_spacing,
-            "layer_dist": args.layer_dist,
-            "layer_offset_z": args.layer_offset_z,
-            "radius_noise": args.radius_noise,
-            "slide_noise": args.slide_noise,
-            "target_twist": args.target_twist,
-            "twist_noise": args.twist_noise,
-            "antiparallel_prob": args.antiparallel_prob,
-        },
-        charge_bias_strength=args.heteromer_charge_bias,
-        piezo_screening=args.piezo_screen,
-        axial_strain=args.axial_strain,
-        piezo_mode=args.piezo_mode,
-        piezo_poisson_ratio=args.piezo_poisson_ratio,
+        topology_params=topology_params_dict,
+        guidance_params=guidance_params_dict,
+        charge_bias_strength=effective_charge_bias,
     )
-    
+
     if args.run:
-        asym_size = 1 if is_heteromer_assembly else args.asym_unit_size
+        asym_size = eff_asym_unit_size
         n_units = args.copies if is_heteromer_assembly else args.copies // args.asym_unit_size
         if "asym_unit" in config:
             print(f"Running BoltzGen with {args.copies} total chains ({n_units} asymmetric units of size {asym_size})...")
         else:
             print(f"Running BoltzGen with {args.copies} total chains of length {args.length}...")
         print(f"Topology constraint: {args.topology} (Asym Unit Size: {asym_size})")
-        
+
         cmd = [
             "boltzgen", "run", yaml_file,
             "--output", args.output_dir,
@@ -718,13 +750,20 @@ def main():
             "--inverse_fold_num_sequences", str(args.seqs_per_backbone),
             "--config", "inverse_folding", f"override.inverse_fold_args.sampling_temperature={args.inverse_temp}"
         ]
-        effective_rmsd = (
+        eff_target_rmsd = (
             args.target_max_rmsd
             if args.target_max_rmsd is not None
             else getattr(args, "refolding_rmsd_threshold", None)
         )
-        if effective_rmsd is not None:
-            cmd.extend(["--target_max_rmsd", str(effective_rmsd), "--refolding_rmsd_threshold", str(effective_rmsd)])
+        eff_filter_rmsd = (
+            getattr(args, "refolding_rmsd_threshold", None)
+            if getattr(args, "refolding_rmsd_threshold", None) is not None
+            else args.target_max_rmsd
+        )
+        if eff_target_rmsd is not None:
+            cmd.extend(["--target_max_rmsd", str(eff_target_rmsd)])
+        if eff_filter_rmsd is not None:
+            cmd.extend(["--refolding_rmsd_threshold", str(eff_filter_rmsd)])
 
         if args.heteromer_counter_screen:
             cmd.append("--heteromer_counter_screen")
@@ -734,17 +773,6 @@ def main():
                 cmd.extend(["--max_surviving_designs", str(args.max_surviving_designs)])
             if hasattr(args, "target_min_plddt"):
                 cmd.extend(["--target_min_plddt", str(args.target_min_plddt)])
-
-        if getattr(args, "piezo_screen", False):
-            cmd.extend([
-                "--piezo_counter_screen",
-                "--axial_strain",
-                str(args.axial_strain),
-                "--piezo_mode",
-                str(args.piezo_mode),
-                "--piezo_poisson_ratio",
-                str(args.piezo_poisson_ratio),
-            ])
 
         if args.ligand_counter_screen:
             cmd.append("--ligand_counter_screen")
@@ -759,8 +787,11 @@ def main():
 
         if getattr(args, "anti_correlation_strength", 0.0) > 0.0:
             cmd.extend(["--anti_correlation_strength", str(args.anti_correlation_strength)])
-            if getattr(args, "anti_correlation_mode", "exact") != "exact":
-                cmd.extend(["--anti_correlation_mode", str(args.anti_correlation_mode)])
+        if (
+            getattr(args, "anti_correlation_strength", 0.0) > 0.0
+            or args.heteromer_counter_screen
+        ) and getattr(args, "anti_correlation_mode", "exact") != "exact":
+            cmd.extend(["--anti_correlation_mode", str(args.anti_correlation_mode)])
 
         if getattr(args, "anti_correlation_surface_only", False):
             cmd.append("--anti_correlation_surface_only")
@@ -773,6 +804,8 @@ def main():
         if getattr(args, "identity_filter_zoned", None) is not None:
             cmd.append(f"--{'identity-filter-zoned' if args.identity_filter_zoned else 'no-identity-filter-zoned'}")
 
+        # All double_tape_*_bias options now default to 0.0, so forwarding non-zero
+        # values only applies when explicitly requested by the user.
         if getattr(args, "double_tape_core_bias", 0.0) > 0.0:
             cmd.extend(["--double_tape_core_bias", str(args.double_tape_core_bias)])
         if getattr(args, "double_tape_aromatic_bias", 0.0) > 0.0:
@@ -788,23 +821,37 @@ def main():
         if getattr(args, "repetition_penalty", 0.0) > 0.0:
             cmd.extend(["--repetition_penalty", str(args.repetition_penalty)])
 
-        material_filtering_override = format_metrics_override(args.topology)
-        if material_filtering_override is not None:
-            cmd.extend(["--config", "filtering", material_filtering_override])
-            
+        # Only pass standalone topology metrics_override when no counter-screen preset owns ranking
+        if not args.heteromer_counter_screen and not args.ligand_counter_screen:
+            material_filtering_override = format_metrics_override(args.topology)
+            if material_filtering_override is not None:
+                cmd.extend(["--config", "filtering", material_filtering_override])
+
         additional_filters_override = format_additional_filters(
             args.topology,
             enable_consecutive_hydrophobics=getattr(args, "enable_consecutive_hydrophobics", False),
             is_heteromer=is_heteromer_assembly,
             enable_composition_filters=getattr(args, "filter_composition", False),
         )
-        if additional_filters_override is not None:
+        if additional_filters_override is not None and not getattr(args, "min_ligand_distance", None):
             cmd.extend(["--config", "filtering", additional_filters_override])
-        
-        if args.avoid_aa:
+
+        # Metal-bearing assemblies allow Cysteine by default unless user explicitly specifies avoid_aa
+        metal_ccds = {"ZN", "CU", "CU1", "FE", "FE2", "CO", "NI", "MN", "MG", "CA", "CD", "HG"}
+        has_metal_ligand = any(
+            str(item.get("type", "protein")).lower() == "ligand"
+            and str(item.get("ccd", "")).strip().upper() in metal_ccds
+            for item in asym_unit_def
+        )
+        if args.avoid_aa is not None:
             cmd.extend(["--inverse_fold_avoid", args.avoid_aa])
+        elif has_metal_ligand:
+            cmd.extend(["--inverse_fold_avoid", ""])
+
         if args.aa_bias:
-            cmd.append(f"override.inverse_fold_args.aa_bias={args.aa_bias}")
+            cmd.extend(
+                ["--config", "inverse_folding", f"override.inverse_fold_args.aa_bias={args.aa_bias}"]
+            )
         if getattr(args, "save_traj", False):
             cmd.append("--save_traj")
         if getattr(args, "save_x0_traj", False):
@@ -820,37 +867,37 @@ def main():
         if getattr(args, "steps", None):
             steps_list = [args.steps] if isinstance(args.steps, str) else list(args.steps)
             cmd.extend(["--steps"] + steps_list)
-        
+
         try:
             subprocess.run(cmd, check=True)
             print("BoltzGen run completed successfully.")
-            
-            # Find the output structures to calculate BSA
-            # Check filtering output first, fallback to refold, then to intermediate designs
-            output_cifs = glob.glob(os.path.join(args.output_dir, "filtering", "*.cif"))
+
+            output_cifs = glob.glob(os.path.join(args.output_dir, "final_ranked_designs", "final_*_designs", "*.cif"))
             if not output_cifs:
                 output_cifs = glob.glob(os.path.join(args.output_dir, "intermediate_designs_inverse_folded", "refold_cif", "*.cif"))
             if not output_cifs:
                 output_cifs = glob.glob(os.path.join(args.output_dir, "intermediate_designs", "*.cif"))
-            
+
             import pandas as pd
-            metrics_csvs = glob.glob(os.path.join(args.output_dir, "final_ranked_designs", "metrics_*.csv"))
+            metrics_csvs = glob.glob(os.path.join(args.output_dir, "final_ranked_designs", "final_designs_metrics_*.csv"))
+            if not metrics_csvs:
+                metrics_csvs = glob.glob(os.path.join(args.output_dir, "final_ranked_designs", "metrics_*.csv"))
             if metrics_csvs:
                 df = pd.read_csv(metrics_csvs[0])
-                df = df.sort_values("max_rank")
+                if "max_rank" in df.columns:
+                    df = df.sort_values("max_rank")
                 print("\n--- TOP RESULTS BY COMPOSITE METRICS ---")
-                cols_to_print = ["id", "max_rank", "neg_lattice_rmsd_refolded", "h_bonds_per_interface_refolded", "packing_density_refolded", "design_to_target_iptm"]
+                cols_to_print = ["id", "max_rank", "complex_plddt", "ligand_iptm", "neg_lattice_rmsd_refolded", "design_to_target_iptm"]
                 available_cols = [c for c in cols_to_print if c in df.columns]
-                
-                # Format to nice strings
                 print(df[available_cols].head(10).to_string(index=False))
             elif output_cifs:
                 print(f"Generated {len(output_cifs)} design structure(s): {', '.join([os.path.basename(c) for c in output_cifs[:5]])}{'...' if len(output_cifs) > 5 else ''}")
             else:
                 print("No output metrics CSV found.")
-                
+
         except subprocess.CalledProcessError as e:
             print(f"Error running BoltzGen: {e}")
+            raise SystemExit(e.returncode) from e
 
 if __name__ == "__main__":
     main()

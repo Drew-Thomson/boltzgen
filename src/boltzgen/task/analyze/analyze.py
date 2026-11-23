@@ -107,6 +107,8 @@ class Analyze(Task):
         designfolding_metrics: bool = False,
         use_design_mask_for_target: bool = False,
         material_metrics: bool = True,
+        material_layout_path: Optional[str] = None,
+        material_topology: Optional[str] = None,
         heteromer_counter_screening: bool = False,
     ) -> None:
         """Initialize the task.
@@ -160,8 +162,9 @@ class Analyze(Task):
         self.diversity_subset = diversity_subset
         self.use_design_mask_for_target = use_design_mask_for_target
         self.material_metrics = material_metrics
+        self.material_layout_path = material_layout_path
+        self.material_topology = material_topology
         self.heteromer_counter_screening = heteromer_counter_screening
-        self.material_metrics = material_metrics
 
         # Prevent each worker process from spawning its own multithreaded pools
         torch.set_num_threads(1)
@@ -594,14 +597,14 @@ class Analyze(Task):
                 # Designed residues only from this chain
                 design_chain_mask = feat["design_mask"].bool() & feat["token_pad_mask"].bool() & chain_mask
                 design_res_types = res_type_argmax[design_chain_mask]
-                design_seq = "".join(
+                chain_design_seq_i = "".join(
                     [
                         const.prot_token_to_letter.get(const.tokens[t], "X")
                         for t in design_res_types
                     ]
                 )
 
-                metrics[f"designed_sequence_{chain_id}"] = design_seq
+                metrics[f"designed_sequence_{chain_id}"] = chain_design_seq_i
                 metrics[f"full_sequence_{chain_id}"] = full_chain_seq
 
 
@@ -785,11 +788,24 @@ class Analyze(Task):
         ca_coords = bb[:, 1, :]
         if len(bb) > 5:
             try:
-                dssp = (
-                    torch.zeros(bb.shape[0], dtype=torch.long)
-                    if torch.sum(bb_design_mask).item() == 0
-                    else pydssp.assign(bb, out_type="index")
-                )
+                if torch.sum(bb_design_mask).item() == 0:
+                    dssp = torch.zeros(bb.shape[0], dtype=torch.long)
+                else:
+                    # Run pydssp per designed chain to avoid spurious cross-termini H-bonds
+                    design_token_asym = feat["asym_id"][design_mask]
+                    unique_design_chains = design_token_asym.unique(sorted=True)
+                    if (
+                        len(unique_design_chains) > 1
+                        and len(design_token_asym) == bb.shape[0]
+                    ):
+                        dssp = torch.zeros(bb.shape[0], dtype=torch.long)
+                        for c_id in unique_design_chains:
+                            c_idx_mask = design_token_asym == c_id
+                            bb_c = bb[c_idx_mask]
+                            if bb_c.shape[0] >= 4:
+                                dssp[c_idx_mask] = pydssp.assign(bb_c, out_type="index")
+                    else:
+                        dssp = pydssp.assign(bb, out_type="index")
                 # Secondary structure conditioning metric
                 if self.ss_conditioning_metrics:
                     ss_conditioning_metricsed = feat["ss_type"][design_mask]
@@ -1147,31 +1163,48 @@ class Analyze(Task):
                 metrics["neg_ligand_sasa_bound_refolded"] = -design_sasa_bound
                 metrics["ligand_coordination_contacts_refolded"] = contacts_refolded
 
+            def _resolve_analyze_topology() -> tuple[str, dict]:
+                layout_data_local: dict = {}
+                l_path_str = getattr(self, "material_layout_path", None) or os.environ.get(
+                    "MAT_LAYOUT_FILE"
+                )
+                if l_path_str:
+                    lp = Path(l_path_str)
+                    if lp.exists():
+                        try:
+                            layout_data_local = json.loads(lp.read_text())
+                        except Exception:
+                            layout_data_local = {}
+                top_val = (
+                    getattr(self, "material_topology", None)
+                    or layout_data_local.get("topology")
+                    or layout_data_local.get("heteromer_screening", {}).get("topology")
+                    or os.environ.get("MAT_TOPOLOGY", "floating")
+                )
+                return str(top_val), layout_data_local
+
+            resolved_topology, resolved_layout_data = _resolve_analyze_topology()
+
             cif_path_refolded = self.refold_cif_dir / f"{feat['id']}.cif"
             if cif_path_refolded.exists():
                 from boltzgen.task.analyze.analyze_utils import compute_ligand_metrics
                 ligand_metrics = compute_ligand_metrics(cif_path_refolded)
                 metrics.update(ligand_metrics)
                 # Coordination sphere + fitted-axis ring symmetry (cyclic assemblies only)
-                if os.environ.get("MAT_TOPOLOGY", "cyclic") == "cyclic":
+                if resolved_topology == "cyclic":
                     from boltzgen.task.analyze.analyze_utils import (
                         compute_ligand_symmetry_metrics,
                     )
 
                     expected_antiparallel: bool | None = None
-                    ap_raw = os.environ.get("MAT_ANTIPARALLEL_PROB")
-                    if ap_raw is None and os.environ.get("MAT_LAYOUT_FILE"):
-                        try:
-                            layout_path = Path(os.environ["MAT_LAYOUT_FILE"])
-                            if layout_path.exists():
-                                layout_data = json.loads(layout_path.read_text())
-                                ap_val = layout_data.get("topology_params", {}).get(
-                                    "antiparallel_prob"
-                                )
-                                if ap_val is not None:
-                                    ap_raw = str(ap_val)
-                        except Exception:
-                            ap_raw = None
+                    ap_val = resolved_layout_data.get("topology_params", {}).get(
+                        "antiparallel_prob"
+                    )
+                    ap_raw = (
+                        str(ap_val)
+                        if ap_val is not None
+                        else os.environ.get("MAT_ANTIPARALLEL_PROB")
+                    )
                     if ap_raw is not None:
                         try:
                             ap_prob = float(ap_raw)
@@ -1404,7 +1437,7 @@ class Analyze(Task):
                             except Exception as metric_err:
                                 print("Error computing two-chain alternating metrics:", metric_err)
 
-                        topology = os.environ.get("MAT_TOPOLOGY", "floating")
+                        topology = resolved_topology
 
                         if topology == "double_tape":
                             screen_type = os.environ.get("MAT_SCREEN_TYPE", "")
@@ -1436,67 +1469,103 @@ class Analyze(Task):
                                 except Exception as dt_err:
                                     print("Error computing double tape neatness metrics:", dt_err)
 
-                            # Calculate chi_outward
-                            if len(coms_ideal) > 1:
-                                normal = (coms_ideal[1] - coms_ideal[0]).cpu().numpy()
-                                normal_norm = np.linalg.norm(normal)
-                                if normal_norm > 0:
-                                    normal = normal / normal_norm
-                                    
-                                    # Use full sequence for the whole complex
-                                    full_res_type = torch.argmax(feat["res_type"], dim=-1)
-                                    full_seq_mask = feat["token_pad_mask"].bool()
-                                    if full_seq_mask.dim() == 2: full_seq_mask = full_seq_mask[0]
-                                    if full_res_type.dim() == 2: full_res_type = full_res_type[0]
-                                    full_seq_tensor = full_res_type[full_seq_mask]
-                                    full_seq = "".join([const.prot_token_to_letter.get(const.tokens[t], "X") for t in full_seq_tensor])
-                                    
-                                    bb_out = feat_out["coords"][bb_mask_refold[: feat_out["coords"].shape[0]]].reshape(-1, 4, 3).cpu().numpy()
-                                    classifications = []
-                                    import math
-                                    for idx_res in range(len(bb_out)):
-                                        if idx_res >= len(full_seq):
-                                            break
-                                        N_at = bb_out[idx_res, 0]
-                                        CA = bb_out[idx_res, 1]
-                                        C_at = bb_out[idx_res, 2]
-                                        b_vec = CA - N_at
-                                        c_vec = C_at - CA
+                            # Calculate inward/outward classification in the REFOLDED frame
+                            # (rotationally invariant: compares each residue's C-beta vector
+                            # against the vector from its chain COM toward the assembly centroid).
+                            if len(coms_refold) > 1:
+                                full_res_type = torch.argmax(feat["res_type"], dim=-1)
+                                full_seq_mask = feat["token_pad_mask"].bool()
+                                if full_seq_mask.dim() == 2:
+                                    full_seq_mask = full_seq_mask[0]
+                                if full_res_type.dim() == 2:
+                                    full_res_type = full_res_type[0]
+                                full_seq_tensor = full_res_type[full_seq_mask]
+                                full_seq = "".join(
+                                    [
+                                        const.prot_token_to_letter.get(const.tokens[t], "X")
+                                        for t in full_seq_tensor
+                                    ]
+                                )
 
-                                        def _unit(v):
-                                            n = np.linalg.norm(v)
-                                            return v / n if n > 0 else v
+                                bb_mask_ref_slice = bb_mask_refold[: feat_out["coords"].shape[0]]
+                                bb_out = feat_out["coords"][bb_mask_ref_slice].reshape(-1, 4, 3).cpu().numpy()
+                                bb_chain_ids = atom_asym_id_refold[bb_mask_ref_slice].cpu().numpy()
 
-                                        # Idealized C-beta direction (backbone atoms are N, CA, C, O)
-                                        vec = (
-                                            -0.531018 * _unit(b_vec - c_vec)
-                                            + 1.20673 * _unit(np.cross(b_vec, c_vec))
-                                        )
-                                        vnorm = np.linalg.norm(vec)
-                                        if vnorm == 0:
-                                            dot = -1.0
-                                        else:
-                                            vec = vec / vnorm
-                                            chain_id = atom_asym_id_refold[bb_mask_refold[: feat_out["coords"].shape[0]]][idx_res*4].item()
-                                            side = chain_id % 2
-                                            curr_normal = normal if side == 0 else -normal
-                                            dot = np.clip(np.dot(vec, curr_normal), -1.0, 1.0)
+                                # Compute bilayer plane normal directly from refolded chain COMs
+                                ref_coms_np = coms_refold.cpu().numpy()
+                                assembly_center = ref_coms_np.mean(axis=0)
+                                ref_coms_c = ref_coms_np - assembly_center
+                                # For a double-tape bilayer, the smallest-variance SVD axis is the
+                                # inter-sheet bilayer normal (or fallback to vector toward center).
+                                _, _, vh_ref = np.linalg.svd(ref_coms_c)
+                                bilayer_axis = vh_ref[-1]
+                                chain_com_by_id = {
+                                    int(cid): bb_out[bb_chain_ids[::4] == cid, 1].mean(axis=0)
+                                    for cid in np.unique(bb_chain_ids)
+                                    if np.any(bb_chain_ids[::4] == cid)
+                                }
 
-                                        if dot > 0.0:
-                                            classifications.append("inward")
-                                        else:
-                                            classifications.append("outward")
-                                            
-                                    from boltzgen.task.analyze.analyze_utils import compute_chi_outward
-                                    metrics["chi_outward"] = compute_chi_outward(torch.tensor(bb_out[:len(full_seq), 1, :]), full_seq, classifications)
-                                    
-                                    outward_res = [res for res, cls in zip(full_seq, classifications) if cls == "outward"]
-                                    if len(outward_res) > 0:
-                                        metrics["outward_ilv_fraction"] = sum(1 for r in outward_res if r in ["I", "L", "V"]) / len(outward_res)
-                                        metrics["outward_aromatic_fraction"] = sum(1 for r in outward_res if r in ["W", "Y", "F"]) / len(outward_res)
+                                def _unit(v):
+                                    n = np.linalg.norm(v)
+                                    return v / n if n > 1e-8 else v
+
+                                classifications = []
+                                for idx_res in range(len(bb_out)):
+                                    if idx_res >= len(full_seq):
+                                        break
+                                    N_at = bb_out[idx_res, 0]
+                                    CA = bb_out[idx_res, 1]
+                                    C_at = bb_out[idx_res, 2]
+                                    b_vec = CA - N_at
+                                    c_vec = C_at - CA
+
+                                    # Standard L-amino-acid virtual C-beta direction
+                                    # (backbone atoms are N, CA, C, O):
+                                    # CB - CA = -0.58273431*(b x c) + 0.56802827*b - 0.54067466*c
+                                    vec = (
+                                        -0.58273431 * np.cross(b_vec, c_vec)
+                                        + 0.56802827 * b_vec
+                                        - 0.54067466 * c_vec
+                                    )
+                                    vnorm = np.linalg.norm(vec)
+                                    if vnorm < 1e-8:
+                                        dot = -1.0
                                     else:
-                                        metrics["outward_ilv_fraction"] = 0.0
-                                        metrics["outward_aromatic_fraction"] = 0.0
+                                        vec = vec / vnorm
+                                        c_id_res = int(bb_chain_ids[idx_res * 4])
+                                        c_com = chain_com_by_id.get(c_id_res, CA)
+                                        to_core_proj = np.dot(assembly_center - c_com, bilayer_axis)
+                                        inward_dir = (
+                                            bilayer_axis
+                                            if to_core_proj >= 0.0
+                                            else -bilayer_axis
+                                        )
+                                        dot = float(np.clip(np.dot(vec, inward_dir), -1.0, 1.0))
+
+                                    classifications.append("inward" if dot > 0.0 else "outward")
+
+                                from boltzgen.task.analyze.analyze_utils import compute_chi_outward
+                                metrics["chi_outward"] = compute_chi_outward(
+                                    torch.tensor(bb_out[: len(full_seq), 1, :]),
+                                    full_seq,
+                                    classifications,
+                                )
+
+                                outward_res = [
+                                    res
+                                    for res, cls in zip(full_seq, classifications)
+                                    if cls == "outward"
+                                ]
+                                if len(outward_res) > 0:
+                                    metrics["outward_ilv_fraction"] = sum(
+                                        1 for r in outward_res if r in ["I", "L", "V"]
+                                    ) / len(outward_res)
+                                    metrics["outward_aromatic_fraction"] = sum(
+                                        1 for r in outward_res if r in ["W", "Y", "F"]
+                                    ) / len(outward_res)
+                                else:
+                                    metrics["outward_ilv_fraction"] = 0.0
+                                    metrics["outward_aromatic_fraction"] = 0.0
                         else:
                             try:
                                 from boltzgen.task.analyze.material_metrics import (
@@ -1514,7 +1583,9 @@ class Analyze(Task):
                                 rmsd = rmsd_ind
                             except Exception as rmsd_err:
                                 print("Error computing chain-order independent RMSD:", rmsd_err)
-                                rmsd = torch.sqrt(torch.mean((c_r_aligned - Q)**2)).item()
+                                rmsd = torch.sqrt(
+                                    torch.mean(torch.sum((c_r_aligned - Q) ** 2, dim=-1))
+                                ).item()
 
                             if not has_two_chain_asym_unit or two_chain_metrics is None:
                                 metrics["lattice_rmsd_refolded"] = rmsd
@@ -1543,10 +1614,8 @@ class Analyze(Task):
                         except ImportError:
                             compute_material_metrics = None
 
-                        topology = os.environ.get("MAT_TOPOLOGY", "floating")
+                        topology = resolved_topology
                         if topology in {
-                            "cage_tetrahedral",
-                            "cage_octahedral",
                             "bilayer_sheet",
                             "hexagonal_mesh",
                             "nanotube",

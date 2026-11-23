@@ -419,6 +419,8 @@ class FromGeneratedDataset(torch.utils.data.Dataset):
             structure = Structure.extract_residues(structure, residue_design_mask)
             tokenized = self.tokenizer.tokenize(structure)
             design_mask = design_mask[chain_design_mask]
+            if symmetric_group is not None and len(symmetric_group) == len(chain_design_mask):
+                symmetric_group = symmetric_group[chain_design_mask]
             chain_design_mask = chain_design_mask[chain_design_mask]
 
         # For inverse folding, condition even on structure selected for design

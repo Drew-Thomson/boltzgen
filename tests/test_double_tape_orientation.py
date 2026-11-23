@@ -111,10 +111,8 @@ def test_double_tape_even_inside_odd_outside() -> None:
         n_p, ca_p, c_p = unfolded_bb[:, 0], unfolded_bb[:, 1], unfolded_bb[:, 2]
         b_u = ca_p - n_p
         c_u = c_p - ca_p
-        b_n = torch.linalg.norm(b_u - c_u, dim=-1, keepdim=True) + 1e-8
         cr_u = torch.linalg.cross(b_u, c_u)
-        c_n = torch.linalg.norm(cr_u, dim=-1, keepdim=True) + 1e-8
-        v_u = -0.531018 * ((b_u - c_u) / b_n) + 1.20673 * (cr_u / c_n)
+        v_u = -0.58273431 * cr_u + 0.56802827 * b_u - 0.54067466 * c_u
         v_u = v_u / (torch.linalg.norm(v_u, dim=-1, keepdim=True) + 1e-8)
 
         # Inward normal points toward center (X=0): Layer 0 (+X), Layer 1 (-X)

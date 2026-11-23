@@ -114,7 +114,7 @@ def test_expand_material_spec_retains_anchor_metadata():
         assert rec["anchor_direction"] == "outward"
 
 
-def test_expand_material_spec_defaults_to_random_anchor():
+def test_expand_material_spec_defaults_to_no_anchor():
     _, layout = expand_material_spec(
         2,
         [
@@ -130,7 +130,7 @@ def test_expand_material_spec_defaults_to_random_anchor():
     ligand_records = [r for r in layout["chains"] if r["role"] == "ligand"]
     assert len(ligand_records) == 2
     for rec in ligand_records:
-        assert rec["anchor_residue"] == "random"
+        assert rec["anchor_residue"] is None
         assert rec["anchor_distance"] == 4.0
         assert rec["anchor_direction"] == "outward"
 

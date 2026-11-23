@@ -6,7 +6,7 @@ num_designs: 20
 seqs_per_backbone: 5
 spacing_noise: 1
 avoid_aa: 'M'
-inverse_temp: 2
+inverse_temp: 0.15
 asym_unit:
   - type: protein
     name: helical_peptide

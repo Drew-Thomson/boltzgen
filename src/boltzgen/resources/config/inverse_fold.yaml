@@ -76,6 +76,7 @@ override:
     coordinate_augmentation: true
     alignment_reverse_diff: true
     synchronize_sigmas: false
+    enable_material_guidance: false
     
   inverse_fold_args:
     atom_s: 128

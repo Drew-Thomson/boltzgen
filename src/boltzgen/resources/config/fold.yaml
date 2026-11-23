@@ -52,3 +52,5 @@ diffusion_samples: 5
 
 override:
   validators: null
+  diffusion_process_args:
+    enable_material_guidance: false

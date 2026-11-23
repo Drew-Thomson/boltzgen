@@ -132,10 +132,11 @@ def get_best_folding_sample(folded):
     confidence = np.where(np.isfinite(confidence), confidence, -np.inf)
     best_idx = int(np.argmax(confidence))
 
-    # TODO: remove the "if k in folded"
-    best_sample = {
-        k: folded[k][best_idx] for k in const.eval_keys_confidence if k in folded
-    }
+    best_sample = {}
+    for k in const.eval_keys_confidence:
+        if k in folded:
+            val = np.asarray(folded[k])
+            best_sample[k] = val.item() if val.ndim == 0 else folded[k][best_idx]
     best_sample["coords"] = folded["coords"][best_idx]
     return best_sample
 
@@ -1108,9 +1109,17 @@ def compute_cyclic_symmetry_metrics(
     axis = _unit(np.linalg.svd(centroids - origin)[2][-1])
 
     # chain axial directions, ordered by azimuth around the axis
-    e1 = _unit(centroids[0] - origin - np.dot(centroids[0] - origin, axis) * axis)
+    rel_c = centroids - origin
+    perp_c = rel_c - np.outer(rel_c @ axis, axis)
+    perp_norms = np.linalg.norm(perp_c, axis=1)
+    best_ref = int(np.argmax(perp_norms))
+    if perp_norms[best_ref] > 1e-6:
+        e1 = perp_c[best_ref] / perp_norms[best_ref]
+    else:
+        trial = np.array([1.0, 0.0, 0.0]) if abs(axis[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        e1 = _unit(trial - np.dot(trial, axis) * axis)
     e2 = np.cross(axis, e1)
-    azimuth = np.arctan2((centroids - origin) @ e2, (centroids - origin) @ e1)
+    azimuth = np.arctan2(rel_c @ e2, rel_c @ e1)
     order = np.argsort(azimuth)
     signs = []
     for idx in order:
@@ -1121,6 +1130,7 @@ def compute_cyclic_symmetry_metrics(
     alternating = (
         n % 2 == 0 and n >= 4 and bool(np.all(signs_arr * np.roll(signs_arr, -1) < 0))
     )
+    all_parallel = bool(np.all(signs_arr != 0) and np.all(signs_arr == signs_arr[0]))
     if expected_antiparallel is None:
         k = n // 2 if alternating else n
     elif expected_antiparallel and n % 2 == 0 and n >= 4:
@@ -1148,16 +1158,17 @@ def compute_cyclic_symmetry_metrics(
         "sym_is_antiparallel": 1.0 if alternating else 0.0,
     }
     if expected_antiparallel is not None:
-        out["sym_orientation_match"] = (
-            1.0 if alternating == expected_antiparallel else 0.0
-        )
+        matched_orientation = alternating if expected_antiparallel else all_parallel
+        out["sym_orientation_match"] = 1.0 if matched_orientation else 0.0
     m = len(ligand_centers)
     if m >= 1:
         rel = ligand_centers - origin
         off_axis = np.linalg.norm(rel - np.outer(rel @ axis, axis), axis=1)
-        if m == 1 or np.all(off_axis < 1.0):
+        # Consistent 3.0 A axial envelope (matches max_sym_ligand_rmsd=3.0) instead of
+        # a hard 1.0 A cliff that drops near-axial 2-metal bundles into the ring branch.
+        if m == 1 or np.all(off_axis < 3.0):
             lig_rmsd = float(np.sqrt(np.mean(off_axis**2)))
-            orbit_ok = 1.0 if np.all(off_axis < 1.0) else 0.0
+            orbit_ok = 1.0 if np.all(off_axis <= 3.0) else 0.0
         else:
             # ligands may occupy a sub-orbit (e.g. 3 metals on a C6 ring -> C3)
             orbit_ok = 1.0 if (m % k == 0 or k % m == 0) else 0.0

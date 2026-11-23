@@ -172,31 +172,34 @@ class FilterHighIdentityPairs(Task):
                         layout.get("is_antiparallel", False)
                     )
 
-            seq_b_aligned = seq_b[::-1] if is_antiparallel else seq_b
-
-            if len(seq_a) == len(seq_b_aligned):
+            if len(seq_a) == len(seq_b):
                 if use_zoned:
                     # In beta-sheet tapes:
                     # 0-indexed even (1-indexed odd: 1, 3, 5...) is outward/solvent
                     # 0-indexed odd (1-indexed even: 2, 4, 6...) is inward/core
-                    surf_idx = [i for i in range(len(seq_a)) if i % 2 == 0]
-                    core_idx = [i for i in range(len(seq_a)) if i % 2 == 1]
-                    matches_surf = sum(
-                        seq_a[i] == seq_b_aligned[i] for i in surf_idx
-                    )
-                    matches_core = sum(
-                        seq_a[i] == seq_b_aligned[i] for i in core_idx
-                    )
-                    id_surf = matches_surf / max(1, len(surf_idx))
-                    id_core = matches_core / max(1, len(core_idx))
+                    # Compare surface-to-surface and core-to-core directly so even-length
+                    # antiparallel reversal never pairs A's surface with B's core.
+                    surf_a = [seq_a[i] for i in range(len(seq_a)) if i % 2 == 0]
+                    core_a = [seq_a[i] for i in range(len(seq_a)) if i % 2 == 1]
+                    surf_b = [seq_b[i] for i in range(len(seq_b)) if i % 2 == 0]
+                    core_b = [seq_b[i] for i in range(len(seq_b)) if i % 2 == 1]
+                    if is_antiparallel:
+                        surf_b = surf_b[::-1]
+                        core_b = core_b[::-1]
+                    matches_surf = sum(a == b for a, b in zip(surf_a, surf_b))
+                    matches_core = sum(a == b for a, b in zip(core_a, core_b))
+                    id_surf = matches_surf / max(1, len(surf_a))
+                    id_core = matches_core / max(1, len(core_a))
                     identity = (
                         self.weight_core * id_core
                         + self.weight_surface * id_surf
                     )
                 else:
-                    matches = sum(a == b for a, b in zip(seq_a, seq_b_aligned))
-                    identity = matches / max(len(seq_a), len(seq_b_aligned))
+                    seq_b_cmp = seq_b[::-1] if is_antiparallel else seq_b
+                    matches = sum(a == b for a, b in zip(seq_a, seq_b_cmp))
+                    identity = matches / max(len(seq_a), len(seq_b_cmp))
             else:
+                seq_b_aligned = seq_b[::-1] if is_antiparallel else seq_b
                 aligner = Align.PairwiseAligner()
                 aligner.mode = "global"
                 aligner.open_gap_score = -10.0
@@ -233,7 +236,15 @@ class FilterHighIdentityPairs(Task):
                         + self.weight_surface * id_surf
                     )
                 else:
-                    identity = aln.score / max(len(seq_a), len(seq_b_aligned))
+                    matches = sum(
+                        1
+                        for (a_start, a_end), (b_start, b_end) in zip(
+                            aln.aligned[0], aln.aligned[1]
+                        )
+                        for i, j in zip(range(a_start, a_end), range(b_start, b_end))
+                        if seq_a[i] == seq_b_aligned[j]
+                    )
+                    identity = matches / max(1, len(seq_a), len(seq_b_aligned))
 
             all_candidates.append((identity, cif_path))
 

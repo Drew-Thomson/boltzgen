@@ -800,7 +800,9 @@ def parse_residue_constraints(
     positions 5-10 (the intersection of {A,G} and {G,S}).
     """
     num_aa = len(canonical_tokens)  # Should be 20
-    constraint_mask = np.zeros((chain_length, num_aa), dtype=np.float32)
+    blocked = np.zeros((chain_length, num_aa), dtype=bool)
+    weights_arr = np.zeros((chain_length, num_aa), dtype=np.float32)
+    has_weights = False
 
     for constraint in constraints_spec:
         # Parse position(s)
@@ -831,9 +833,7 @@ def parse_residue_constraints(
             )
 
         if allowed is not None:
-            # Whitelist mode: block all except specified AAs
-            # Uses np.maximum to accumulate with existing constraints (intersection semantics):
-            # if a position already has constraints, only AAs allowed by BOTH survive.
+            # Whitelist mode: block all except specified AAs (intersection semantics)
             aa_list = _normalize_aa_spec(allowed)
             if len(aa_list) == 0:
                 raise ValueError(
@@ -842,26 +842,26 @@ def parse_residue_constraints(
             aa_indices = _convert_aa_names_to_indices(
                 aa_list, canonical_tokens, prot_letter_to_token
             )
-            new_block = np.ones(num_aa, dtype=np.float32)
+            new_block = np.ones(num_aa, dtype=bool)
             for idx in aa_indices:
-                new_block[idx] = 0.0
+                new_block[idx] = False
             for pos in positions:
-                constraint_mask[pos, :] = np.maximum(constraint_mask[pos, :], new_block)
+                blocked[pos, :] |= new_block
 
         elif disallowed is not None:
-            # Blacklist mode: only block specified
-            # Normalize input: supports both "CM" (string) and [C, M] (list)
+            # Blacklist mode: block specified AAs
             aa_list = _normalize_aa_spec(disallowed)
             aa_indices = _convert_aa_names_to_indices(
                 aa_list, canonical_tokens, prot_letter_to_token
             )
             for pos in positions:
                 for idx in aa_indices:
-                    constraint_mask[pos, idx] = 1.0  # Block specified
+                    blocked[pos, idx] = True
 
         elif weights is not None:
-            # Weights mode: apply float weights to the specified AAs
+            # Weights mode: accumulate soft float logit biases
             if isinstance(weights, dict):
+                has_weights = True
                 for aa_name, weight_val in weights.items():
                     aa_list = _normalize_aa_spec(aa_name)
                     aa_indices = _convert_aa_names_to_indices(
@@ -869,16 +869,21 @@ def parse_residue_constraints(
                     )
                     for pos in positions:
                         for idx in aa_indices:
-                            # If it's blocked (1.0) and a weight is provided?
-                            # We can just add the weight, but we should make sure we don't ruin the 1.0 block magic number.
-                            # Since 1.0 is a magic number for "blocked", let's be careful.
-                            # We'll just add the weight. If it happens to exactly hit 1.0, it becomes a block.
-                            constraint_mask[pos, idx] += float(weight_val)
+                            weights_arr[pos, idx] += float(weight_val)
             else:
                 raise ValueError(
                     f"Position {position_spec}: 'weights' must be a dictionary mapping amino acids to numeric weights"
                 )
 
+    if not has_weights:
+        return blocked.astype(np.float32)
+
+    constraint_mask = weights_arr.copy()
+    # Avoid colliding with legacy binary hard-block sentinel 1.0 on unblocked entries
+    exact_one = (~blocked) & (constraint_mask == np.float32(1.0))
+    constraint_mask[exact_one] = np.float32(1.0 + 1e-5)
+    # Encode hard blocks as -1e6 (finite float32 compatible with npz/serialization)
+    constraint_mask[blocked] = np.float32(-1e6)
     return constraint_mask
 
 

@@ -9,57 +9,6 @@ from pathlib import Path
 from typing import Any
 
 
-SIGMA_ORIENTATION = 0.2  # radians, approx 11 degrees tolerance for side-chain orientation
-
-def classify_sidechains(coms, rots, residues):
-    """
-    Classify each residue side-chain as "inward" or "outward" relative to the bilayer normal of a double-tape lattice.
-
-    Parameters
-    ----------
-    coms : list of centre-of-mass coordinates for each chain (from ideal lattice generation)
-    rots : list of rotation matrices for each chain (same order as ``coms``)
-    residues : list of residue records containing ``chain_index`` and atomic coordinates
-               (CA, CB or N for Gly). The order must match the sequence used in the
-               decoder output.
-
-    Returns
-    -------
-    list[str]
-        A list with the same length as ``residues`` containing either "inward"
-        or "outward".  The classification is based on the angle between the
-        side-chain vector (CB-CA for non-Gly, N-CA for Gly) and the local bilayer
-        normal.  An angle smaller than ``SIGMA_ORIENTATION`` (in radians) is
-        considered "inward"; otherwise "outward".
-    """
-    import numpy as np
-    classifications = []
-    # compute bilayer normal for each chain from its rotation matrix (Z-axis)
-    chain_normals = [rot[:, 2] for rot in rots]
-    for res in residues:
-        chain_idx = res["chain_index"]
-        # side-chain vector
-        if res.get("is_glycine"):
-            vec = np.array(res["N"]) - np.array(res["CA"])
-        else:
-            vec = np.array(res["CB"]) - np.array(res["CA"])
-        vec_norm = np.linalg.norm(vec)
-        if vec_norm == 0:
-            angle = np.pi
-        else:
-            vec = vec / vec_norm
-            normal = chain_normals[chain_idx]
-            dot = np.clip(np.dot(vec, normal), -1.0, 1.0)
-            angle = np.arccos(dot)
-        if angle < SIGMA_ORIENTATION:
-            classifications.append("inward")
-        else:
-            classifications.append("outward")
-    return classifications
-
-
-
-
 _BUILDER_KEYS = {
     "name",
     "attach_to",
@@ -123,6 +72,7 @@ def expand_material_spec(
     heteromer_screening: bool = False,
     topology: str | None = None,
     topology_params: dict[str, Any] | None = None,
+    guidance_params: dict[str, Any] | None = None,
     charge_bias_strength: float | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Expand material templates and return BoltzGen entities plus a sidecar layout.
@@ -132,6 +82,10 @@ def expand_material_spec(
     ligand instances in config order, making topology indexing independent of
     ligand multiplicity.
     """
+    if topology in {"cage_tetrahedral", "cage_octahedral"}:
+        raise ValueError(
+            f"Topology {topology!r} is currently shelved/disabled pending point-group symmetry redesign."
+        )
     if isinstance(copies, bool) or not isinstance(copies, int) or copies < 1:
         raise ValueError("copies must be a positive integer")
     if not isinstance(asym_unit, list) or not asym_unit:
@@ -212,14 +166,6 @@ def expand_material_spec(
         if topology == "double_tape" and copies % 2 != 0:
             raise ValueError(
                 f"double_tape requires copies to be an even number (multiple of 2); got {copies}"
-            )
-        if topology == "cage_tetrahedral" and copies != 12:
-            raise ValueError(
-                f"cage_tetrahedral requires copies to be 12; got {copies}"
-            )
-        if topology == "cage_octahedral" and copies != 24:
-            raise ValueError(
-                f"cage_octahedral requires copies to be 24; got {copies}"
             )
         if topology_params is not None:
             if (
@@ -319,7 +265,7 @@ def expand_material_spec(
                     "min_ligand_distance", ligand.get("min_distance", 3.5)
                 )
             )
-            min_prot_dist = float(ligand.get("min_protein_distance", 2.2))
+            min_prot_dist = float(ligand.get("min_protein_distance", 1.8))
 
             count_val = ligand.get("count")
             raw_axial_z = ligand.get("axial_z")
@@ -509,7 +455,15 @@ def expand_material_spec(
                 unit_record["ligand_asym_indices"].append(asym_index)
                 anchor_res = ligand.get("anchor_residue")
                 if anchor_res is None:
-                    anchor_res = os.environ.get("MAT_LIGAND_ANCHOR_RESIDUE", "random")
+                    env_anchor = os.environ.get("MAT_LIGAND_ANCHOR_RESIDUE")
+                    if env_anchor is not None and str(env_anchor).strip().lower() not in (
+                        "none",
+                        "false",
+                        "off",
+                        "no",
+                        "",
+                    ):
+                        anchor_res = env_anchor
                 anchor_dist = ligand.get("anchor_distance")
                 if anchor_dist is None and "MAT_LIGAND_ANCHOR_DISTANCE" in os.environ:
                     anchor_dist = float(os.environ["MAT_LIGAND_ANCHOR_DISTANCE"])
@@ -577,6 +531,7 @@ def expand_material_spec(
 
     layout = {
         "version": 1,
+        "topology": topology,
         "copies": copies,
         "guided_proteins_per_unit": 1 if is_heteromer_assembly else len(proteins),
         "chains": records,
@@ -584,6 +539,8 @@ def expand_material_spec(
     }
     if topology_params is not None:
         layout["topology_params"] = dict(topology_params)
+    if guidance_params is not None:
+        layout["guidance_params"] = dict(guidance_params)
     if heteromer_screening:
         layout["heteromer_screening"] = {
             "enabled": True,

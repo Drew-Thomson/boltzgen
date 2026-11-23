@@ -5,6 +5,8 @@ design_dir: null
 debug: false
 num_processes: 32
 material_metrics: true
+material_layout_path: null
+material_topology: null
 
 # Common metrics to compute
 affinity_metrics: false

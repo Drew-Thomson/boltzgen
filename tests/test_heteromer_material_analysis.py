@@ -94,9 +94,10 @@ def test_load_prediction_metrics_handles_vector_outputs(tmp_path):
         complex_plddt=np.asarray([70.0, 80.0]),
         design_iptm=np.asarray([0.6, 0.8]),
     )
+    # Matches get_best_folding_sample (selects best sample by confidence rather than averaging)
     assert _load_prediction_metrics(path) == {
-        "complex_plddt": 75.0,
-        "design_iptm": 0.7,
+        "complex_plddt": 80.0,
+        "design_iptm": 0.8,
     }
 
 

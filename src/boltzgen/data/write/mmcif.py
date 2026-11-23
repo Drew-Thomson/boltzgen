@@ -442,8 +442,6 @@ def add_poly_seq_scheme_cols(structure, block, chain_to_entity_id, label_seq_dic
 
         # Use enumerate to get the sequential 1-based seq_id
         for seq_id, res in enumerate(residues, 1):
-            if seq_id - 1 >= len(label_seq_dict[entity_id]):
-                print(f"CRASH IMMINENT: chain {chain['name'].item()}, entity_id {entity_id}, len dict {len(label_seq_dict[entity_id])}, seq_id {seq_id}")
             mon_id = res["name"].item()
             auth_seq_num = str(res["res_idx"].item() + 1)
 
@@ -460,7 +458,9 @@ def add_poly_seq_scheme_cols(structure, block, chain_to_entity_id, label_seq_dic
                 [
                     chain_id,  # asym_id
                     entity_id,  # entity_id
-                    str(label_seq_dict[entity_id][seq_id - 1]) if seq_id - 1 < len(label_seq_dict[entity_id]) else "?",
+                    str(label_seq_dict[entity_id][seq_id - 1])
+                    if seq_id - 1 < len(label_seq_dict[entity_id])
+                    else str(seq_id),
                     mon_id,  # mon_id
                     pdb_seq_num,  # pdb_seq_num (use auth if present)
                     auth_seq_num,  # auth_seq_num (your res_idx)

@@ -63,9 +63,11 @@ def target_rmsd(frame: pd.DataFrame, topology: Optional[str]) -> pd.Series:
         return -frame["neg_lattice_rmsd_refolded"]
     if "bb_rmsd" in frame:
         return frame["bb_rmsd"]
+    if "rmsd" in frame:
+        return frame["rmsd"]
     raise ValueError(
         "No structural RMSD column (local_step_rmsd, lattice_rmsd_geom, "
-        "local_double_tape_rmsd, neg_lattice_rmsd_refolded or bb_rmsd) "
+        "local_double_tape_rmsd, neg_lattice_rmsd_refolded, bb_rmsd or rmsd) "
         "found in aggregate metrics"
     )
 
@@ -184,7 +186,9 @@ class FilterTargetCandidates(Task):
             )
             if series is None:
                 continue
-            filled = series.fillna(float("-inf"))
+            filled = series.replace([float("inf"), float("-inf")], float("nan")).fillna(
+                float("-inf")
+            )
             keys = list(zip(pass_int.tolist(), filled.tolist()))
             ranks = pd.Series(keys, index=ranked.index).rank(
                 method="min", ascending=False

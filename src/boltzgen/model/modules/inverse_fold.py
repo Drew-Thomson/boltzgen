@@ -53,8 +53,12 @@ def get_anti_correlation_weights(mode: str = "exact") -> Tensor:
                     val = float(matrix[a, b])
                     weights[i, j] = max(0.0, val / diag)
             return torch.from_numpy(weights)
-        except Exception:
-            pass
+        except Exception as exc:
+            warnings.warn(
+                f"Failed to load BLOSUM62 substitution matrix ({exc}); falling back to 'exact' anti-correlation weights.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
     return torch.eye(num_tokens, dtype=torch.float32)
 
 
@@ -104,8 +108,17 @@ def build_constraint_logit_mask(
         if aa_constraint_mask.shape == expected_shape:
             custom_mask = aa_constraint_mask.to(device=device, dtype=torch.float32)
             bias = custom_mask.clone()
-            # 1.0 is the legacy/magic value for "disallowed" hard blocks.
-            bias[custom_mask == 1.0] = -inf
+            # 1.0 is the legacy binary sentinel for hard-blocked AAs; <= -1e5 is the
+            # explicit hard-block sentinel when soft logit weights are also present.
+            hard_blocked = (custom_mask == 1.0) | (custom_mask <= -1e5)
+            bias[hard_blocked] = -inf
+        else:
+            warnings.warn(
+                f"Ignoring aa_constraint_mask with unexpected shape {tuple(aa_constraint_mask.shape)}; "
+                f"expected {expected_shape}.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
     global_blocked = torch.zeros(num_aa, dtype=torch.bool, device=device)
     for res_type in inverse_fold_restriction:
@@ -113,7 +126,9 @@ def build_constraint_logit_mask(
         
     bias[:, global_blocked] = -inf
     
-    still_all_blocked = (bias < 0).all(dim=1)
+    # Only hard-blocked entries (<= -inf/2) count as unavailable; negative soft logit
+    # weights remain valid amino acid candidates.
+    still_all_blocked = (bias <= -inf * 0.5).all(dim=1)
     if still_all_blocked.any():
         blocked_positions = torch.where(still_all_blocked)[0].tolist()
         raise ValueError(
@@ -373,7 +388,9 @@ class InverseFoldingEncoder(nn.Module):
         )
 
     @torch.no_grad()
-    def init_knn_graph(self, feats: Dict[str, Tensor]) -> Tuple[Tensor, Tensor]:
+    def init_knn_graph(
+        self, feats: Dict[str, Tensor], noisy_coords: Optional[Tensor] = None
+    ) -> Tuple[Tensor, Tensor]:
         valid_mask = (
             feats["token_resolved_mask"].bool() & feats["token_pad_mask"].bool()
         )
@@ -382,9 +399,14 @@ class InverseFoldingEncoder(nn.Module):
         token_index = (valid_mask.flatten().cumsum(dim=0) - 1).view(B, N)
         topk = min(self.topk, N)
 
-        coords = feats["center_coords"]
-        if (not self.training) and self.backbone_noise > 0:
-            coords = coords + torch.randn_like(coords) * self.backbone_noise
+        if noisy_coords is not None and "token_to_rep_atom" in feats:
+            coords = torch.bmm(
+                feats["token_to_rep_atom"].float(), noisy_coords.view(B, -1, 3).float()
+            )
+        else:
+            coords = feats["center_coords"]
+            if (not self.training) and self.backbone_noise > 0:
+                coords = coords + torch.randn_like(coords) * self.backbone_noise
         dists = torch.cdist(coords, coords)
         dists = dists.masked_fill(~valid_mask_pair, float("inf"))
         src_idx = torch.topk(dists, topk, largest=False).indices
@@ -420,15 +442,21 @@ class InverseFoldingEncoder(nn.Module):
 
     @torch.no_grad()
     def extract_geo_feat(
-        self, feats: Dict[str, Tensor], edge_idx: Tensor, valid_mask: Tensor
+        self,
+        feats: Dict[str, Tensor],
+        edge_idx: Tensor,
+        valid_mask: Tensor,
+        noisy_coords: Optional[Tensor] = None,
     ) -> Tensor:
         src_idx, dst_idx = edge_idx[0], edge_idx[1]
         token_to_bb4_atoms = feats["token_to_bb4_atoms"]
-        r = feats["coords"]
-        noise_std = self.inverse_fold_noise if self.training else self.backbone_noise
-        if noise_std > 0:
-            # Independent Gaussian noise on every atom (incl. N, CA, C, O)
-            r = r + torch.randn_like(r) * noise_std
+        if noisy_coords is not None:
+            r = noisy_coords
+        else:
+            r = feats["coords"]
+            noise_std = self.inverse_fold_noise if self.training else self.backbone_noise
+            if noise_std > 0:
+                r = r + torch.randn_like(r) * noise_std
         B, N = valid_mask.shape
         r_repr = torch.bmm(
             token_to_bb4_atoms.float().view(B, N * 4, -1), r.view(B, -1, 3)
@@ -518,8 +546,17 @@ class InverseFoldingEncoder(nn.Module):
         return node_attr, edge_attr
 
     def forward(self, feats):
-        edge_idx, valid_mask, bond = self.init_knn_graph(feats)
-        geo_feat = self.extract_geo_feat(feats, edge_idx, valid_mask)
+        noisy_coords = None
+        if (not self.training) and self.backbone_noise > 0 and "coords" in feats:
+            noisy_coords = (
+                feats["coords"] + torch.randn_like(feats["coords"]) * self.backbone_noise
+            )
+        edge_idx, valid_mask, bond = self.init_knn_graph(
+            feats, noisy_coords=noisy_coords
+        )
+        geo_feat = self.extract_geo_feat(
+            feats, edge_idx, valid_mask, noisy_coords=noisy_coords
+        )
         node_attr, edge_attr = self.extract_attr_feat(feats, edge_idx, valid_mask)
         if self.enable_input_embedder:
             node_attr = feats["s_inputs"][valid_mask]
@@ -723,16 +760,28 @@ class InverseFoldingDecoder(nn.Module):
         )
 
         if self.aa_bias:
-            for term in self.aa_bias.split(","):
-                aa, val = term.split(":")
-                val = float(val)
-                # Map 1-letter code to canonical token index
-                token_name = const.prot_letter_to_token_name.get(aa)
-                if token_name and token_name in const.canonical_tokens:
+            for raw_term in self.aa_bias.split(","):
+                term = raw_term.strip()
+                if not term:
+                    continue
+                if ":" not in term:
+                    raise ValueError(
+                        f"Invalid aa_bias entry {term!r}; expected '<AA>:<float>'."
+                    )
+                aa_raw, val_raw = term.split(":", 1)
+                aa = aa_raw.strip().upper()
+                val = float(val_raw.strip())
+                # Support both 1-letter (e.g. 'T') and 3-letter (e.g. 'THR') codes
+                token_name = const.prot_letter_to_token.get(aa, aa)
+                if token_name in const.canonical_tokens:
                     idx = const.canonical_tokens.index(token_name)
-                    # For the plan: 'favor Threonine/Serine substitution on solvent positions'
-                    # But ProteinMPNN global aa_bias applies to ALL positions!
                     per_residue_mask[:, idx] += val
+                else:
+                    warnings.warn(
+                        f"Ignoring unrecognized amino acid {aa!r} in aa_bias.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
         
         if self.background_unbias_strength > 0:
             # Remove the natural-proteome prior: penalize common residues, boost rare ones
@@ -778,9 +827,12 @@ class InverseFoldingDecoder(nn.Module):
                 normal = torch.nn.functional.normalize(com1 - com0, dim=0)
                 b = CA - bb4[:, 0]
                 c = bb4[:, 2] - CA
+                # Standard L-amino-acid virtual C-beta direction:
+                # CB - CA = -0.58273431 * (b x c) + 0.56802827 * b - 0.54067466 * c
                 vec = (
-                    -0.531018 * torch.nn.functional.normalize(b - c, dim=1)
-                    + 1.20673 * torch.nn.functional.normalize(torch.cross(b, c, dim=1), dim=1)
+                    -0.58273431 * torch.linalg.cross(b, c, dim=1)
+                    + 0.56802827 * b
+                    - 0.54067466 * c
                 )
                 vec = torch.nn.functional.normalize(vec, dim=1)
                 curr_normal = torch.where((asym_id % 2 == 0).unsqueeze(1), normal.unsqueeze(0), -normal.unsqueeze(0))
@@ -876,7 +928,9 @@ class InverseFoldingDecoder(nn.Module):
                         r_idx = res_idx_tensor[pos].item()
                         pos_by_entity_res[(ent, r_idx)].append(pos)
 
-                # Determine relative strand orientation across entities (parallel vs antiparallel)
+                # Determine relative strand orientation across entities by comparing
+                # closest chain pairs between entity A and entity B (per-chain directions
+                # avoid cancellation when antiparallel layers point in opposite directions).
                 is_anti_global = None
                 if "is_antiparallel" in feats:
                     anti_feat = feats["is_antiparallel"]
@@ -885,7 +939,7 @@ class InverseFoldingDecoder(nn.Module):
                     elif isinstance(anti_feat, bool):
                         is_anti_global = anti_feat
 
-                entity_strand_dir = {}
+                chain_strand_dir: dict[int, tuple[int, Tensor, Tensor]] = {}
                 token_bb4 = feats.get("token_to_bb4_atoms")
                 coords = feats.get("coords")
                 if token_bb4 is not None and coords is not None:
@@ -896,34 +950,68 @@ class InverseFoldingDecoder(nn.Module):
                         coords_flat = coords.float().view(B, A, 3)
                         bb4_flat = torch.bmm(token_bb4_flat, coords_flat)
                         ca_all = bb4_flat.view(B, -1, 4, 3)[valid_mask][:, 1]
-                        for ent in set(ent for (ent, _) in pos_by_entity_res):
-                            ent_positions = [
-                                pos
-                                for (e, _), plist in pos_by_entity_res.items()
-                                if e == ent
-                                for pos in plist
-                            ]
-                            if len(ent_positions) >= 2:
-                                ent_positions.sort(
+
+                        positions_by_chain: dict[int, list[int]] = defaultdict(list)
+                        chain_to_entity: dict[int, int] = {}
+                        for pos in range(num_nodes):
+                            if not design_mask[pos]:
+                                continue
+                            ent = entity_tensor[pos].item()
+                            if use_sym_group and ent == 0:
+                                continue
+                            c_id = (
+                                int(asym_id_tensor[pos].item())
+                                if asym_id_tensor is not None
+                                else int(ent)
+                            )
+                            positions_by_chain[c_id].append(pos)
+                            chain_to_entity[c_id] = int(ent)
+
+                        for c_id, c_positions in positions_by_chain.items():
+                            if len(c_positions) >= 2:
+                                c_positions.sort(
                                     key=lambda p: res_idx_tensor[p].item()
                                 )
-                                k = max(1, len(ent_positions) // 4)
-                                v = ca_all[ent_positions[-k:]].mean(
+                                k = max(1, len(c_positions) // 4)
+                                v = ca_all[c_positions[-k:]].mean(
                                     dim=0
-                                ) - ca_all[ent_positions[:k]].mean(dim=0)
+                                ) - ca_all[c_positions[:k]].mean(dim=0)
                                 norm = v.norm()
                                 if norm > 1e-4:
-                                    entity_strand_dir[ent] = v / norm
+                                    com = ca_all[c_positions].mean(dim=0)
+                                    chain_strand_dir[c_id] = (
+                                        chain_to_entity[c_id],
+                                        v / norm,
+                                        com,
+                                    )
                     except Exception:
                         pass
 
                 def are_entities_antiparallel(e_a: int, e_b: int) -> bool:
-                    if e_a in entity_strand_dir and e_b in entity_strand_dir:
-                        dot = torch.dot(
-                            entity_strand_dir[e_a], entity_strand_dir[e_b]
-                        ).item()
-                        if abs(dot) > 1e-3:
-                            return dot < 0.0
+                    chains_a = [
+                        (v, com)
+                        for ent_c, v, com in chain_strand_dir.values()
+                        if ent_c == e_a
+                    ]
+                    chains_b = [
+                        (v, com)
+                        for ent_c, v, com in chain_strand_dir.values()
+                        if ent_c == e_b
+                    ]
+                    if chains_a and chains_b:
+                        # Compare each chain in A to its spatially nearest chain in B
+                        dots = []
+                        for v_a, com_a in chains_a:
+                            best_v_b = min(
+                                chains_b,
+                                key=lambda item: float(
+                                    torch.linalg.norm(com_a - item[1]).item()
+                                ),
+                            )[0]
+                            dots.append(float(torch.dot(v_a, best_v_b).item()))
+                        mean_dot = sum(dots) / len(dots)
+                        if abs(mean_dot) > 1e-3:
+                            return mean_dot < 0.0
                     if is_anti_global is not None:
                         return is_anti_global
                     return False
@@ -950,37 +1038,56 @@ class InverseFoldingDecoder(nn.Module):
                                 continue
 
                         other_positions = []
+                        seen_partner_positions = set()
                         for other_ent in entities:
                             if other_ent == ent:
                                 continue
+                            target_partner_res = []
                             if are_entities_antiparallel(ent, other_ent):
-                                partner_r = int(
+                                antiparallel_r = int(
                                     round(
                                         mid_res[other_ent]
                                         - (r_idx - mid_res[ent])
                                     )
                                 )
-                            else:
-                                partner_r = int(
+                                target_partner_res.append(antiparallel_r)
+                                # Also penalize the parallel same-index position so a
+                                # non-palindromic strand cannot copy its partner verbatim.
+                                parallel_r = int(
                                     round(
                                         mid_res[other_ent]
                                         + (r_idx - mid_res[ent])
                                     )
                                 )
+                                if parallel_r != antiparallel_r:
+                                    target_partner_res.append(parallel_r)
+                            else:
+                                target_partner_res.append(
+                                    int(
+                                        round(
+                                            mid_res[other_ent]
+                                            + (r_idx - mid_res[ent])
+                                        )
+                                    )
+                                )
 
-                            partner_candidates = pos_by_entity_res.get(
-                                (other_ent, partner_r), []
-                            )
-                            if (
-                                self.anti_correlation_surface_only
-                                and is_outward is not None
-                            ):
-                                partner_candidates = [
-                                    p
-                                    for p in partner_candidates
-                                    if is_outward[p].item()
-                                ]
-                            other_positions.extend(partner_candidates)
+                            for partner_r in target_partner_res:
+                                partner_candidates = pos_by_entity_res.get(
+                                    (other_ent, partner_r), []
+                                )
+                                if (
+                                    self.anti_correlation_surface_only
+                                    and is_outward is not None
+                                ):
+                                    partner_candidates = [
+                                        p
+                                        for p in partner_candidates
+                                        if is_outward[p].item()
+                                    ]
+                                for p in partner_candidates:
+                                    if p not in seen_partner_positions:
+                                        seen_partner_positions.add(p)
+                                        other_positions.append(p)
 
                         partner_positions_map[pos] = other_positions
 
@@ -1033,6 +1140,17 @@ class InverseFoldingDecoder(nn.Module):
             # Average logits across symmetric positions
             aggregated_logits = aggregated_logits / len(positions)
 
+            # Combine per-residue masks across all symmetric positions:
+            # hard blocks (-inf) propagate as union, soft logit biases are averaged.
+            group_masks = per_residue_mask[positions]
+            hard_block_union = (group_masks <= -self.inf * 0.5).any(dim=0, keepdim=True)
+            combined_mask = group_masks.mean(dim=0, keepdim=True)
+            combined_mask = torch.where(
+                hard_block_union,
+                torch.full_like(combined_mask, -self.inf),
+                combined_mask,
+            )
+
             # Sample from aggregated logits
             pred_canonical = (
                 aggregated_logits[
@@ -1040,7 +1158,7 @@ class InverseFoldingDecoder(nn.Module):
                     const.canonicals_offset : len(const.canonical_tokens)
                     + const.canonicals_offset,
                 ]
-                + per_residue_mask[i : i + 1]  # Position-specific mask
+                + combined_mask
             )
 
             # Windowed repetition penalty: penalize consecutive identical residues (|r - r'| == 1)

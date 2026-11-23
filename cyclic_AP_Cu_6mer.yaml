@@ -5,7 +5,7 @@ antiparallel_prob: 1.0
 num_designs: 20
 seqs_per_backbone: 5
 spacing_noise: 1
-inverse_temp: 2
+inverse_temp: 0.15
 ligand_counter_screen: true
 target_max_rmsd: 5.0
 min_ligand_distance: 3.5
@@ -20,6 +20,6 @@ asym_unit:
     constraint: z_axis
     count: 2                    # 1 central ligand (or 2 for opposite heights +/- z)
     #axial_z: 0.0                # Center of the pore (or e.g. 3.5 for +/- 3.5 A)
-    distribution: random_even  
-    z_range: 12.0              # Optional: axial interval [-6.0, 6.0] A
-    min_distance: 3.5           # Minimum clearance in Angstroms
+    distribution: random_even
+    z_range: [-6.0, 6.0]       # Axial interval [-6.0, 6.0] A
+    min_distance: 3.5          # Minimum clearance in Angstroms

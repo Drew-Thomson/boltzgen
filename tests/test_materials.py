@@ -84,29 +84,18 @@ def test_existing_linear_and_helical_lattices(
     torch.testing.assert_close(centers, torch.tensor(expected, dtype=torch.float64))
 
 
-def test_generate_ideal_lattice_cage_tetrahedral_shape_and_orbit() -> None:
-    centers, rotations = generate_ideal_lattice(
-        "cage_tetrahedral", 12, 1, {"target_cage_radius": 20.0}, torch.device("cpu")
-    )
-    assert centers.shape == (TETRAHEDRAL_COPY_COUNT, 3)
-    assert rotations.shape == (TETRAHEDRAL_COPY_COUNT, 3, 3)
-    norms = torch.linalg.vector_norm(centers, dim=1)
-    torch.testing.assert_close(norms, torch.full((TETRAHEDRAL_COPY_COUNT,), 20.0))
-    matrix = torch.tensor(TETRAHEDRAL_ROTATIONS[3], dtype=centers.dtype)
-    transformed = torch.einsum("ij,nj->ni", matrix, centers)
-    expected_distances = torch.cdist(centers, centers).sort(dim=1)[0]
-    transformed_distances = torch.cdist(transformed, transformed).sort(dim=1)[0]
-    torch.testing.assert_close(transformed_distances, expected_distances)
+def test_generate_ideal_lattice_cage_tetrahedral_shelved() -> None:
+    with pytest.raises(ValueError, match="shelved/disabled"):
+        generate_ideal_lattice(
+            "cage_tetrahedral", 12, 1, {"target_cage_radius": 20.0}, torch.device("cpu")
+        )
 
 
-def test_generate_ideal_lattice_cage_octahedral_shape() -> None:
-    centers, rotations = generate_ideal_lattice(
-        "cage_octahedral", 24, 1, {"target_cage_radius": 35.0}, torch.device("cpu")
-    )
-    assert centers.shape == (OCTAHEDRAL_COPY_COUNT, 3)
-    assert rotations.shape == (OCTAHEDRAL_COPY_COUNT, 3, 3)
-    norms = torch.linalg.vector_norm(centers, dim=1)
-    torch.testing.assert_close(norms, torch.full((OCTAHEDRAL_COPY_COUNT,), 35.0))
+def test_generate_ideal_lattice_cage_octahedral_shelved() -> None:
+    with pytest.raises(ValueError, match="shelved/disabled"):
+        generate_ideal_lattice(
+            "cage_octahedral", 24, 1, {"target_cage_radius": 35.0}, torch.device("cpu")
+        )
 
 
 def test_generate_ideal_lattice_bilayer_sheet_matches_grid() -> None:
@@ -362,7 +351,7 @@ def test_generate_ideal_lattice_multi_helical_requires_divisible_copy_count() ->
 
 
 def test_generate_ideal_lattice_requires_polyhedral_copy_count() -> None:
-    with pytest.raises(ValueError, match="requires 12 copies"):
+    with pytest.raises(ValueError, match="shelved/disabled"):
         generate_ideal_lattice("cage_tetrahedral", 11, 1, {}, torch.device("cpu"))
 
 

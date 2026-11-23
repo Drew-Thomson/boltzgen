@@ -184,6 +184,7 @@ class Filter(Task):
         self.ligand_counter_screen = ligand_counter_screen
         self.drop_template_rmsd_filters = drop_template_rmsd_filters
         self.filter_cysteine = filter_cysteine
+        self.filter_biased = filter_biased
         self.from_inverse_folded = from_inverse_folded
         self.filter_bindingsite = filter_bindingsite
         self.budget = budget
@@ -195,6 +196,7 @@ class Filter(Task):
         self.peptide_type = peptide_type
         self.size_buckets = size_buckets
         self.refolding_rmsd_threshold = refolding_rmsd_threshold
+        self._explicit_global_rmsd_threshold = global_rmsd_threshold is not None
         if global_rmsd_threshold is None:
             self.global_rmsd_threshold = refolding_rmsd_threshold
         else:
@@ -281,6 +283,15 @@ class Filter(Task):
                 {
                     "feature": "bb_target_aligned<2.5",
                     "lower_is_better": False,
+                    "threshold": 1.0,
+                }
+            )
+        if filter_biased:
+            self.filters.append(
+                {
+                    "feature": "ALA_fraction",
+                    "lower_is_better": True,
+                    "threshold": 0.3,
                 }
             )
         if self.drop_template_rmsd_filters is True or (
@@ -388,22 +399,14 @@ class Filter(Task):
             if feat in df.columns and df[feat].notna().any() and feat not in present:
                 self.filters.append(flt)
 
-        lower_better = {
-            "sym_chain_rmsd",
-            "sym_ligand_rmsd",
-            "ligand_coord_bond_dev",
-            "ligand_coord_geom_dev",
-        }
+        # Sanitize +/-inf to NaN only; keep NaN intact so missing/broken designs FAIL
+        # hard filters in filter_df() instead of inheriting passing finite values.
         for col in set(self.metrics) | {f["feature"] for f in self.filters}:
             if col in df.columns and (
                 col.startswith(("neg_sym", "neg_ligand", "sym_", "ligand_"))
                 or col == "ss_accuracy_refolded"
             ):
                 df[col] = df[col].replace([np.inf, -np.inf], np.nan)
-                finite = df[col].dropna()
-                if len(finite):
-                    worst = float(finite.max() if col in lower_better else finite.min())
-                    df[col] = df[col].fillna(worst)
         return df
 
     def load_dataframe(self):
@@ -413,7 +416,7 @@ class Filter(Task):
                 f"No file starting with 'aggregate_metrics_' found in {self.design_dir}"
             )
             raise FileNotFoundError(msg)
-        df_in = pd.read_csv(csv_files[0])
+        df_in = pd.concat([pd.read_csv(p) for p in csv_files], ignore_index=True)
 
         self.df_in = df_in.copy()
         df = df_in.copy()
@@ -429,35 +432,27 @@ class Filter(Task):
             df["neg_lattice_rmsd_refolded"].fillna(0) != 0
         ).any()
 
+        def _relax_default_global_rmsd() -> None:
+            if not getattr(self, "_explicit_global_rmsd_threshold", False):
+                self.global_rmsd_threshold = 15.0
+                for filter_dict in self.filters:
+                    if filter_dict.get("feature") == "global_rmsd":
+                        filter_dict["threshold"] = self.global_rmsd_threshold
+
         # Double-tape supercoiling-invariant local RMSD
         if (
             "local_double_tape_rmsd" in df
             and df["local_double_tape_rmsd"].notna().any()
         ):
             df["local_rmsd"] = df["local_double_tape_rmsd"]
-            self.global_rmsd_threshold = 15.0
-            for filter_dict in self.filters:
-                if filter_dict.get("feature") == "global_rmsd":
-                    filter_dict["threshold"] = self.global_rmsd_threshold
+            _relax_default_global_rmsd()
         # Multi-chain / two-chain material case: lattice alternating RMSD
         elif "lattice_rmsd_refolded" in df and df["lattice_rmsd_refolded"].notna().any():
             df["local_rmsd"] = df["lattice_rmsd_refolded"]
-            self.global_rmsd_threshold = 15.0
-            for filter_dict in self.filters:
-                if filter_dict.get("feature") == "global_rmsd":
-                    filter_dict["threshold"] = self.global_rmsd_threshold
+            _relax_default_global_rmsd()
         elif lattice_informative:
             df["local_rmsd"] = -df["neg_lattice_rmsd_refolded"]
-            self.global_rmsd_threshold = 15.0
-            for filter_dict in self.filters:
-                if filter_dict.get("feature") == "global_rmsd":
-                    filter_dict["threshold"] = self.global_rmsd_threshold
-        elif "neg_lattice_rmsd_refolded" in df:
-            df["local_rmsd"] = -df["neg_lattice_rmsd_refolded"]
-            self.global_rmsd_threshold = 15.0
-            for filter_dict in self.filters:
-                if filter_dict.get("feature") == "global_rmsd":
-                    filter_dict["threshold"] = self.global_rmsd_threshold
+            _relax_default_global_rmsd()
         # Multi-chain per-chain local RMSD
         elif "bb_rmsd_design" in df and self.from_inverse_folded:
             df["local_rmsd"] = df["bb_rmsd_design"]
@@ -490,12 +485,7 @@ class Filter(Task):
             df["neg_min_interaction_pae"] = -df["min_interaction_pae"]
 
         self.df = df
-
         print(f"Total number of designs: {len(self.df):>5}")
-        before = len(self.df)
-        self.df = self.df.drop_duplicates(subset="designed_sequence", keep="first")
-        msg = f"Duplicates found: {before - len(self.df)}. Removing duplicates. {len(self.df)} designs remain.\n"
-        print(msg)
 
     def filter_df(self):
         filter_cols = []
@@ -513,7 +503,10 @@ class Filter(Task):
 
             filter_col = f"pass_{feat}_filter"
             filter_cols.append(filter_col)
-            if low:
+            if feat == "min_ligand_distance":
+                # Single-ligand assemblies have NaN pairwise ligand distance and should pass
+                self.df[filter_col] = self.df[feat].isna() | (self.df[feat] >= threshold)
+            elif low:
                 self.df[filter_col] = self.df[feat] <= threshold
             else:
                 self.df[filter_col] = self.df[feat] >= threshold
@@ -533,7 +526,11 @@ class Filter(Task):
         print("\n")
 
     def absolute_metrics(self):
-        norm_path = Path("src/boltzgen/resources/metrics_normalization.json")
+        norm_path = (
+            Path(__file__).resolve().parents[2]
+            / "resources"
+            / "metrics_normalization.json"
+        )
         if not norm_path.exists():
             return
 
@@ -581,36 +578,42 @@ class Filter(Task):
         for flt in self.filters:
             feat = flt["feature"]
             filter_col = f"pass_{feat}_filter"
-            
+
             if filter_col not in self.df.columns:
                 continue
 
             mask_fail = self.df[filter_col] == False
-            self.df.loc[mask_fail, "absolute_score"] *= 0.1
-
+            self.df.loc[mask_fail, "absolute_score"] -= 1.0
 
     def sort_df(self):
         rank_df = pd.DataFrame(index=self.df.index)
 
-        # 1. For each row, compute its rank according to each metric
-        # Scale the ranks by importance (divide by inverse_importance)
-        # Use the feature that we are ranking by AND the number of filters that a design passes. Thus the things that do not pass ass many filters (e.g. they dont pass all the filters) are at the end
+        # 1. For each row, compute its rank according to each metric.
+        # Replace NaN with -inf strictly inside the ranking key so NaN rows always
+        # sort to the bottom without corrupting tuple comparisons.
+        num_passed = self.df["num_filters_passed"].fillna(0).astype(int)
         for col, inverse_importance in self.metrics.items():
             if inverse_importance is None or col not in self.df.columns:
                 continue
 
+            vals = pd.to_numeric(self.df[col], errors="coerce").replace(
+                [np.inf, -np.inf], np.nan
+            ).fillna(float("-inf"))
+            keys = pd.Series(
+                list(zip(num_passed.tolist(), vals.tolist())),
+                index=self.df.index,
+            )
             rank_df[f"rank_{col}"] = (
-                self.df[["num_filters_passed", col]]
-                .apply(tuple, axis=1)
-                .rank(method="min", ascending=False)
-                .astype(int)
+                keys.rank(method="min", ascending=False).astype(int)
                 / inverse_importance
             )
         self.df = pd.concat([self.df, rank_df], axis=1)
 
         # 2. For each row, find the max (worst) rank across the metrics.
-        # This single value determines its final rank group.
-        self.df["max_rank"] = rank_df.max(axis=1)
+        if rank_df.shape[1] > 0:
+            self.df["max_rank"] = rank_df.max(axis=1)
+        else:
+            self.df["max_rank"] = (-num_passed).astype(float)
 
         # Penalize designs that fail critical topology-defining heteromeric alternation filters
         critical_fail_mask = pd.Series(False, index=self.df.index)
@@ -623,10 +626,19 @@ class Filter(Task):
         if critical_fail_mask.any():
             self.df.loc[critical_fail_mask, "max_rank"] += 100000.0
 
-        # 3. Sort by this new max_rank and then create the final dense rank,
-        # which is equivalent to the original 'rank_counter'.
+        # 3. Sort by this new max_rank, deduplicate sequences keeping the best-ranked
+        # fold, and assign final dense secondary_rank.
         self.df = self.df.sort_values("max_rank")
-        self.df["secondary_rank"] = self.df["max_rank"].rank(method="dense").astype(int)
+        if "designed_sequence" in self.df.columns:
+            before = len(self.df)
+            self.df = self.df.drop_duplicates(subset="designed_sequence", keep="first")
+            if before != len(self.df):
+                print(
+                    f"Duplicates found: {before - len(self.df)}. Removing duplicates (keeping best-ranked). {len(self.df)} designs remain.\n"
+                )
+        self.df["secondary_rank"] = (
+            self.df["max_rank"].rank(method="dense").fillna(len(self.df)).astype(int)
+        )
 
         # sort by ranking and resolve ties via complex_plddt / design_ptm / design_iptm
         tie_col = (
