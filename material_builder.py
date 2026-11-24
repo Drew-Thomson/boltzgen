@@ -171,7 +171,7 @@ def main():
     parser.add_argument("--ligand_inclusion_bias", type=float, default=0.0, help="Strength of the inward centripetal force for ligands during diffusion (default: 0.0)")
     parser.add_argument("--ligand_anchor_residue", type=str, default=None, help="Optional residue index (1-indexed) or 'random' to anchor non-axial ligands to parent protein (default: None = disabled/rigid carry)")
     parser.add_argument("--ligand_anchor_distance", type=float, default=4.0, help="Distance in Angstroms from C_alpha for anchored ligand (default: 4.0)")
-    parser.add_argument("--ligand_anchor_direction", type=str, choices=["outward", "radial", "sidechain", "auto"], default="outward", help="Direction to project anchored ligand from C_alpha (default: outward)")
+    parser.add_argument("--ligand_anchor_direction", type=str, choices=["outward", "radial", "sidechain", "auto", "inward", "interface"], default="outward", help="Direction to project anchored ligand from C_alpha (default: outward)")
     parser.add_argument("--run", action="store_true", help="Execute BoltzGen after generating YAML")
     parser.add_argument(
         "--heteromer_counter_screen",
@@ -887,7 +887,19 @@ def main():
                 if "max_rank" in df.columns:
                     df = df.sort_values("max_rank")
                 print("\n--- TOP RESULTS BY COMPOSITE METRICS ---")
-                cols_to_print = ["id", "max_rank", "complex_plddt", "ligand_iptm", "neg_lattice_rmsd_refolded", "design_to_target_iptm"]
+                cols_to_print = [
+                    "id",
+                    "max_rank",
+                    "holo_apo_rmsd",
+                    "complex_plddt",
+                    "ligand_iptm",
+                    "ligand_min_coord_number",
+                    "ligand_min_coord_n_chains",
+                    "sym_d3_broken_polar_ligands",
+                    "sym_suggest_double_ligands",
+                    "neg_lattice_rmsd_refolded",
+                    "design_to_target_iptm",
+                ]
                 available_cols = [c for c in cols_to_print if c in df.columns]
                 print(df[available_cols].head(10).to_string(index=False))
             elif output_cifs:

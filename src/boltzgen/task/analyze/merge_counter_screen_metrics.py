@@ -113,17 +113,25 @@ def _load_prediction_metrics(path: Path) -> dict[str, float]:
                     break
 
         def _sample_vec(candidates: tuple[str, ...]) -> np.ndarray | None:
+            fallback: np.ndarray | None = None
             for key in candidates:
                 if key not in files:
                     continue
                 vals = np.asarray(output[key], dtype=float)
                 if vals.ndim == 0:
-                    return np.full(n_samples, float(vals))
-                if vals.shape[0] == n_samples:
+                    vec = np.full(n_samples, float(vals))
+                elif vals.shape[0] == n_samples:
                     if vals.ndim > 1:
                         vals = vals.reshape(n_samples, -1).mean(axis=1)
-                    return vals
-            return None
+                    vec = vals
+                else:
+                    continue
+                finite = vec[np.isfinite(vec)]
+                if finite.size > 0 and float(np.max(np.abs(finite))) > 1e-6:
+                    return vec
+                if fallback is None:
+                    fallback = vec
+            return fallback
 
         iface = _sample_vec(("design_to_target_iptm", "design_iptm", "protein_iptm", "iptm"))
         fold = _sample_vec(("design_ptm", "ptm", "target_ptm"))

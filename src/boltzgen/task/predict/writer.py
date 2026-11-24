@@ -80,17 +80,25 @@ class FoldingWriter(BasePredictionWriter):
         n_samples = len(pred_dict["coords"])
 
         def _sample_metric(candidates):
+            fallback = None
             for key in candidates:
                 if key not in pred_dict:
                     continue
-                vals = np.asarray(pred_dict[key])
+                vals = np.asarray(pred_dict[key], dtype=float)
                 if vals.ndim == 0:
-                    return np.full(n_samples, float(vals))
-                if vals.shape[0] == n_samples:
+                    vec = np.full(n_samples, float(vals))
+                elif vals.shape[0] == n_samples:
                     if vals.ndim > 1:
                         vals = vals.reshape(n_samples, -1).mean(axis=1)
-                    return vals.astype(float)
-            return None
+                    vec = vals
+                else:
+                    continue
+                finite = vec[np.isfinite(vec)]
+                if finite.size > 0 and float(np.max(np.abs(finite))) > 1e-6:
+                    return vec
+                if fallback is None:
+                    fallback = vec
+            return fallback
 
         interface_conf = _sample_metric(
             ("design_to_target_iptm", "design_iptm", "protein_iptm", "iptm")

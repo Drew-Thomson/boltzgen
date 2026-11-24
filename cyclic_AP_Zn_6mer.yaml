@@ -2,11 +2,16 @@ copies: 6
 topology: cyclic
 target_radius: 9.0
 antiparallel_prob: 1.0
-num_designs: 20
+num_designs: 50
 seqs_per_backbone: 5
-spacing_noise: 1
+spacing_noise: 1.0
 avoid_aa: 'M'
 inverse_temp: 0.15
+backbone_noise: 0.1
+repetition_penalty: 0.5
+ligand_counter_screen: true
+max_target_candidates: 30
+min_ligand_distance: 3.5
 asym_unit:
   - type: protein
     name: helical_peptide
@@ -16,3 +21,6 @@ asym_unit:
     ccd: ZN
     ligands_per_peptide: 0.5
     attach_to: helical_peptide
+    anchor_residue: random
+    anchor_distance: 3.5
+    anchor_direction: interface

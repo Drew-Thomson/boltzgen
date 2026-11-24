@@ -1533,8 +1533,13 @@ class BinderDesignPipeline:
                 )
             )
 
-        # Folding (preserve full fold.yaml keys_dict_out so iptm/ptm/design_* remain available)
+        # Folding (preserve full fold.yaml keys_dict_out so iptm/ptm/design_* remain available;
+        # disable target_templates for de novo material designs to avoid leaking designed ligand
+        # pairwise distances into Boltz-2's TemplateModule).
         input_dir = output_dir
+        folding_material_args = (
+            ["data.target_templates=false"] if material_layout_path is not None else []
+        )
         self.steps.append(
             PipelineStep(
                 name="folding",
@@ -1550,6 +1555,7 @@ class BinderDesignPipeline:
                     f"checkpoint={get_artifact_path(args, args.folding_checkpoint)}",
                     f"data.cfg.moldir={moldir}",
                 ]
+                + folding_material_args
                 + config_args_by_step["folding"],
             )
         )
@@ -1665,6 +1671,7 @@ class BinderDesignPipeline:
                     args=[
                         f"output={counter_screen_dir}",
                         f"data.design_dir={counter_screen_dir}",
+                        "data.target_templates=false",
                         f"trainer.devices={devices}",
                         f"data.cfg.num_workers={args.num_workers}",
                         f"data.skip_existing={args.reuse}",
@@ -1673,7 +1680,7 @@ class BinderDesignPipeline:
                         f"override.use_kernels={use_kernels}",
                         f"checkpoint={get_artifact_path(args, args.folding_checkpoint)}",
                         f"data.cfg.moldir={moldir}",
-                        "keys_dict_out=[complex_plddt,protein_iptm,design_iptm,min_interaction_pae]",
+                        "keys_dict_out=[complex_plddt,protein_iptm,design_iptm,iptm,ptm,ligand_iptm,min_interaction_pae]",
                     ],
                 )
             )
@@ -1738,6 +1745,7 @@ class BinderDesignPipeline:
                     args=[
                         f"output={counter_screen_dir}",
                         f"data.design_dir={counter_screen_dir}",
+                        "data.target_templates=false",
                         f"trainer.devices={devices}",
                         f"data.cfg.num_workers={args.num_workers}",
                         f"data.skip_existing={args.reuse}",
@@ -1746,7 +1754,7 @@ class BinderDesignPipeline:
                         f"override.use_kernels={use_kernels}",
                         f"checkpoint={get_artifact_path(args, args.folding_checkpoint)}",
                         f"data.cfg.moldir={moldir}",
-                        "keys_dict_out=[complex_plddt,protein_iptm,design_iptm,min_interaction_pae]",
+                        "keys_dict_out=[complex_plddt,protein_iptm,design_iptm,iptm,ptm,ligand_iptm,min_interaction_pae]",
                     ],
                 )
             )
@@ -1788,6 +1796,7 @@ class BinderDesignPipeline:
                     args=[
                         f"output={counter_screen_dir}",
                         f"data.design_dir={counter_screen_dir}",
+                        "data.target_templates=false",
                         f"trainer.devices={devices}",
                         f"data.cfg.num_workers={args.num_workers}",
                         f"data.skip_existing={args.reuse}",
@@ -1796,7 +1805,7 @@ class BinderDesignPipeline:
                         f"override.use_kernels={use_kernels}",
                         f"checkpoint={get_artifact_path(args, args.folding_checkpoint)}",
                         f"data.cfg.moldir={moldir}",
-                        "keys_dict_out=[complex_plddt,protein_iptm,design_iptm,min_interaction_pae]",
+                        "keys_dict_out=[complex_plddt,protein_iptm,design_iptm,iptm,ptm,ligand_iptm,min_interaction_pae]",
                     ],
                 )
             )

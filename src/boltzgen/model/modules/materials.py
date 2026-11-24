@@ -826,6 +826,7 @@ def compute_anchored_ligand_position(
     r_kabsch: torch.Tensor | None = None,
     sidechain_vec: torch.Tensor | None = None,
     direction_mode: str = "outward",
+    neighbor_ca_coords: torch.Tensor | None = None,
 ) -> torch.Tensor:
     r"""Compute target position for a ligand anchored to a specific residue C_alpha.
 
@@ -849,7 +850,11 @@ def compute_anchored_ligand_position(
     sidechain_vec : torch.Tensor | None
         Optional unnormalized vector pointing in the C_alpha -> C_beta direction.
     direction_mode : str
-        Direction mode: ``'outward'`` (or ``'radial'``), ``'sidechain'``, or ``'auto'``.
+        Direction mode: ``'outward'`` (or ``'radial'``), ``'sidechain'``, ``'auto'``,
+        ``'inward'``, or ``'interface'``.
+    neighbor_ca_coords : torch.Tensor | None
+        Optional C_alpha coordinate of shape ``(3,)`` on an adjacent chain for
+        ``direction_mode='interface'`` inter-helical placement.
 
     Returns
     -------
@@ -857,25 +862,30 @@ def compute_anchored_ligand_position(
         Target ligand position of shape ``(3,)``.
     """
     disp = ca_coords - assembly_com
+    v_axis = (
+        r_kabsch[:, 2]
+        if (r_kabsch is not None and r_kabsch.shape == (3, 3))
+        else torch.tensor([0.0, 0.0, 1.0], device=ca_coords.device, dtype=ca_coords.dtype)
+    )
+    radial_dist = 0.0
     if topology in ("cage_tetrahedral", "cage_octahedral", "floating"):
         norm_disp = torch.norm(disp)
+        radial_dist = float(norm_disp.item())
         u_radial = (
             disp / (norm_disp + 1e-6)
             if norm_disp > 1e-4
             else torch.tensor([1.0, 0.0, 0.0], device=ca_coords.device, dtype=ca_coords.dtype)
         )
     else:
-        if r_kabsch is not None and r_kabsch.shape == (3, 3):
-            v_axis = r_kabsch[:, 2]
-        else:
-            v_axis = torch.tensor([0.0, 0.0, 1.0], device=ca_coords.device, dtype=ca_coords.dtype)
         v_along_axis = torch.dot(disp, v_axis) * v_axis
         v_perp = disp - v_along_axis
         norm_perp = torch.norm(v_perp)
         if norm_perp > 1e-4:
+            radial_dist = float(norm_perp.item())
             u_radial = v_perp / norm_perp
         else:
             norm_disp = torch.norm(disp)
+            radial_dist = float(norm_disp.item())
             u_radial = (
                 disp / (norm_disp + 1e-6)
                 if norm_disp > 1e-4
@@ -883,6 +893,27 @@ def compute_anchored_ligand_position(
             )
 
     mode = str(direction_mode).strip().lower()
+    eff_dist = float(anchor_distance)
+
+    if mode == "interface":
+        if neighbor_ca_coords is not None:
+            v_nbr = neighbor_ca_coords - ca_coords
+            d_nbr = torch.norm(v_nbr)
+            if d_nbr > 1e-4:
+                u_dir = v_nbr / d_nbr
+                eff_dist = min(eff_dist, 0.5 * float(d_nbr.item()))
+                return ca_coords + eff_dist * u_dir
+        v_tan = torch.linalg.cross(v_axis, u_radial)
+        tan_norm = torch.norm(v_tan)
+        u_dir = v_tan / tan_norm if tan_norm > 1e-4 else u_radial
+        return ca_coords + eff_dist * u_dir
+
+    if mode == "inward":
+        u_dir = -u_radial
+        if radial_dist > 1.5:
+            eff_dist = min(eff_dist, max(0.0, radial_dist - 1.5))
+        return ca_coords + eff_dist * u_dir
+
     if sidechain_vec is not None and torch.norm(sidechain_vec) > 1e-4:
         u_sc = sidechain_vec / torch.norm(sidechain_vec)
         if mode == "sidechain":
@@ -904,7 +935,7 @@ def compute_anchored_ligand_position(
     else:
         u_dir = u_radial
 
-    return ca_coords + float(anchor_distance) * u_dir
+    return ca_coords + eff_dist * u_dir
 
 
 def resolve_protein_metal_clashes(
@@ -1159,6 +1190,148 @@ def enforce_minimum_axial_separation(
 
     perp = pos - torch.outer(torch.matmul(pos, u_axis), u_axis)
     return perp + torch.outer(z_coords, u_axis)
+
+
+def enforce_minimum_ligand_separation(
+    positions: torch.Tensor,
+    min_distance: float = 3.5,
+    max_iterations: int = 8,
+) -> torch.Tensor:
+    r"""Enforce minimum 3D pairwise separation between distinct ligand centers.
+
+    For any pair $(i, j)$ with $d_{ij} = \|\mathbf{x}_j - \mathbf{x}_i\|_2 < d_{\min}$,
+    applies symmetric repulsion:
+    $$\mathbf{x}_i \leftarrow \mathbf{x}_i - \frac{d_{\min} - d_{ij}}{2}\hat{\mathbf{u}}_{ij},\quad
+    \mathbf{x}_j \leftarrow \mathbf{x}_j + \frac{d_{\min} - d_{ij}}{2}\hat{\mathbf{u}}_{ij}$$
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Ligand center positions of shape ``(K, 3)``.
+    min_distance : float, default=3.5
+        Minimum allowed pairwise separation in Angstroms.
+    max_iterations : int, default=8
+        Maximum relaxation sweeps.
+
+    Returns
+    -------
+    torch.Tensor
+        Adjusted ligand centers of shape ``(K, 3)``.
+    """
+    k = positions.shape[0]
+    if k <= 1 or min_distance <= 0.0:
+        return positions
+    pos = positions.clone()
+    fallback = torch.tensor([1.0, 0.0, 0.0], device=pos.device, dtype=pos.dtype)
+    for _ in range(max_iterations):
+        violated = False
+        for i in range(k):
+            for j in range(i + 1, k):
+                diff = pos[j] - pos[i]
+                dist = float(torch.linalg.norm(diff).item())
+                if dist < min_distance:
+                    violated = True
+                    u = diff / dist if dist > 1e-6 else fallback
+                    shift = 0.5 * (min_distance - dist) * u
+                    pos[i] = pos[i] - shift
+                    pos[j] = pos[j] + shift
+        if not violated:
+            break
+    return pos
+
+
+def symmetrize_cyclic_ligand_positions(
+    ligand_coords_list: list[torch.Tensor],
+    parent_indices: list[int],
+    ideal_coms: torch.Tensor,
+    ideal_rotations: torch.Tensor,
+    p_mean: torch.Tensor,
+    q_mean: torch.Tensor,
+    r_kabsch: torch.Tensor,
+    *,
+    is_antiparallel: bool = False,
+    asym_unit_size: int = 1,
+) -> list[torch.Tensor]:
+    r"""Project per-peptide cyclic ligands onto exact symmetry-equivalent positions.
+
+    Folds each ligand COM $\bar{\mathbf{x}}_j$ from the global frame into the shared
+    parent-chain consensus frame (accounting for antiparallel $180^\circ$ $x$-flips):
+    $$\mathbf{c}_{\text{fold}, j} = \left((\bar{\mathbf{x}}_j - \mathbf{P}_{\text{mean}})R_{\text{kabsch}}
+    + \mathbf{Q}_{\text{mean}} - \mathbf{c}^{\text{ideal}}_{p_j}\right) R^{\text{ideal}}_{p_j} F_{p_j}$$
+    averages $\bar{\mathbf{c}}_{\text{fold}} = \frac{1}{m}\sum_j \mathbf{c}_{\text{fold}, j}$,
+    and unfolds back to each parent chain $p_j$, rigidly translating each ligand to its
+    symmetrized COM.
+
+    Parameters
+    ----------
+    ligand_coords_list : list[torch.Tensor]
+        List of $m$ ligand coordinate tensors in global frame, each of shape ``(A_j, 3)``.
+    parent_indices : list[int]
+        Parent chain/placement indices of length $m$ indexing into ``ideal_coms`` and
+        ``ideal_rotations``.
+    ideal_coms : torch.Tensor
+        Ideal ring COMs of shape ``(N_chains, 3)``.
+    ideal_rotations : torch.Tensor
+        Ideal ring copy rotations of shape ``(N_chains, 3, 3)``.
+    p_mean : torch.Tensor
+        Current assembly protein COM of shape ``(3,)``.
+    q_mean : torch.Tensor
+        Ideal lattice COM of shape ``(3,)``.
+    r_kabsch : torch.Tensor
+        Kabsch rotation mapping current frame to ideal frame, shape ``(3, 3)``.
+    is_antiparallel : bool, default=False
+        Whether alternating chains carry a $180^\circ$ flip about local $x$.
+    asym_unit_size : int, default=1
+        Number of chains per asymmetric unit for antiparallel parity.
+
+    Returns
+    -------
+    list[torch.Tensor]
+        Symmetrized ligand coordinate tensors matching ``ligand_coords_list`` shapes.
+    """
+    if len(ligand_coords_list) <= 1:
+        return [coords.clone() for coords in ligand_coords_list]
+
+    device = ligand_coords_list[0].device
+    dtype = ligand_coords_list[0].dtype
+    flip_180_x = torch.diag(
+        torch.tensor([1.0, -1.0, -1.0], device=device, dtype=dtype)
+    )
+
+    def _is_flipped(p_idx: int) -> bool:
+        if not is_antiparallel:
+            return False
+        return (p_idx // asym_unit_size) % 2 == 1 if asym_unit_size > 1 else (p_idx % 2 == 1)
+
+    folded_coms: list[torch.Tensor] = []
+    for coords, p_idx in zip(ligand_coords_list, parent_indices):
+        lig_com = coords.mean(dim=0, keepdim=True)
+        com_local = torch.matmul(lig_com - p_mean, r_kabsch) + q_mean
+        com_folded = fold_to_consensus_frame(
+            com_local.unsqueeze(0),
+            ideal_coms[p_idx : p_idx + 1],
+            ideal_rotations[p_idx : p_idx + 1],
+        )[0]
+        if _is_flipped(p_idx):
+            com_folded = torch.matmul(com_folded, flip_180_x)
+        folded_coms.append(com_folded.squeeze(0))
+
+    consensus_com = torch.stack(folded_coms, dim=0).mean(dim=0, keepdim=True)
+
+    sym_coords_list: list[torch.Tensor] = []
+    for coords, p_idx in zip(ligand_coords_list, parent_indices):
+        c_unfold = consensus_com
+        if _is_flipped(p_idx):
+            c_unfold = torch.matmul(c_unfold, flip_180_x)
+        com_unfolded = unfold_from_consensus_frame(
+            c_unfold.unsqueeze(0),
+            ideal_coms[p_idx : p_idx + 1],
+            ideal_rotations[p_idx : p_idx + 1],
+        )[0]
+        target_com = torch.matmul(com_unfolded - q_mean, r_kabsch.T) + p_mean
+        curr_com = coords.mean(dim=0, keepdim=True)
+        sym_coords_list.append(coords + (target_com - curr_com))
+    return sym_coords_list
 
 
 def compute_element_trace(

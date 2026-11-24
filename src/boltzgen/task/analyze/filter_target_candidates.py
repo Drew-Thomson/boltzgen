@@ -129,6 +129,8 @@ class FilterTargetCandidates(Task):
         require_sym_orbit: bool = True,
         require_sym_orientation: bool = True,
         min_coord_number: Optional[float] = 2.0,
+        min_coord_n_chains: Optional[float] = None,
+        min_coord_residues: Optional[float] = None,
         max_coord_bond_dev: Optional[float] = None,
         max_coord_geom_dev: Optional[float] = None,
         rank_initial_candidates: bool = False,
@@ -146,6 +148,8 @@ class FilterTargetCandidates(Task):
         self.require_sym_orbit = require_sym_orbit
         self.require_sym_orientation = require_sym_orientation
         self.min_coord_number = min_coord_number
+        self.min_coord_n_chains = min_coord_n_chains
+        self.min_coord_residues = min_coord_residues
         self.max_coord_bond_dev = max_coord_bond_dev
         self.max_coord_geom_dev = max_coord_geom_dev
         self.rank_initial_candidates = rank_initial_candidates
@@ -226,10 +230,13 @@ class FilterTargetCandidates(Task):
             raise ValueError("Aggregate metrics CSV lacks an id column")
 
         passed = pd.Series(True, index=frame.index, dtype=bool)
+        gate_counts: dict[str, int] = {}
         effective_max_rmsd = self._effective_max_rmsd(frame)
         if effective_max_rmsd is not None:
             rmsd = target_rmsd(frame, self.topology)
-            passed &= rmsd <= effective_max_rmsd
+            m_gate = (rmsd <= effective_max_rmsd).fillna(False)
+            gate_counts[f"rmsd<={effective_max_rmsd:g}"] = int(m_gate.sum())
+            passed &= m_gate
 
         if self.min_complex_plddt is not None and float(self.min_complex_plddt) > 0.0:
             col = next(
@@ -240,26 +247,40 @@ class FilterTargetCandidates(Task):
                 raise ValueError(
                     "min_complex_plddt requested but no complex_plddt column found"
                 )
-            passed &= pd.to_numeric(frame[col], errors="coerce") >= self.min_complex_plddt
+            m_gate = (
+                pd.to_numeric(frame[col], errors="coerce") >= self.min_complex_plddt
+            ).fillna(False)
+            gate_counts[f"{col}>={self.min_complex_plddt:g}"] = int(m_gate.sum())
+            passed &= m_gate
 
         if self.min_ligand_distance is not None and "min_ligand_distance" in frame:
             dist_s = pd.to_numeric(frame["min_ligand_distance"], errors="coerce")
-            passed &= dist_s.isna() | (dist_s >= self.min_ligand_distance)
+            m_gate = dist_s.isna() | (dist_s >= self.min_ligand_distance)
+            gate_counts[f"min_ligand_distance>={self.min_ligand_distance:g}"] = int(
+                m_gate.sum()
+            )
+            passed &= m_gate
 
         if (
             self.min_ss_accuracy is not None
             and "ss_accuracy_refolded" in frame
             and frame["ss_accuracy_refolded"].notna().any()
         ):
-            passed &= (
+            m_gate = (
                 pd.to_numeric(frame["ss_accuracy_refolded"], errors="coerce")
                 >= self.min_ss_accuracy
+            ).fillna(False)
+            gate_counts[f"ss_accuracy_refolded>={self.min_ss_accuracy:g}"] = int(
+                m_gate.sum()
             )
+            passed &= m_gate
 
         for col, limit, lower_is_better in (
             ("sym_chain_rmsd", self.max_sym_chain_rmsd, True),
             ("sym_ligand_rmsd", self.max_sym_ligand_rmsd, True),
             ("ligand_min_coord_number", self.min_coord_number, False),
+            ("ligand_min_coord_n_chains", self.min_coord_n_chains, False),
+            ("ligand_min_coord_residues", self.min_coord_residues, False),
             ("ligand_coord_bond_dev", self.max_coord_bond_dev, True),
             ("ligand_coord_geom_dev", self.max_coord_geom_dev, True),
         ):
@@ -267,25 +288,41 @@ class FilterTargetCandidates(Task):
                 continue
             series = _get_metric_series(frame, col)
             if series is not None:
-                passed &= (series <= limit) if lower_is_better else (series >= limit)
+                m_gate = (
+                    (series <= limit) if lower_is_better else (series >= limit)
+                ).fillna(False)
+                op = "<=" if lower_is_better else ">="
+                gate_counts[f"{col}{op}{limit:g}"] = int(m_gate.sum())
+                passed &= m_gate
 
         if (
             self.require_sym_orbit
             and "sym_ligand_orbit_ok" in frame
             and frame["sym_ligand_orbit_ok"].notna().any()
         ):
-            passed &= pd.to_numeric(frame["sym_ligand_orbit_ok"], errors="coerce") >= 1.0
+            m_gate = (
+                pd.to_numeric(frame["sym_ligand_orbit_ok"], errors="coerce") >= 1.0
+            ).fillna(False)
+            gate_counts["sym_ligand_orbit_ok>=1"] = int(m_gate.sum())
+            passed &= m_gate
 
         if (
             self.require_sym_orientation
             and "sym_orientation_match" in frame
             and frame["sym_orientation_match"].notna().any()
         ):
-            passed &= (
+            m_gate = (
                 pd.to_numeric(frame["sym_orientation_match"], errors="coerce") >= 1.0
-            )
+            ).fillna(False)
+            gate_counts["sym_orientation_match>=1"] = int(m_gate.sum())
+            passed &= m_gate
 
         passed = passed.fillna(False)
+        if gate_counts:
+            gate_summary = ", ".join(
+                f"{k}: {v}/{len(frame)}" for k, v in gate_counts.items()
+            )
+            print(f"Per-gate pass counts: {gate_summary}")
 
         if self.rank_initial_candidates or self.max_candidates is not None:
             ranked = self._rank_candidates(frame, passed)

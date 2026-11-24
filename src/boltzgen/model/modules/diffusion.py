@@ -624,7 +624,7 @@ class AtomDiffusion(Module):
         else:
             pitch_offsets = None
 
-        if topology == "cylindrical":
+        if topology in ("cylindrical", "cyclic"):
             target_radius = float(
                 _get_mat_param("target_radius", "MAT_TARGET_RADIUS", 15.0)
             )
@@ -637,7 +637,10 @@ class AtomDiffusion(Module):
                 )
             else:
                 cylinder_radius_noise = None
+        else:
+            cylinder_radius_noise = None
 
+        if topology == "cylindrical":
             slide_noise_scale = float(
                 _get_mat_param("slide_noise", "MAT_SLIDE_NOISE", spacing_noise)
             )
@@ -672,7 +675,6 @@ class AtomDiffusion(Module):
                 cylinder_stagger_z_noise = None
                 cylinder_stagger_phi_noise = None
         else:
-            cylinder_radius_noise = None
             cylinder_slide_noise = None
             cylinder_stagger_z_noise = None
             cylinder_stagger_phi_noise = None
@@ -1091,9 +1093,10 @@ class AtomDiffusion(Module):
                                 ]
                             )
 
+                            min_r_clamp = 5.0 if topology == "cyclic" else 1.0
                             sample_radius = (
                                 max(
-                                    1.0,
+                                    min_r_clamp,
                                     target_radius
                                     + cylinder_radius_noise[batch_idx].item(),
                                 )
@@ -1825,6 +1828,7 @@ class AtomDiffusion(Module):
                                         )
 
                                 disable_anchor_tokens = ("none", "false", "off", "no", "")
+                                non_axial_items: list[dict[str, Any]] = []
                                 for ligand_asym, record, ligand_mask in ligand_layout:
                                     scope = record.get("attachment_scope", "per_peptide")
                                     if scope == "axial":
@@ -2020,6 +2024,65 @@ class AtomDiffusion(Module):
                                                         "outward",
                                                     )
                                                 )
+                                                neighbor_ca_coord = None
+                                                if (
+                                                    anchor_dir.strip().lower() == "interface"
+                                                    and N_chains >= 2
+                                                ):
+                                                    nbr_placement_idx = (
+                                                        placement_idx + 1
+                                                    ) % len(placement_records)
+                                                    nbr_rec = placement_records.get(
+                                                        nbr_placement_idx
+                                                    )
+                                                    if nbr_rec and nbr_rec.get(
+                                                        "protein_asym_indices"
+                                                    ):
+                                                        nbr_asym = int(
+                                                            nbr_rec["protein_asym_indices"][0]
+                                                        )
+                                                        nbr_tokens = (
+                                                            asym_id[batch_idx] == nbr_asym
+                                                        ).nonzero(as_tuple=True)[0]
+                                                        if (
+                                                            len(nbr_tokens) > 0
+                                                            and "token_to_rep_atom" in feats
+                                                        ):
+                                                            tra = feats["token_to_rep_atom"]
+                                                            nbr_rep = (
+                                                                tra[batch_idx, nbr_tokens]
+                                                                if tra.dim() == 3
+                                                                else tra[nbr_tokens]
+                                                            )
+                                                            has_rep = nbr_rep.any(dim=-1)
+                                                            if has_rep.any():
+                                                                nbr_ca_idx = nbr_rep[
+                                                                    has_rep
+                                                                ].int().argmax(dim=-1)
+                                                                nbr_ca_pts = atom_coords_denoised[
+                                                                    batch_idx, nbr_ca_idx
+                                                                ]
+                                                                nbr_dists = torch.linalg.norm(
+                                                                    nbr_ca_pts - ca_coord,
+                                                                    dim=-1,
+                                                                )
+                                                                neighbor_ca_coord = nbr_ca_pts[
+                                                                    int(torch.argmin(nbr_dists).item())
+                                                                ]
+                                                        elif nbr_asym in original_protein_coords:
+                                                            nbr_atom_idx, _ = original_protein_coords[
+                                                                nbr_asym
+                                                            ]
+                                                            nbr_pts = atom_coords_denoised[
+                                                                batch_idx, nbr_atom_idx
+                                                            ]
+                                                            nbr_dists = torch.linalg.norm(
+                                                                nbr_pts - ca_coord, dim=-1
+                                                            )
+                                                            neighbor_ca_coord = nbr_pts[
+                                                                int(torch.argmin(nbr_dists).item())
+                                                            ]
+
                                                 r_kabsch_arg = (
                                                     R_kabsch
                                                     if topology != "linear_tape"
@@ -2034,19 +2097,7 @@ class AtomDiffusion(Module):
                                                         r_kabsch=r_kabsch_arg,
                                                         sidechain_vec=sidechain_vec,
                                                         direction_mode=anchor_dir,
-                                                    )
-                                                )
-                                                min_prot_dist = float(
-                                                    record.get(
-                                                        "min_protein_distance", 1.8
-                                                    )
-                                                )
-                                                target_lig_pos = (
-                                                    materials.resolve_protein_metal_clashes(
-                                                        target_lig_pos,
-                                                        protein_coords=protein_clash_coords,
-                                                        assembly_com=P_mean,
-                                                        min_distance=min_prot_dist,
+                                                        neighbor_ca_coords=neighbor_ca_coord,
                                                     )
                                                 )
                                                 lig_com = carried.mean(dim=0)
@@ -2074,10 +2125,115 @@ class AtomDiffusion(Module):
                                             carried + direction * ligand_inclusion_bias
                                         )
 
-                                    atom_coords_denoised[batch_idx, ligand_indices] = (
+                                    non_axial_items.append(
+                                        {
+                                            "ligand_indices": ligand_indices,
+                                            "original_ligand": original_ligand,
+                                            "carried": carried,
+                                            "placement_idx": placement_idx,
+                                            "template_idx": int(
+                                                record.get("ligand_template_index", 0)
+                                            ),
+                                            "instance_idx": int(
+                                                record.get("ligand_instance_index", 0)
+                                            ),
+                                            "min_prot_dist": float(
+                                                record.get("min_protein_distance", 1.8)
+                                            ),
+                                            "min_lig_dist": float(
+                                                record.get(
+                                                    "min_ligand_distance",
+                                                    record.get("min_distance", 3.5),
+                                                )
+                                            ),
+                                        }
+                                    )
+
+                                # Enforce C_k / D_k symmetry consensus across cyclic per-peptide
+                                # ligands sharing a template/instance slot so inverse folding sees
+                                # equivalent metal microenvironments across symmetric copies.
+                                if topology == "cyclic" and len(non_axial_items) >= 2:
+                                    grouped_non_axial: dict[tuple[int, int], list[int]] = {}
+                                    for idx_na, item in enumerate(non_axial_items):
+                                        g_key = (
+                                            item["template_idx"],
+                                            item["instance_idx"],
+                                        )
+                                        grouped_non_axial.setdefault(g_key, []).append(
+                                            idx_na
+                                        )
+                                    for group_indices in grouped_non_axial.values():
+                                        if len(group_indices) < 2:
+                                            continue
+                                        p_idxs = [
+                                            non_axial_items[idx_na]["placement_idx"]
+                                            for idx_na in group_indices
+                                        ]
+                                        if len(set(p_idxs)) != len(p_idxs):
+                                            continue
+                                        if any(
+                                            p_i < 0 or p_i >= ideal_coms.shape[0]
+                                            for p_i in p_idxs
+                                        ):
+                                            continue
+                                        sym_list = materials.symmetrize_cyclic_ligand_positions(
+                                            [
+                                                non_axial_items[idx_na]["carried"]
+                                                for idx_na in group_indices
+                                            ],
+                                            p_idxs,
+                                            ideal_coms,
+                                            ideal_rotations,
+                                            P_mean,
+                                            Q_mean,
+                                            R_kabsch,
+                                            is_antiparallel=is_anti,
+                                            asym_unit_size=asym_unit_size,
+                                        )
+                                        for idx_na, sym_coords in zip(
+                                            group_indices, sym_list
+                                        ):
+                                            non_axial_items[idx_na]["carried"] = sym_coords
+
+                                # Always resolve backbone-metal clashes for non-axial ligands
+                                for item in non_axial_items:
+                                    lig_com = item["carried"].mean(dim=0)
+                                    resolved_com = materials.resolve_protein_metal_clashes(
+                                        lig_com,
+                                        protein_coords=protein_clash_coords,
+                                        assembly_com=P_mean,
+                                        min_distance=item["min_prot_dist"],
+                                    )
+                                    item["carried"] = item["carried"] + (
+                                        resolved_com - lig_com
+                                    )
+
+                                # Enforce 3D minimum separation between distinct non-axial ligands
+                                if len(non_axial_items) > 1:
+                                    na_coms = torch.stack(
+                                        [
+                                            item["carried"].mean(dim=0)
+                                            for item in non_axial_items
+                                        ],
+                                        dim=0,
+                                    )
+                                    min_na_sep = max(
+                                        item["min_lig_dist"] for item in non_axial_items
+                                    )
+                                    sep_coms = materials.enforce_minimum_ligand_separation(
+                                        na_coms, min_distance=min_na_sep
+                                    )
+                                    for idx_na, item in enumerate(non_axial_items):
+                                        delta_com = sep_coms[idx_na] - na_coms[idx_na]
+                                        item["carried"] = item["carried"] + delta_com
+
+                                for item in non_axial_items:
+                                    atom_coords_denoised[
+                                        batch_idx, item["ligand_indices"]
+                                    ] = (
                                         1.0 - guidance_scale_ligand
-                                    ) * original_ligand + (
-                                        guidance_scale_ligand * carried
+                                    ) * item["original_ligand"] + (
+                                        guidance_scale_ligand * item["carried"]
                                     )
 
                 atom_coords_noisy = atom_coords_noisy.to(atom_coords_denoised)
