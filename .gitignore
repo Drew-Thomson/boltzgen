@@ -22,7 +22,8 @@ small_data
 outputs/
 workdir
 results
-notebooks/
+notebooks/*
+!notebooks/colab_material_screen.ipynb
 *.ckpt
 samples/
 workbench

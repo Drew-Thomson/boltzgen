@@ -357,6 +357,46 @@ def main():
         help="Specific pipeline steps to run (e.g. '--steps design' to generate backbone topologies without the full design pipeline)",
     )
     parser.add_argument(
+        "--reuse",
+        action="store_true",
+        default=False,
+        help="Reuse existing intermediate results across pipeline steps when resuming a run",
+    )
+    parser.add_argument(
+        "--cache",
+        type=str,
+        default=None,
+        help="Directory where Hugging Face model checkpoints and datasets are cached",
+    )
+    parser.add_argument(
+        "--budget",
+        type=int,
+        default=None,
+        help="Number of designs to select in the final diversity-optimized set",
+    )
+    parser.add_argument(
+        "--design_checkpoints",
+        "--design-checkpoints",
+        nargs="+",
+        default=None,
+        help="One or more design checkpoint paths or Hugging Face specs to pass to boltzgen run",
+    )
+    parser.add_argument(
+        "--num_workers",
+        "--num-workers",
+        type=int,
+        default=None,
+        help="Number of DataLoader worker processes forwarded to boltzgen run",
+    )
+    parser.add_argument(
+        "--use_kernels",
+        "--use-kernels",
+        type=str,
+        choices=["auto", "true", "false"],
+        default=None,
+        help="Whether to use cuEquivariance kernels ('auto', 'true', or 'false')",
+    )
+    parser.add_argument(
         "--piezo_screen",
         "--piezo-screen",
         action="store_true",
@@ -439,8 +479,10 @@ def main():
                     continue
                 if hasattr(args, target_dest):
                     action = action_map.get(target_dest)
-                    if target_dest == "steps" and isinstance(v, str):
+                    if target_dest in {"steps", "design_checkpoints"} and isinstance(v, str):
                         v = [v]
+                    elif target_dest in {"steps", "design_checkpoints"} and isinstance(v, list):
+                        v = [str(item) for item in v]
                     elif action and action.type is not None and v is not None:
                         try:
                             v = action.type(v)
@@ -860,6 +902,24 @@ def main():
             cmd.extend(["--traj_stride", str(args.traj_stride)])
         if getattr(args, "traj_align", None) is not None:
             cmd.extend(["--traj_align", str(args.traj_align)])
+
+        if getattr(args, "reuse", False):
+            cmd.append("--reuse")
+        if getattr(args, "cache", None) is not None:
+            cmd.extend(["--cache", str(args.cache)])
+        if getattr(args, "budget", None) is not None:
+            cmd.extend(["--budget", str(args.budget)])
+        if getattr(args, "design_checkpoints", None):
+            ckpts = (
+                [args.design_checkpoints]
+                if isinstance(args.design_checkpoints, str)
+                else [str(c) for c in args.design_checkpoints]
+            )
+            cmd.extend(["--design_checkpoints"] + ckpts)
+        if getattr(args, "num_workers", None) is not None:
+            cmd.extend(["--num_workers", str(args.num_workers)])
+        if getattr(args, "use_kernels", None) is not None:
+            cmd.extend(["--use_kernels", str(args.use_kernels)])
 
         for override in step_config_overrides:
             cmd.extend(["--config"] + override)

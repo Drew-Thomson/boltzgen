@@ -26,6 +26,40 @@ from boltzgen.utils.pipeline_progress_bar import PipelineProgressBar
 from boltzgen.model.models.boltz import Boltz
 
 
+_MIN_BF16_COMPUTE_CAP = 8
+
+
+def _resolve_trainer_kwargs(trainer: Optional[dict]) -> dict:
+    """Resolve PyTorch Lightning trainer kwargs for the active hardware.
+
+    Falls back from ``bf16`` precision to ``32-true`` on CUDA GPUs with compute
+    capability < 8.0 (such as Tesla T4 in Google Colab), where native BF16 is
+    unavailable and FP16 risks numerical overflow in triangle attention.
+
+    Parameters
+    ----------
+    trainer : Optional[dict]
+        Base trainer configuration dictionary.
+
+    Returns
+    -------
+    dict
+        Resolved trainer keyword arguments safe for the current device.
+
+    """
+    trainer_kwargs = dict(trainer) if trainer is not None else {}
+    precision = str(trainer_kwargs.get("precision", ""))
+    if precision.startswith("bf16") and torch.cuda.is_available():
+        major, minor = torch.cuda.get_device_capability()
+        if major < _MIN_BF16_COMPUTE_CAP:
+            print(
+                f"GPU compute capability {major}.{minor} (< 8.0) lacks native "
+                f"{precision}; falling back to 32-true precision."
+            )
+            trainer_kwargs["precision"] = "32-true"
+    return trainer_kwargs
+
+
 class Predict(Task):
     """A task to run model inference."""
 
@@ -175,6 +209,7 @@ class Predict(Task):
                 print(msg)
                 self.trainer["devices"] = devices
 
+        trainer_kwargs = _resolve_trainer_kwargs(self.trainer)
         self.lightning_trainer = Trainer(
             default_root_dir=self.output,
             strategy=strategy,
@@ -184,7 +219,7 @@ class Predict(Task):
                 if os.environ.get("BOLTZGEN_PIPELINE_STEP")
                 else []
             ),
-            **self.trainer,
+            **trainer_kwargs,
         )
         if run_prediction:
             # Run training

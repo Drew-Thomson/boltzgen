@@ -1220,7 +1220,10 @@ class BinderDesignPipeline:
             )
 
         # Handle use_kernels argument
-        device_capability = torch.cuda.get_device_capability()
+        cuda_available = torch.cuda.is_available()
+        device_capability = (
+            torch.cuda.get_device_capability() if cuda_available else (0, 0)
+        )
         use_kernels = None
         if args.use_kernels == "auto":
             use_kernels = device_capability[0] >= 8
@@ -1278,7 +1281,9 @@ class BinderDesignPipeline:
             )
 
         devices = (
-            args.devices if args.devices is not None else torch.cuda.device_count()
+            args.devices
+            if args.devices is not None
+            else (torch.cuda.device_count() if cuda_available else 1)
         )
         print(f"Using {devices} devices")
 
@@ -1645,7 +1650,8 @@ class BinderDesignPipeline:
                 PipelineStep(
                     name="filter_target_candidates",
                     config_path=args.config_dir / "filter_target_candidates.yaml",
-                    args=filter_candidate_args,
+                    args=filter_candidate_args
+                    + config_args_by_step["filter_target_candidates"],
                 )
             )
             self.steps.append(
@@ -1661,7 +1667,8 @@ class BinderDesignPipeline:
                         f"moldir={moldir}",
                         f"candidates_path={input_dir}/counter_screen_candidates.json",
                         "topology_params=" + json.dumps(topology_params),
-                    ],
+                    ]
+                    + config_args_by_step["prepare_counter_screens"],
                 )
             )
             self.steps.append(
@@ -1681,7 +1688,8 @@ class BinderDesignPipeline:
                         f"checkpoint={get_artifact_path(args, args.folding_checkpoint)}",
                         f"data.cfg.moldir={moldir}",
                         "keys_dict_out=[complex_plddt,protein_iptm,design_iptm,iptm,ptm,ligand_iptm,min_interaction_pae]",
-                    ],
+                    ]
+                    + config_args_by_step["counter_screen_folding"],
                 )
             )
             self.steps.append(
@@ -1691,7 +1699,8 @@ class BinderDesignPipeline:
                     args=[
                         f"design_dir={input_dir}",
                         f"counter_screen_dir={args.output / 'heteromer_counter_screens'}",
-                    ],
+                    ]
+                    + config_args_by_step["merge_counter_screen_metrics"],
                 )
             )
 
@@ -1723,7 +1732,8 @@ class BinderDesignPipeline:
                 PipelineStep(
                     name="filter_target_candidates",
                     config_path=args.config_dir / "filter_target_candidates.yaml",
-                    args=filter_candidate_args,
+                    args=filter_candidate_args
+                    + config_args_by_step["filter_target_candidates"],
                 )
             )
             self.steps.append(
@@ -1735,7 +1745,8 @@ class BinderDesignPipeline:
                         f"output_dir={counter_screen_dir}",
                         f"moldir={moldir}",
                         f"candidates_path={input_dir}/counter_screen_candidates.json",
-                    ],
+                    ]
+                    + config_args_by_step["prepare_counter_screens"],
                 )
             )
             self.steps.append(
@@ -1755,7 +1766,8 @@ class BinderDesignPipeline:
                         f"checkpoint={get_artifact_path(args, args.folding_checkpoint)}",
                         f"data.cfg.moldir={moldir}",
                         "keys_dict_out=[complex_plddt,protein_iptm,design_iptm,iptm,ptm,ligand_iptm,min_interaction_pae]",
-                    ],
+                    ]
+                    + config_args_by_step["counter_screen_folding"],
                 )
             )
             self.steps.append(
@@ -1765,7 +1777,8 @@ class BinderDesignPipeline:
                     args=[
                         f"design_dir={input_dir}",
                         f"counter_screen_dir={counter_screen_dir}",
-                    ],
+                    ]
+                    + config_args_by_step["merge_counter_screen_metrics"],
                 )
             )
         elif getattr(args, "piezo_counter_screen", False):
@@ -1786,7 +1799,8 @@ class BinderDesignPipeline:
                         f"moldir={moldir}",
                         f"mode={getattr(args, 'piezo_mode', 'rigid_centroid')}",
                         f"poisson_ratio={getattr(args, 'piezo_poisson_ratio', 0.35)}",
-                    ],
+                    ]
+                    + config_args_by_step["prepare_counter_screens"],
                 )
             )
             self.steps.append(
@@ -1806,7 +1820,8 @@ class BinderDesignPipeline:
                         f"checkpoint={get_artifact_path(args, args.folding_checkpoint)}",
                         f"data.cfg.moldir={moldir}",
                         "keys_dict_out=[complex_plddt,protein_iptm,design_iptm,iptm,ptm,ligand_iptm,min_interaction_pae]",
-                    ],
+                    ]
+                    + config_args_by_step["counter_screen_folding"],
                 )
             )
             self.steps.append(
@@ -1816,7 +1831,8 @@ class BinderDesignPipeline:
                     args=[
                         f"design_dir={input_dir}",
                         f"counter_screen_dir={counter_screen_dir}",
-                    ],
+                    ]
+                    + config_args_by_step["merge_counter_screen_metrics"],
                 )
             )
 
